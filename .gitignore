@@ -1,0 +1,50 @@
+# --- secrets -----------------------------------------------------------------
+# .env holds real credentials and is never committed. Copy .env.example instead.
+.env
+.env.*
+!.env.example
+
+# --- dependencies ------------------------------------------------------------
+# PHP (Composer)
+/api/vendor/
+vendor/
+
+# JS (npm/pnpm)
+/web/node_modules/
+node_modules/
+/web/dist/
+.vite/
+
+# Python
+/ai/.venv/
+.venv/
+__pycache__/
+*.py[cod]
+
+# --- runtime data ------------------------------------------------------------
+# Uploaded/normalized audio (AUDIO_DIR). Lives on the `audio` Docker volume in
+# normal operation; this covers a bare-metal run that writes into the repo.
+/data/
+/storage/
+*.webm
+*.ogg
+*.m4a
+*.wav
+*.mp3
+
+# Whisper / HuggingFace model weights (the `whisper-cache` volume).
+# ~148 MB for faster-whisper base — never in git.
+/.cache/
+/models/
+*.bin
+*.safetensors
+
+# Postgres data (the `pgdata` volume)
+/pgdata/
+
+# --- local noise -------------------------------------------------------------
+.DS_Store
+*.log
+.idea/
+.vscode/
+*.swp
