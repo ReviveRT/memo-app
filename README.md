@@ -43,7 +43,10 @@ reference and contains no real credentials.
 | `POSTGRES_USER` | `memo` | Postgres role created on first boot |
 | `POSTGRES_PASSWORD` | `memo` | Password for that role (local dev only) |
 | `POSTGRES_DB` | `memo` | Database name |
-| `DATABASE_URL` | `postgresql://memo:memo@db:5432/memo` | Connection string used by the API and worker |
+| `DATABASE_URL` | `postgresql://memo:memo@db:5432/memo` | Connection string used by the API and worker. Overriding `POSTGRES_PASSWORD` alone is enough — this default is composed from the three above |
+| `POSTGRES_PORT` | `5432` | Host port for Postgres. Change it if something else on your machine owns 5432 |
+| `API_PORT` | `8080` | Host port for the API |
+| `WEB_PORT` | `5173` | Host port for the frontend |
 | `STT_PROVIDER` | `local` | Primary transcription provider: `openai` \| `local` \| `fake` |
 | `STT_FALLBACK` | `local` | Provider used when the primary errors or its key is absent |
 | `STT_MODEL` | `base` | Model for the chosen provider — the main cost lever on the hosted path |
