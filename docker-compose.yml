@@ -1,0 +1,174 @@
+# One command, no manual steps: `docker compose up` on a clean checkout.
+#
+# Two things in here are load-bearing and were both verified by reproducing the
+# failure first:
+#
+#   1. Startup ordering is gated on health, not on process start. Plain
+#      `depends_on` only waits for the container to exist, which lets `migrate`
+#      race Postgres initdb (migrate exits non-zero, `api` never starts).
+#      Fixed by the pg_isready healthcheck on `db` + `condition: service_healthy`,
+#      and by `condition: service_completed_successfully` on `migrate` for the
+#      two services that need the schema to exist.
+#
+#   2. Every value has a literal dev default inline. Compose interpolates from
+#      `./.env` only — it never reads `.env.example` — so on a checkout with no
+#      `.env` an unguarded ${POSTGRES_PASSWORD} is empty and Postgres exits 1
+#      with "Database is uninitialized and superuser password is not specified".
+#      Always `${VAR:-default}`, never `${VAR-default}`: only the colon form also
+#      substitutes when the variable is set but empty, which is exactly what a
+#      commented-out or blank line in someone's `.env` produces.
+#
+# Real API keys stay optional. The keyless path is the default path.
+
+name: memo-app
+
+# Interpolated per use site, not at parse time, so an override in .env still wins.
+x-database-url: &database-url ${DATABASE_URL:-postgresql://${POSTGRES_USER:-memo}:${POSTGRES_PASSWORD:-memo}@db:5432/${POSTGRES_DB:-memo}}
+x-audio-dir: &audio-dir ${AUDIO_DIR:-/data/audio}
+
+services:
+  # --- Postgres --------------------------------------------------------------
+  # Pinned minor-series on purpose: an unpinned tag would move the on-disk
+  # format under the pgdata volume between rebuilds.
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-memo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-memo}
+      POSTGRES_DB: ${POSTGRES_DB:-memo}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      # Host-side only, for psql/GUI poking. Nothing in the stack uses it: the
+      # other services reach Postgres as `db:5432` over the compose network.
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      # -h 127.0.0.1 is the whole point. During initdb the entrypoint runs a
+      # temporary server with listen_addresses='' — reachable over the unix
+      # socket but not TCP. A socket-based pg_isready therefore reports healthy
+      # mid-initialization and re-opens the race this file exists to close.
+      test: ["CMD-SHELL", "pg_isready -q -h 127.0.0.1 -U ${POSTGRES_USER:-memo} -d ${POSTGRES_DB:-memo}"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+
+  # --- Schema ----------------------------------------------------------------
+  # One-shot. Runs to completion, then `api` and `ai-worker` are released.
+  # Uses the postgres image purely for its psql client — no build, no extra pull.
+  # Re-running it on a second `docker compose up` must be a no-op; that
+  # idempotence lives in the runner's schema_migrations ledger (MEMO-03), not here.
+  migrate:
+    image: postgres:16-alpine
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: *database-url
+    volumes:
+      - ./db:/db:ro
+    # Invoked through sh so the script's exec bit on the host is irrelevant.
+    entrypoint: ["sh", "/db/migrate.sh"]
+    restart: "no"
+
+  # --- PHP API ---------------------------------------------------------------
+  # The only public surface. No AI dependencies in this container.
+  api:
+    build:
+      context: ./api
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: *database-url
+      AUDIO_DIR: *audio-dir
+      MAX_AUDIO_BYTES: ${MAX_AUDIO_BYTES:-12582912}
+      # FrankenPHP listens on :80 by default; the Vite proxy target is api:8080.
+      SERVER_NAME: ":8080"
+    volumes:
+      # Target repeats the default literally rather than using the anchor: a
+      # YAML alias cannot be spliced into part of a scalar, and the mount point
+      # has to move with AUDIO_DIR or the env var would point at nothing.
+      - "audio:${AUDIO_DIR:-/data/audio}"
+      - ./api:/app
+      # Anonymous volume so the bind mount above does not shadow the vendor tree
+      # composer installed into the image.
+      - /app/vendor
+    ports:
+      - "${API_PORT:-8080}:8080"
+    healthcheck:
+      # /api/health reports database connectivity (MEMO-05). `web` is gated on
+      # this, so a healthy stack means the proxy target is actually answering.
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/health > /dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  # --- Frontend --------------------------------------------------------------
+  web:
+    build:
+      context: ./web
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # Service name, not localhost: localhost inside this container is the Vite
+      # container itself. Same-origin proxying is the entire CORS answer.
+      API_PROXY_TARGET: http://api:8080
+    volumes:
+      - ./web:/app
+      - /app/node_modules
+    ports:
+      # Open http://localhost:5173, not a LAN IP — getUserMedia needs a secure
+      # context and fails silently outside one.
+      - "${WEB_PORT:-5173}:5173"
+    restart: unless-stopped
+
+  # --- Python worker ---------------------------------------------------------
+  # Transcription and enrichment. Two replicas so a 30-second text memo does not
+  # queue behind ten minutes of audio (MEMO-08). No container_name and no host
+  # port mapping here — either one is incompatible with replicas > 1.
+  ai-worker:
+    build:
+      context: ./ai
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: *database-url
+      AUDIO_DIR: *audio-dir
+      MAX_AUDIO_SECONDS: ${MAX_AUDIO_SECONDS:-600}
+      STT_PROVIDER: ${STT_PROVIDER:-local}
+      STT_FALLBACK: ${STT_FALLBACK:-local}
+      STT_MODEL: ${STT_MODEL:-base}
+      ENRICH_MODEL: ${ENRICH_MODEL:-claude-opus-5}
+      # Deliberately defaulted to empty rather than left unset: the container
+      # sees a defined-but-blank key and takes the local path.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Weights are baked into the image (MEMO-15); this volume only keeps a
+      # rebuild from refetching anything that was not baked.
+      HF_HOME: /cache/huggingface
+    volumes:
+      - "audio:${AUDIO_DIR:-/data/audio}"
+      - whisper-cache:/cache
+    deploy:
+      replicas: 2
+    restart: unless-stopped
+
+  # A sixth service, ai-api, joins this file only if "Ask my memos" lands (MEMO-24).
+  # It shares the ai image with a different entrypoint.
+
+volumes:
+  pgdata:
+  # Written by the PHP container, read and deleted by the Python one. Both must
+  # agree on uid/gid or this produces intermittent EACCES (MEMO-12).
+  audio:
+  whisper-cache:
