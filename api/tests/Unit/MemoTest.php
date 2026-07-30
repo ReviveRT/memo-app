@@ -71,10 +71,13 @@ final class MemoTest extends TestCase
 
     public function test_an_unknown_duration_stays_null_and_is_not_reported_as_zero(): void
     {
+        // The null check, not the cast, is the part that matters: (int) null is 0, and
+        // a text memo reported as 0 would render as a 0:00 clip rather than as a memo
+        // with no audio at all.
         $this->assertNull(Memo::fromRow($this->row(['duration_ms' => null]))->durationMs);
 
-        // The cast is what a text memo needs to be distinguishable from a recording
-        // of no length: (int) null is 0, and 0 would render as a 0:00 clip.
+        // A genuine zero still has to survive as zero, which is what stops the null
+        // check being written as a falsy test.
         $this->assertSame(0, Memo::fromRow($this->row(['duration_ms' => 0]))->durationMs);
     }
 

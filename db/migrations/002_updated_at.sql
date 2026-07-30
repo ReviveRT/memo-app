@@ -27,13 +27,13 @@
 -- column and is wrong.
 --
 -- What this column is NOT good for, so nobody builds on it by mistake: it is not
--- a delta cursor. MEMO-18 needs `GET /api/memos?since=` to be impossible to get
--- wrong and settles it there, but the reason belongs next to the column too —
--- now() is transaction-start time, so a row whose write transaction started
--- before a poll read and committed after it carries an updated_at the poller has
--- already passed, and the row is silently skipped. A trigger makes the column
--- truthful about "when was this row last written"; it does not make it monotonic,
--- and a delta feed needs a sequence, not a clock.
+-- a delta cursor. MEMO-18 rules a `GET /api/memos?since=` out on the frontend
+-- side and polls the whole visible page instead, but the reason belongs next to
+-- the column too — now() is transaction-start time, so a row whose write
+-- transaction started before a poll read and committed after it carries an
+-- updated_at the poller has already passed, and the row is silently skipped. A
+-- trigger makes the column truthful about "when was this row last written"; it
+-- does not make it monotonic, and a delta feed needs a sequence, not a clock.
 --
 -- Rejected: `WHEN (OLD.* IS DISTINCT FROM NEW.*)` on the trigger, the usual trick
 -- for not bumping the timestamp on a no-op UPDATE. It is actively wrong on this

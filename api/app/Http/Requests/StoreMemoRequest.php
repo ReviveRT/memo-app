@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Http\Requests;
 
+use Closure;
 use Illuminate\Foundation\Http\FormRequest;
 
 /**
@@ -32,8 +33,10 @@ final class StoreMemoRequest extends FormRequest
      * the column will take anything -- but the transcript is also what MEMO-21 sends
      * to Claude for a title, a summary and tags. An uncapped field is therefore an
      * uncapped prompt on a paid API, reachable by an unauthenticated POST. 10,000
-     * characters is roughly 2,500 tokens: far more than anyone types into a memo box
-     * and small enough that a scripted flood is a nuisance rather than a bill.
+     * characters is on the order of 2,500 tokens of English -- more in a script that
+     * tokenises less efficiently, since the cap counts characters rather than bytes
+     * or tokens -- which is far more than anyone types into a memo box and still
+     * bounded enough that a scripted flood is a nuisance rather than a bill.
      */
     public const MAX_TEXT_LENGTH = 10_000;
 
@@ -68,8 +71,44 @@ final class StoreMemoRequest extends FormRequest
             // characters with mb_strlen for a string under a `string` rule, so
             // max: is multibyte-safe and an emoji costs one character rather than
             // four.
-            'text' => ['required', 'string', 'min:1', 'max:'.self::MAX_TEXT_LENGTH],
+            'text' => [
+                'required',
+                'string',
+                'min:1',
+                'max:'.self::MAX_TEXT_LENGTH,
+                self::rejectNullBytes(),
+            ],
         ];
+    }
+
+    /**
+     * A NUL anywhere in the text has to be refused here, because nothing downstream
+     * will refuse it for us -- it is silently destructive rather than fatal.
+     *
+     * Postgres itself does reject a null character in `text` (SQLSTATE 54000, "null
+     * character not permitted"), which is what made this look safe. It never gets the
+     * chance: libpq passes bound parameters as C strings, so the value is truncated at
+     * the first NUL before the server sees it. Verified twice over -- through PDO,
+     * `SELECT length(?::text)` bound with "a\0b" returns 1, and through this endpoint,
+     * a three-character POST answered 201 with a one-character transcript. The user's
+     * memo is silently thrown away and the response says it was stored.
+     *
+     * The edges are already covered by the trim in prepareForValidation, since PHP's
+     * default trim charlist includes "\0" -- which is precisely why the interior case
+     * is the one that survives to reach the driver, and why this cannot be left to
+     * the trim.
+     *
+     * Refused rather than stripped: the same call this repeats in
+     * LocalAudioStorage::path(), and for the same reason. Quietly editing a memo is
+     * not better than declining to store it.
+     */
+    private static function rejectNullBytes(): Closure
+    {
+        return static function (string $attribute, mixed $value, Closure $fail): void {
+            if (is_string($value) && str_contains($value, "\0")) {
+                $fail('The :attribute field must not contain null bytes.');
+            }
+        };
     }
 
     /** The validated text, which is exactly what lands in `transcript`. */

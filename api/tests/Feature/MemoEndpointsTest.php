@@ -87,6 +87,27 @@ final class MemoEndpointsTest extends TestCase
         $this->assertSame([], $this->repository->inserted);
     }
 
+    public function test_a_null_byte_inside_the_text_is_refused_rather_than_silently_truncated(): void
+    {
+        // The bug this pins: libpq passes bound parameters as C strings, so without
+        // this rule the value is cut at the first NUL before Postgres -- which would
+        // have rejected it -- ever sees it. Confirmed against a live database before
+        // the rule existed: this exact body answered 201 with a transcript of "a".
+        $this->postJson('/api/memos', ['text' => "a\0b"])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('text');
+
+        $this->assertSame([], $this->repository->inserted);
+
+        // A NUL at either edge was already handled, and by something incidental --
+        // PHP's default trim charlist contains "\0", so prepareForValidation strips
+        // it and `required` refuses what is left. Asserted so that a later change to
+        // that trim cannot quietly reopen the interior case's smaller cousin.
+        $this->postJson('/api/memos', ['text' => "\0"])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('text');
+    }
+
     public function test_surrounding_whitespace_is_trimmed_from_the_stored_transcript(): void
     {
         $this->postJson('/api/memos', ['text' => '   Milk, eggs, bread   '])

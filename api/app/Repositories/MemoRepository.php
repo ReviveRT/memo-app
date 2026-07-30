@@ -124,9 +124,18 @@ class MemoRepository
      * ORDER BY created_at DESC is served by memos_created_idx, declared DESC in
      * 001_init.sql for exactly this query -- confirmed as `Index Scan using
      * memos_created_idx` on a 5,000-row table, and see COLUMNS for the aliasing that
-     * turns it back into a Seq Scan. No tiebreaker is added: it would cost a sort
-     * node on top of the index scan, and ids are UUIDv7, so id order and created_at
-     * order already agree.
+     * turns it back into a Seq Scan.
+     *
+     * No tiebreaker, and not because UUIDv7 ids happen to agree with created_at --
+     * that agreement does nothing for a tie, since without id in the ORDER BY
+     * Postgres does not order tied rows by it at all. It is that a tie needs two
+     * memos with the same created_at, and created_at defaults to now(), which is
+     * transaction-start time: two rows can only share one if they were inserted in
+     * the same transaction. This API inserts exactly one row per request. Confirmed
+     * from the other side too -- 5,010 rows written one-per-statement had 5,008
+     * distinct timestamps, the two duplicates being a fixture that did insert several
+     * in one transaction. Adding `, id DESC` for the unreachable case is not free
+     * either: it plans an Incremental Sort on top of the index scan.
      *
      * $limit is bound rather than interpolated. Laravel binds a PHP int as
      * PDO::PARAM_INT, which is what a parameterised LIMIT needs; the value reaching
