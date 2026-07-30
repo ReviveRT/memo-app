@@ -93,8 +93,9 @@ CREATE TABLE memos (
     -- ON UPDATE CURRENT_TIMESTAMP, and verified here: an UPDATE leaves this at
     -- its insert value. Two runtimes write this table, so it needs either an
     -- explicit `updated_at = now()` on every UPDATE or a BEFORE UPDATE trigger.
-    -- MEMO-06 owns that choice and this migration installs no trigger, so until
-    -- then the column is insert-only and must not be trusted as a change clock.
+    -- MEMO-06 owned that choice and chose the trigger, which this migration does
+    -- not install: it arrives in 002_updated_at.sql, with the reasoning in
+    -- NOTES.md. Nothing that writes this table needs to name this column.
     updated_at    timestamptz NOT NULL DEFAULT now(),
 
     -- STORED, so it is computed on write and needs no trigger and no second
