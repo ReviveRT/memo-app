@@ -75,6 +75,113 @@ COPY . .
 # would freeze the build-time defaults into the image and ignore compose entirely.
 RUN composer dump-autoload --no-dev --optimize
 
+# --- The shared-volume uid/gid contract (MEMO-12) ----------------------------
+#
+# The `audio` volume is written by this container and read *and unlinked* by the
+# Python worker. unlink(2) checks write permission on the containing directory,
+# not on the file -- so a fresh named volume left at Docker's default root:root
+# 0755 gives the worker EACCES on delete while read keeps working. Reproduced
+# before this block existed: a non-root worker `cat`s the file fine and then gets
+# "rm: cannot remove '/data/audio/a.webm': Permission denied".
+#
+# The decision, made once: both containers on this volume run as uid 10001 /
+# gid 10001, named `memo`. 10001 is clear of the distro system range and of the
+# 1000 a host user would occupy on a Linux checkout. docker-compose.yml repeats
+# the two numbers in one anchor for both services -- deliberately mirrored rather
+# than derived, the same way config/memo.php mirrors its defaults, because this
+# image also has to be right under a bare `docker run`. NOTES.md records why.
+#
+# The premise in the ticket does not hold for this image and was worth checking
+# before fixing: `dunglas/frankenphp:1-php8.3` runs as **root**, not www-data, and
+# so does `python:3.12-slim`. Both sides therefore agreed by accident, with nothing
+# recording it. A `USER` line added to the worker would have broken that quietly
+# and only on delete; one added here would have broken it loudly, since the API
+# could not write at all. The quiet half is the one worth pinning.
+#
+# Args rather than literals so this image can be rebased without editing the body,
+# but they are not independent knobs: the uid and gid have to match the
+# x-audio-user anchor in docker-compose.yml, and AUDIO_DIR has to match the path
+# compose mounts the volume at or the seeding below prepares a directory nothing
+# ever mounts. Changing either means editing both files; .env.example says so at
+# the variable.
+ARG APP_UID=10001
+ARG APP_GID=10001
+ARG AUDIO_DIR=/data/audio
+
+# Four things, and only the first is obvious:
+#
+#  1. ${AUDIO_DIR} is pre-created *in the image* so Docker seeds the named volume
+#     from it -- it copies the mount point's uid, gid and mode out of the image.
+#     Verified: an `audio` volume comes up drwxrwsr-x memo memo instead of the
+#     drwxr-xr-x root root Docker would otherwise leave.
+#
+#     The condition is that the volume is **empty**, which is not the same as new:
+#     a volume left behind by a pre-MEMO-12 build is re-seeded on the next start
+#     and heals itself. One that already holds blobs does not, and there
+#     `docker compose down -v` is the only reset. NOTES.md tabulates all four
+#     cases; they were checked, in both container orders, not reasoned about.
+#
+#     2775 rather than 0775: the setgid bit makes every file and subdirectory
+#     either container creates inherit the `memo` group, so a worker running under
+#     a different uid but with `memo` as a supplementary group can still unlink.
+#     The group-write bit is the part that was missing and the part that matters --
+#     0755 already grants the read and traverse that a worker needs, which is
+#     exactly why this failed on delete alone and looked healthy from the outside.
+#
+#  2. Caddy's own state. XDG_DATA_HOME=/data and XDG_CONFIG_HOME=/config in this
+#     image, and Caddy provisions a local CA on startup even with a port-only
+#     SERVER_NAME and no TLS in play. Without this chown the non-root server exits
+#     before it ever listens: "loading pki app module: provisioning CA 'local':
+#     generating root: saving root certificate: mkdir /data/caddy/pki: permission
+#     denied". Both directories already exist in the base image and are empty.
+#
+#     Note that /data is also the parent of the audio mount point. That is the
+#     base image's choice of XDG_DATA_HOME, not ours; the volume at /data/audio
+#     and Caddy's /data/caddy do not overlap.
+#
+#  3. composer ran as root above and `package:discover` wrote
+#     bootstrap/cache/{packages,services}.php as root. Both are read on every
+#     request and rewritten whenever bootstrap/providers.php changes -- and that
+#     file is inside the ./api bind mount, so it can change without a rebuild.
+#     Left root-owned, adding a provider turns every request into a 500 reading
+#     "The bootstrap/cache directory must be present and writable". This one is
+#     load-bearing under compose: bootstrap/cache is an anonymous volume, so it
+#     carries the ownership set here rather than the host's.
+#
+#     storage/ is chowned for the bare `docker run` case only, and is included for
+#     that reason rather than because compose needs it -- under compose the
+#     ./api bind mount covers that path and the host decides who owns it. Nothing
+#     in this API writes there today (LOG_CHANNEL is stderr, no sessions, no file
+#     cache, no compiled views), which is why the difference has no symptom yet.
+#
+#  4. HOME, plus composer's idea of it. The base image points HOME at /root, which
+#     uid 10001 cannot read, and compose bind-mounts ./api precisely so people work
+#     inside this container. Composer does not take its home from HOME on Linux
+#     though -- it reads XDG_CONFIG_HOME, which this image sets to /config, and the
+#     build-time `composer install` above already created /config/composer as root.
+#     Without the chown, `docker compose exec api composer …` fails on "touch():
+#     Unable to create file /config/composer/config.json because Permission
+#     denied". Observed, hence both paths here rather than just the tidy one.
+#
+# Not `--system`: Debian's SYS_UID_MAX is 999, so `useradd -r -u 10001` creates the
+# account correctly and then warns about it on every single build. A regular
+# account with an explicit uid, no password and a nologin shell is the same thing
+# without the noise.
+RUN groupadd --gid ${APP_GID} memo \
+    && useradd --uid ${APP_UID} --gid ${APP_GID} --home-dir /home/memo \
+        --shell /usr/sbin/nologin memo \
+    && mkdir -p ${AUDIO_DIR} /home/memo \
+    && chown ${APP_UID}:${APP_GID} ${AUDIO_DIR} /home/memo \
+    && chmod 2775 ${AUDIO_DIR} \
+    && chown -R ${APP_UID}:${APP_GID} /data/caddy /config/caddy /config/composer \
+    && chown -R ${APP_UID}:${APP_GID} /app/storage /app/bootstrap/cache
+
+ENV HOME=/home/memo
+
+# Everything above this line ran as root on purpose: /app/vendor stays root-owned
+# and read-only to the running application, which is a property worth keeping.
+USER memo
+
 # libpq's documented default for connect_timeout, set here because Laravel's
 # PostgresConnector builds the DSN itself and has no connect_timeout key, and
 # pdo_pgsql ignores PDO::ATTR_TIMEOUT.

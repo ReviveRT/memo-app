@@ -58,7 +58,7 @@ reference and contains no real credentials.
 | `ENRICH_MODEL` | `claude-opus-5` | Claude model for title/summary/tags/category |
 | `MAX_AUDIO_BYTES` | `12582912` | Upload byte cap enforced at the API edge (12 MiB) |
 | `MAX_AUDIO_SECONDS` | `600` | Duration cap enforced in the worker after normalization |
-| `AUDIO_DIR` | `/data/audio` | Audio path inside the containers, on the shared `audio` volume |
+| `AUDIO_DIR` | `/data/audio` | Audio path inside the containers, on the shared `audio` volume. Changing it needs a rebuild with a matching `--build-arg AUDIO_DIR` — see the note in `.env.example` |
 
 ### Using the hosted providers
 

@@ -17,7 +17,17 @@ final class LocalAudioStorage implements AudioStorage
     /** Group-writable: the API writes these files and the worker deletes them (MEMO-12). */
     private const FILE_MODE = 0664;
 
-    private const DIRECTORY_MODE = 0775;
+    /**
+     * Group-writable, and setgid.
+     *
+     * Group-writable because unlink(2) checks the *directory*, not the file: the
+     * worker deletes what this class writes, and 0664 on the blob buys nothing if
+     * the directory holding it is 0755. Setgid because that is what keeps the group
+     * correct all the way down -- Linux inherits it onto every new subdirectory, so a
+     * container running as a different uid with `memo` as a supplementary group
+     * still lands its files in the shared group.
+     */
+    private const DIRECTORY_MODE = 02775;
 
     private readonly string $root;
 
@@ -179,6 +189,49 @@ final class LocalAudioStorage implements AudioStorage
 
         if (! @mkdir($directory, self::DIRECTORY_MODE, true) && ! is_dir($directory)) {
             throw new StorageException("Cannot create directory {$directory}.");
+        }
+
+        // mkdir()'s mode argument is masked by the process umask -- 02775 under the
+        // default 022 lands as 0755 -- and Linux ignores the setgid bit there
+        // outright, inheriting it from the parent instead. So the mode above is a
+        // request, not a result, and this loop is what makes DIRECTORY_MODE true.
+        //
+        // Verified on a fresh volume before it existed: /data/audio arrived 2775
+        // from the image, and every directory the first upload created under it came
+        // out drwxr-sr-x. Group-readable, not group-writable -- so a worker sharing
+        // only the `memo` group could read every blob and unlink none of them. That
+        // is MEMO-12's EACCES again, one level below where the volume was fixed.
+        //
+        // Built downwards from the root, one key segment at a time, and that shape
+        // is load-bearing rather than stylistic. The first version of this walked
+        // *upwards* with dirname() and stopped once the path no longer started with
+        // the root -- which with AUDIO_DIR=/ is never, because the constructor's
+        // rtrim turns "/" into "" and every absolute path starts with "". That is an
+        // infinite loop inside a request handler, chmod'ing / on its first pass.
+        // Concatenating from the root instead cannot leave the root, cannot reach
+        // the root itself, and is bounded by the number of segments in the key.
+        //
+        // The root is excluded on purpose: it is the volume mount point, and its
+        // mode is seeded from the image at volume-creation time (api/Dockerfile) and
+        // belongs to whoever created the volume, not to this write. chmod is
+        // idempotent, which is also what makes this safe in the thread that just
+        // lost the mkdir race above.
+        if (! str_starts_with($directory, "{$this->root}/")) {
+            return;
+        }
+
+        $relative = trim(substr($directory, strlen($this->root)), '/');
+
+        if ($relative === '') {
+            return;
+        }
+
+        $path = $this->root;
+
+        foreach (explode('/', $relative) as $segment) {
+            $path .= "/{$segment}";
+
+            @chmod($path, self::DIRECTORY_MODE);
         }
     }
 

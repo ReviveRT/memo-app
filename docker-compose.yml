@@ -26,6 +26,21 @@ name: memo-app
 x-database-url: &database-url ${DATABASE_URL:-postgresql://${POSTGRES_USER:-memo}:${POSTGRES_PASSWORD:-memo}@db:5432/${POSTGRES_DB:-memo}}
 x-audio-dir: &audio-dir ${AUDIO_DIR:-/data/audio}
 
+# Every container that touches the `audio` volume runs as this uid:gid (MEMO-12).
+# One anchor, two services, because the volume is shared and unlink(2) checks the
+# directory rather than the file: a worker on a different non-root uid can read
+# every blob and delete none of them.
+#
+# Not overridable from .env on purpose. Both numbers are also build args in
+# api/Dockerfile -- which creates the matching `memo` user and seeds the volume's
+# mode from the image -- so a variable here would let the two drift apart, and the
+# symptom of that is an EACCES on delete rather than anything that looks like a
+# configuration error. Changing it means editing both files and rebuilding.
+#
+# `user:` overrides the image's own USER, so this also holds the ai image to the
+# contract before its Dockerfile exists (MEMO-08).
+x-audio-user: &audio-user "10001:10001"
+
 services:
   # --- Postgres --------------------------------------------------------------
   # Pinned minor-series on purpose: an unpinned tag would move the on-disk
@@ -77,6 +92,18 @@ services:
   api:
     build:
       context: ./api
+    # Redundant with the image's own USER, and kept anyway: it puts both halves of
+    # the shared-volume contract on one screen, and an api image that ships without
+    # a USER line -- a bad rebase, a revert -- still gets held to it here rather
+    # than quietly filling the volume with root-owned blobs the worker cannot
+    # delete.
+    #
+    # What it does not do is rescue an image built before MEMO-12. Checked, rather
+    # than assumed: forcing uid 10001 onto one of those exits at boot with "mkdir
+    # /data/caddy/pki: permission denied", because the chowns that make non-root
+    # work live in the image. That is the right failure -- immediate and in the logs
+    # -- but it is a rebuild, not a fallback.
+    user: *audio-user
     depends_on:
       db:
         condition: service_healthy
@@ -154,6 +181,25 @@ services:
   ai-worker:
     build:
       context: ./ai
+    # The other half of the audio contract (MEMO-12). This line is what makes it
+    # true today, since ai/Dockerfile does not exist until MEMO-08 -- and it keeps
+    # being what makes it true if that Dockerfile ships without a USER of its own.
+    #
+    # Two things MEMO-08 owes this, both learned from doing it to api/Dockerfile:
+    #
+    #   * create a `memo` user at 10001:10001 in the image, so the numbers below
+    #     resolve to a name and a bare `docker run` behaves the same way;
+    #   * pre-create /cache (HF_HOME below lives under it) owned by that user.
+    #     An empty named volume inherits the mount point's owner from the image, so
+    #     without it `whisper-cache` comes up root-owned and the non-root worker
+    #     cannot write a model. That failure is at least loud, unlike this one.
+    #
+    # And one thing it must NOT do: create AUDIO_DIR in the ai image. An image
+    # without that path leaves an already-seeded volume alone, which is why the api
+    # image alone can own the mode -- but one that creates it under a different
+    # owner would win the seed whenever it starts first, and these two services
+    # start concurrently. Verified in both orders.
+    user: *audio-user
     depends_on:
       db:
         condition: service_healthy
@@ -186,7 +232,16 @@ services:
 
 volumes:
   pgdata:
-  # Written by the PHP container, read and deleted by the Python one. Both must
-  # agree on uid/gid or this produces intermittent EACCES (MEMO-12).
+  # Written by the PHP container, read and deleted by the Python one. Both agree on
+  # uid/gid via x-audio-user above, and the directory arrives group-writable because
+  # api/Dockerfile pre-creates it at 2775 and Docker copies an empty volume's mount
+  # point -- owner, group and mode -- out of the image (MEMO-12).
+  #
+  # "Empty" is the load-bearing word, and it is not the same as "new": Docker
+  # re-applies the image's owner and mode on any start where the volume is still
+  # empty, so a volume left behind by a pre-MEMO-12 build heals itself on the next
+  # `up`. A volume that already holds blobs from that build does not -- it stays
+  # root:root 0755 and every upload fails. `docker compose down -v` is the reset.
+  # NOTES.md has the four cases.
   audio:
   whisper-cache:
