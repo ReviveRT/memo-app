@@ -1,0 +1,30 @@
+{
+    "name": "memo-app/api",
+    "description": "Memo App HTTP API - Slim 4 on FrankenPHP. The only public surface; no AI dependencies.",
+    "type": "project",
+    "license": "proprietary",
+    "require": {
+        "php": ">=8.3",
+        "ext-json": "*",
+        "ext-pdo": "*",
+        "ext-pdo_pgsql": "*",
+        "php-di/php-di": "^7.0",
+        "slim/psr7": "^1.6",
+        "slim/slim": "^4.12"
+    },
+    "autoload": {
+        "psr-4": {
+            "Memo\\": "src/"
+        }
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "platform": {
+            "ext-pdo_pgsql": "8.3.0",
+            "php": "8.3.0"
+        },
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

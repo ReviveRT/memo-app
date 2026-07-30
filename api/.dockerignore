@@ -1,0 +1,11 @@
+# The image installs its own vendor tree. Copying the host's would overwrite a
+# --no-dev install with one that may include dev packages, and may have been
+# resolved against a different PHP version.
+vendor/
+
+.env
+.env.*
+Dockerfile
+.dockerignore
+.DS_Store
+*.log
