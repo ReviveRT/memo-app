@@ -55,6 +55,14 @@ final class HealthEndpointTest extends TestCase
         $this->assertStringContainsString('SQLSTATE', $error);
         $this->assertStringNotContainsString('nosuchhost.invalid', $error);
         $this->assertStringNotContainsString('password', $error);
+
+        // Asserted, not merely silenced. The response deliberately withholds the
+        // driver message, so the log is the only place that detail survives -- a
+        // spy with no expectation would let a lost log entry pass as a success and
+        // leave an unreachable database with no explanation anywhere.
+        Log::shouldHaveReceived('error')
+            ->once()
+            ->withArgs(fn (string $message): bool => str_contains($message, 'Database health probe failed'));
     }
 
     public function test_an_unrouted_path_answers_json_even_without_an_accept_header(): void

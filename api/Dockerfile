@@ -75,12 +75,31 @@ COPY . .
 # would freeze the build-time defaults into the image and ignore compose entirely.
 RUN composer dump-autoload --no-dev --optimize
 
-# libpq reads PGCONNECT_TIMEOUT and applies it as the default connect_timeout.
-# This is the only place to bound it: Laravel's PostgresConnector builds the DSN
-# itself and has no connect_timeout key, and pdo_pgsql ignores PDO::ATTR_TIMEOUT.
-# libpq's own default is to wait indefinitely, while the compose healthcheck gives
-# up after 3 seconds -- so without this a wedged database marks the container
-# unhealthy with nothing in the logs to explain why.
+# libpq's documented default for connect_timeout, set here because Laravel's
+# PostgresConnector builds the DSN itself and has no connect_timeout key, and
+# pdo_pgsql ignores PDO::ATTR_TIMEOUT.
+#
+# Do not rely on this bounding anything. Measured against a blackholed address
+# (10.255.255.1) from this image, the connect fails after 30.0s at values of 2, 3,
+# 5, 60 and with the variable unset entirely -- identical every time, so neither
+# this variable nor a connect_timeout key in the DSN has any observable effect on
+# that path. The 30s is imposed by the Docker Desktop network stack, not by libpq.
+# It is kept because it is the correct mechanism and may well apply on a host that
+# is not Docker Desktop, not because it was shown to work.
+#
+# What actually bounds the healthcheck is curl: `timeout: 3s` in
+# docker-compose.yml aborts the probe, the check fails, and the container is
+# correctly marked unhealthy. The failure modes that matter in this stack are all
+# fast anyway -- a stopped db container refuses the connection immediately, a bad
+# hostname fails DNS immediately, bad credentials are rejected immediately. Only a
+# route that silently drops packets hangs, which needs a firewall between two
+# containers on the same compose network.
+#
+# The open consequence: a human curling /api/health in that one scenario waits for
+# the hang instead of getting a fast diagnostic 503. Fixing that properly means a
+# short bounded TCP reachability probe in HealthRepository before handing over to
+# PDO. Not built, because it trades real complexity against a failure mode this
+# topology cannot easily produce -- but that is where it goes.
 ENV PGCONNECT_TIMEOUT=2
 
 # Sane defaults for a bare `docker run`; compose sets these explicitly too.
