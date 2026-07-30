@@ -42,8 +42,31 @@ final class LocalStorage implements Storage
 
         try {
             $this->write($key, static function ($handle) use ($source): void {
-                if (stream_copy_to_stream($source, $handle) === false) {
+                // Only a regular file has a meaningful size to compare against.
+                // A FIFO or a socket reports size 0 while copying any number of
+                // bytes, so comparing unconditionally would reject every
+                // non-regular source. S_IFMT / S_IFREG, since PHP exposes no
+                // constant for the test.
+                $stat = fstat($source);
+                $isRegularFile = is_array($stat) && (($stat['mode'] ?? 0) & 0170000) === 0100000;
+                $expected = $isRegularFile ? (int) $stat['size'] : null;
+
+                $copied = stream_copy_to_stream($source, $handle);
+
+                if ($copied === false) {
                     throw new StorageException('Copy from source file failed.');
+                }
+
+                // Belt and braces over the returned length. Verified on this image
+                // that a destination hitting ENOSPC makes the call above return
+                // false outright -- but that is an implementation detail, not the
+                // contract: the documented return is "the total number of bytes
+                // copied", which a partial copy also satisfies. If that ever
+                // returns short instead of false, the alternative is a truncated
+                // file fsynced and renamed into place under a real key, which is
+                // the one outcome this whole write path exists to prevent.
+                if ($expected !== null && $copied !== $expected) {
+                    throw new StorageException("Short copy: {$copied} of {$expected} bytes.");
                 }
             });
         } finally {

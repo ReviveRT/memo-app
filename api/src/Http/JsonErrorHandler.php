@@ -37,17 +37,28 @@ final class JsonErrorHandler implements ErrorHandlerInterface
         // Only server faults are logged. A 404 or a 405 is a caller's mistake and
         // logging it lets an unauthenticated scan fill the container's logs.
         if ($status >= 500) {
+            // One write, not one for the header line and another for the trace.
+            // FrankenPHP serves concurrent requests in one process, so two
+            // separate writes can be interleaved by another thread's output and
+            // leave a stack trace filed under the wrong error.
+            //
+            // getTraceAsString() renders call arguments truncated to 15 characters,
+            // so a DATABASE_URL passed down the stack appears here as
+            // 'postgresql://m...'. Accepted rather than scrubbed: this is the
+            // container's own stderr, the credentials are non-secret dev defaults,
+            // and a 500 with no trace is materially harder to diagnose. Revisit if
+            // this API ever logs somewhere it does not own.
             Stderr::write(sprintf(
-                '[error] %s %s -> %d: %s: %s in %s:%d',
+                "[error] %s %s -> %d: %s: %s in %s:%d\n%s",
                 $request->getMethod(),
-                (string) $request->getUri()->getPath(),
+                $request->getUri()->getPath(),
                 $status,
                 $exception::class,
                 $exception->getMessage(),
                 $exception->getFile(),
                 $exception->getLine(),
+                $exception->getTraceAsString(),
             ));
-            Stderr::write($exception->getTraceAsString());
         }
 
         $response = Json::write(

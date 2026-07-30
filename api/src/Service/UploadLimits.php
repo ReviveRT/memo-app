@@ -25,13 +25,25 @@ final class UploadLimits
 
     public static function current(int $maxAudioBytes): self
     {
-        return new self(
-            $maxAudioBytes,
-            // ini_parse_quantity handles the shorthand notation ("16M"), which
-            // ini_get returns verbatim.
-            ini_parse_quantity((string) ini_get('upload_max_filesize')),
-            ini_parse_quantity((string) ini_get('post_max_size')),
-        );
+        return new self($maxAudioBytes, self::bytes('upload_max_filesize'), self::bytes('post_max_size'));
+    }
+
+    /**
+     * ini_parse_quantity handles the shorthand notation ("16M") that ini_get
+     * returns verbatim.
+     *
+     * The false branch matters more than it looks. ini_get returns false for a
+     * directive it cannot read, and casting that to a string parses as 0 -- which
+     * means "unlimited" for post_max_size. An unreadable directive would then be
+     * reported as no limit at all and accepts_max_audio would come back true: a
+     * false all-clear on the one field whose entire job is to catch a silent
+     * misconfiguration. -1 fails every comparison below instead.
+     */
+    private static function bytes(string $directive): int
+    {
+        $value = ini_get($directive);
+
+        return $value === false ? -1 : ini_parse_quantity($value);
     }
 
     /** Whether a memo at exactly MAX_AUDIO_BYTES can physically reach a handler. */

@@ -37,11 +37,26 @@ interface Storage
      */
     public function putFile(string $key, string $sourcePath): void;
 
+    /**
+     * @throws StorageException On a malformed key. Every method here validates the
+     *                          key, including the read-only ones -- a driver must
+     *                          never resolve a key it would refuse to write, or a
+     *                          traversal probe could be used to test for files
+     *                          outside the root even though it cannot create them.
+     */
     public function exists(string $key): bool;
 
-    /** Null when the object does not exist. */
+    /**
+     * Null when the object does not exist.
+     *
+     * @throws StorageException On a malformed key.
+     */
     public function size(string $key): ?int;
 
-    /** True when the object existed and is now gone. */
+    /**
+     * True when the object existed and is now gone.
+     *
+     * @throws StorageException On a malformed key.
+     */
     public function delete(string $key): bool;
 }

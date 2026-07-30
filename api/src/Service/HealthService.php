@@ -21,6 +21,14 @@ final class HealthService
     ) {
     }
 
+    /**
+     * Only PDOException is caught, and that is the rule rather than an oversight:
+     * a dependency being down is a 503 that names the fault, while this deployment
+     * being misconfigured -- an absent or malformed DATABASE_URL, both of which
+     * throw before PDO is reached -- is a 500 whose detail belongs in the logs and
+     * not in a response any caller can read. Widening this catch would dress a
+     * configuration bug up as a transient outage.
+     */
     public function check(): HealthReport
     {
         try {
