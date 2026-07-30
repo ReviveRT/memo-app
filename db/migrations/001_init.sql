@@ -114,7 +114,8 @@ CREATE TABLE memos (
     --
     -- The ' ' separators are structural, not formatting: without them an absent
     -- summary would butt title against transcript and index the join as one
-    -- token. Two consequences to carry into the search endpoint (MEMO-12):
+    -- token. Two consequences to carry into the search endpoint (MEMO-19 — the
+    -- board titles that task "12.", which is its build order, not its id):
     --
     --   * array_to_tsvector emits lexemes with no positions, so a memo matched
     --     only by a tag scores exactly 0 under ts_rank_cd — verified, against
