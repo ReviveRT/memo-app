@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use App\Http\Middleware\ValidateJsonBody;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -29,7 +30,35 @@ return Application::configure(basePath: dirname(__DIR__))
         // than one that tells the truth.
     )
     ->withMiddleware(function (Middleware $middleware): void {
+        // A body that claims to be JSON and is not gets a 400 saying so, instead of
+        // silently becoming an empty input bag and coming back as somebody else's
+        // "field is required". See the middleware for why there is no exception to
+        // catch in withExceptions() below.
         //
+        // append(), which puts it last in the *global* stack -- ninth, behind
+        // ValidatePathEncoding, PreventRequestsDuringMaintenance, ValidatePostSize and
+        // the two input transformers. Last is where it belongs: each of those has a
+        // more specific answer than "your JSON is broken" and should get to give it
+        // first. Maintenance mode is the case where the order decides the answer, and
+        // it was checked rather than reasoned about: with the app down, a truncated
+        // body answers 503 Service Unavailable, and the same body answers 400 once it
+        // is back up. Reversed, a caller would be told to fix their JSON by an
+        // application that was not going to read it either way.
+        //
+        // ValidatePostSize looks like the same argument and is not, which is worth
+        // knowing before someone "tightens" this by moving it earlier: a body over
+        // post_max_size is discarded by PHP, so it arrives as the empty string, and
+        // the empty-body skip in the middleware hands it on to be the 413 it should be
+        // no matter which side of ValidatePostSize this sits. Verified from both sides
+        // anyway -- 25 MB answers 413, and 19 MB of well-formed JSON gets through to
+        // the length rule and answers 422.
+        //
+        // Global rather than scoped to the api group, which also puts it ahead of
+        // routing, so a malformed body answers 400 even on a path that matches no
+        // route. That is the intended reading -- the request is unreadable whether or
+        // not a route wanted it -- and there is a test pinning it so it stays a
+        // decision rather than an accident.
+        $middleware->append(ValidateJsonBody::class);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         // Unconditionally JSON, not the skeleton's `$request->is('api/*')`.

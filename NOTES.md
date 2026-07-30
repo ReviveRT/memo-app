@@ -2,9 +2,62 @@
 
 Decisions and trade-offs that the code cannot state for itself.
 
-> **Status: partial.** MEMO-27 owns this file and writes the rest of it. The one
-> entry below is here because MEMO-12 has to be decided in exactly one place, and
-> two Dockerfiles and a compose file all have to agree with it.
+> **Status: partial.** MEMO-27 owns this file and writes the rest of it. The two
+> entries below are here early for the same reason: each is a contract that
+> several files — and, in both cases, two different runtimes — have to agree
+> about, so it cannot live in any one of them.
+
+## `updated_at` is maintained by a trigger, not by convention
+
+**Decision.** A `BEFORE UPDATE ... FOR EACH ROW` trigger on `memos` sets
+`updated_at = now()`. It lives in `db/migrations/002_updated_at.sql`, and no
+UPDATE anywhere — PHP, Python, or a hand-rolled `psql` session — needs to mention
+the column. MEMO-06 owned this choice; `001_init.sql` deliberately left it open.
+
+**Why it needs deciding at all.** Postgres has no `ON UPDATE
+CURRENT_TIMESTAMP`. `updated_at timestamptz NOT NULL DEFAULT now()` covers the
+INSERT and nothing else, which was checked rather than assumed: an UPDATE that
+changes `status` leaves `updated_at` at its insert value. So the column is either
+maintained explicitly by every writer or maintained by the database, and the one
+outcome that must not happen is a column that looks maintained and is not — a
+stale timestamp is indistinguishable from a fresh one.
+
+**Why a trigger and not `updated_at = now()` in every UPDATE.** Two runtimes
+write this table, and the convention was already broken by the next task in the
+build order before it was written down. MEMO-08's claim statement is specified as
+
+```sql
+UPDATE memos SET status='processing', locked_at=now(), attempts=attempts+1
+WHERE id = (...) RETURNING *
+```
+
+which never mentions `updated_at`. Under a convention that is a silent bug in
+Python, found by nobody, in a codebase whose author has no reason to read the PHP
+repository. That exact statement was run against this schema with the trigger
+installed: `updated_at` moved. A trigger cannot be forgotten by a new writer, a
+second worker replica, or a future `ai-api`.
+
+**What this column is still not good for.** It is not a delta cursor, and the
+trigger does not make it one. `now()` is transaction-start time, so a row whose
+write transaction began before a poll read and committed after it carries an
+`updated_at` the poller has already passed — the row is skipped, silently. That
+is why MEMO-18 polls the whole visible page and replaces rows by id instead of
+asking for a `?since=`. The trigger makes `updated_at` truthful about *when this
+row was last written*; a delta feed needs a monotonic sequence, not a clock.
+
+**What was rejected.**
+
+- *`updated_at = now()` in every UPDATE.* Visible in the SQL, and that is its
+  only advantage. See above for the reason it was never going to hold.
+- *`WHEN (OLD.* IS DISTINCT FROM NEW.*)` on the trigger*, the usual guard against
+  bumping the timestamp on a no-op UPDATE. It is broken on this table
+  specifically, and quietly: in a BEFORE trigger the STORED generated column
+  `search_vector` is not yet computed, so `NEW.search_vector` is NULL while
+  `OLD.search_vector` holds the old vector. Confirmed by raising a NOTICE from a
+  throwaway trigger — the rows compare as distinct even for `SET status = status`,
+  so the guard suppresses nothing while reading like an optimisation.
+- *A `updated_at` column maintained by the API only.* The API is not the only
+  writer, and the worker does strictly more UPDATEs than it does.
 
 ## The shared `audio` volume runs as uid 10001, gid 10001
 
