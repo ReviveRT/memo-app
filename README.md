@@ -44,6 +44,9 @@ reference and contains no real credentials.
 | `POSTGRES_PASSWORD` | `memo` | Password for that role (local dev only) |
 | `POSTGRES_DB` | `memo` | Database name |
 | `DATABASE_URL` | `postgresql://memo:memo@db:5432/memo` | Connection string used by the API and worker. Overriding `POSTGRES_PASSWORD` alone is enough — this default is composed from the three above |
+| `APP_ENV` | `local` | Laravel environment name. Informational; nothing branches on it |
+| `APP_DEBUG` | `false` | Off by default, including locally — a debug response carries the stack trace and resolved config, and `/api/*` is proxied to the browser. Detail is on stderr regardless |
+| `LOG_CHANNEL` | `stderr` | Where Laravel logs. `stderr` is what `docker compose logs api` shows |
 | `POSTGRES_PORT` | `5432` | Host port for Postgres. Change it if something else on your machine owns 5432 |
 | `API_PORT` | `8080` | Host port for the API |
 | `WEB_PORT` | `5173` | Host port for the frontend |
@@ -74,10 +77,16 @@ changes when you do._
 
 ```
 db/migrations/   numbered SQL migrations, applied in filename order
-api/             PHP API (Slim 4 on FrankenPHP)
+api/             PHP API (Laravel on FrankenPHP)
 ai/              Python worker — transcription and enrichment
 web/             frontend
 ```
+
+Laravel's own migrations, Eloquent, queue, cache and session tables are all
+unused: the schema is owned by `db/migrations/` and applied by `db/migrate.sh`,
+persistence goes through PDO with prepared statements and no ORM, and the job
+queue is the `memos` row itself, consumed by the Python worker. `APP_KEY` is
+intentionally unset — nothing here encrypts.
 
 ## Architecture
 

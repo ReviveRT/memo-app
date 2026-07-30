@@ -24,15 +24,24 @@ RUN apt-get update \
 
 # pdo_pgsql is not in the base image. install-php-extensions ships with
 # frankenphp and pulls the libpq headers for the build, then drops them.
-RUN install-php-extensions pdo_pgsql
+#
+# intl is Laravel's, not ours -- no application code calls it. It is here because
+# the framework's own helpers do: without it `php artisan db:show` prints its table
+# and then dies with `The "intl" PHP extension is required to use the [format]
+# method` from Illuminate\Support\Number. Observed on this image. Leaving a
+# first-party artisan command broken is a worse trade than the ICU data it pulls
+# in, on an api image that is a rounding error next to the 1.2 GB ai image.
+RUN install-php-extensions pdo_pgsql intl
 
 # Into $PHP_INI_DIR (/usr/local/etc/php), which is outside /app and therefore not
 # shadowed by the ./api:/app bind mount compose uses for live editing. An ini file
 # left at /app/conf.d would be ignored, and the 2M upload default would be back
 # with no visible change to this file.
 #
-# The image ships no php.ini at all, so these two files are the entire PHP
-# configuration. Read them both before assuming a default is in effect.
+# The image ships no php.ini at all, so these three files are the entire PHP
+# configuration. Read them before assuming a default is in effect -- env.ini in
+# particular exists because Laravel cannot see the container's environment
+# without it.
 COPY conf.d/ $PHP_INI_DIR/conf.d/
 
 WORKDIR /app
@@ -58,7 +67,29 @@ COPY . .
 # --optimize builds a classmap but keeps the PSR-4 fallback; --classmap-authoritative
 # would drop it, and with ./api bind-mounted a class added on the host would then
 # fail to load until the image was rebuilt.
+#
+# This also runs Laravel's post-autoload-dump hook, which is what writes
+# bootstrap/cache/packages.php. Deliberately no `artisan config:cache` or
+# `route:cache`: config:cache resolves every env() call at cache time, and this
+# image is built long before DATABASE_URL or AUDIO_DIR exist -- so a cached config
+# would freeze the build-time defaults into the image and ignore compose entirely.
 RUN composer dump-autoload --no-dev --optimize
+
+# libpq reads PGCONNECT_TIMEOUT and applies it as the default connect_timeout.
+# This is the only place to bound it: Laravel's PostgresConnector builds the DSN
+# itself and has no connect_timeout key, and pdo_pgsql ignores PDO::ATTR_TIMEOUT.
+# libpq's own default is to wait indefinitely, while the compose healthcheck gives
+# up after 3 seconds -- so without this a wedged database marks the container
+# unhealthy with nothing in the logs to explain why.
+ENV PGCONNECT_TIMEOUT=2
+
+# Sane defaults for a bare `docker run`; compose sets these explicitly too.
+# APP_DEBUG stays off even for local use: a debug response carries the stack trace
+# and the resolved configuration, and /api/* is reachable through the web
+# container's proxy. The detail goes to stderr instead, via LOG_CHANNEL.
+ENV APP_ENV=local \
+    APP_DEBUG=false \
+    LOG_CHANNEL=stderr
 
 # Compose overrides this, but it also has to be right for a bare `docker run`.
 # A port-only SERVER_NAME keeps Caddy on plain HTTP; a hostname would send it

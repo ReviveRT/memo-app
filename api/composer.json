@@ -1,29 +1,63 @@
 {
+    "$schema": "https://getcomposer.org/schema.json",
     "name": "memo-app/api",
-    "description": "Memo App HTTP API - Slim 4 on FrankenPHP. The only public surface; no AI dependencies.",
     "type": "project",
+    "description": "Memo App HTTP API - Laravel on FrankenPHP. The only public surface; no AI dependencies.",
     "license": "proprietary",
     "require": {
-        "php": ">=8.3",
+        "php": "^8.3",
         "ext-json": "*",
         "ext-pdo": "*",
         "ext-pdo_pgsql": "*",
-        "php-di/php-di": "^7.0",
-        "slim/psr7": "^1.6",
-        "slim/slim": "^4.12"
+        "laravel/framework": "^13.8"
+    },
+    "require-dev": {
+        "laravel/pail": "^1.2.5",
+        "laravel/pint": "^1.27",
+        "laravel/tinker": "^3.0",
+        "mockery/mockery": "^1.6",
+        "nunomaduro/collision": "^8.6",
+        "phpunit/phpunit": "^12.5.12"
     },
     "autoload": {
         "psr-4": {
-            "Memo\\": "src/"
+            "App\\": "app/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": [
+            "@php artisan config:clear --ansi",
+            "@php artisan test"
+        ],
+        "post-autoload-dump": [
+            "Illuminate\\Foundation\\ComposerScripts::postAutoloadDump",
+            "@php artisan package:discover --ansi"
+        ],
+        "pre-package-uninstall": [
+            "Illuminate\\Foundation\\ComposerScripts::prePackageUninstall"
+        ]
+    },
+    "extra": {
+        "laravel": {
+            "dont-discover": []
         }
     },
     "config": {
         "optimize-autoloader": true,
+        "preferred-install": "dist",
+        "sort-packages": true,
         "platform": {
             "ext-pdo_pgsql": "8.3.0",
             "php": "8.3.0"
         },
-        "sort-packages": true
+        "allow-plugins": {
+            "php-http/discovery": true
+        }
     },
     "minimum-stability": "stable",
     "prefer-stable": true

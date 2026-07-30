@@ -88,6 +88,18 @@ services:
       MAX_AUDIO_BYTES: ${MAX_AUDIO_BYTES:-12582912}
       # FrankenPHP listens on :80 by default; the Vite proxy target is api:8080.
       SERVER_NAME: ":8080"
+      # Laravel reads these. APP_KEY is deliberately absent: it exists for
+      # encryption, cookies and signed URLs, and this API has none of those
+      # (no auth, no sessions — MEMO-27 lists that as a deliberate cut). Verified
+      # that every route works without it, so there is no dev key to commit and
+      # nothing for a secret scan to find. Adding a feature that needs one means
+      # running `php artisan key:generate` and putting it in .env, not here.
+      APP_ENV: ${APP_ENV:-local}
+      # Off even locally. A debug response body carries the stack trace and the
+      # resolved configuration, and /api/* is reachable through the web
+      # container's proxy. Detail goes to stderr instead.
+      APP_DEBUG: ${APP_DEBUG:-false}
+      LOG_CHANNEL: ${LOG_CHANNEL:-stderr}
     volumes:
       # Target repeats the default literally rather than using the anchor: a
       # YAML alias cannot be spliced into part of a scalar, and the mount point
@@ -97,6 +109,12 @@ services:
       # Anonymous volume so the bind mount above does not shadow the vendor tree
       # composer installed into the image.
       - /app/vendor
+      # Same reason, for Laravel's package manifest: `composer dump-autoload`
+      # writes bootstrap/cache/packages.php during the build, and the bind mount
+      # would replace it with the host's empty directory. Laravel would then
+      # rebuild it into the mount on the first request, which works but writes
+      # container state into the checkout.
+      - /app/bootstrap/cache
     ports:
       - "${API_PORT:-8080}:8080"
     healthcheck:
