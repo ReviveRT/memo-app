@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use App\Http\Middleware\ValidateJsonBody;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -29,7 +30,21 @@ return Application::configure(basePath: dirname(__DIR__))
         // than one that tells the truth.
     )
     ->withMiddleware(function (Middleware $middleware): void {
+        // A body that claims to be JSON and is not gets a 400 saying so, instead of
+        // silently becoming an empty input bag and coming back as somebody else's
+        // "field is required". See the middleware for why there is no exception to
+        // catch in withExceptions() below.
         //
+        // append(), so it joins the end of the *global* stack: after HandleCors, so a
+        // preflight is unaffected, and after ValidatePostSize, so a body over
+        // post_max_size is still the 413 it should be rather than a complaint about
+        // the truncated JSON that is left. Global rather than scoped to the api
+        // group, which puts it before routing and means a malformed body answers 400
+        // even on a path that matches no route. That is the intended reading -- the
+        // request is unreadable whether or not a route wanted it, the same order
+        // ValidatePostSize already applies -- and it is pinned by a test so it stays
+        // a decision rather than an accident.
+        $middleware->append(ValidateJsonBody::class);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         // Unconditionally JSON, not the skeleton's `$request->is('api/*')`.
