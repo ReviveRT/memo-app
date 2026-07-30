@@ -68,8 +68,9 @@ count=0
 # Filename order is lexicographic, so numeric prefixes must be zero-padded to a
 # fixed width: an unpadded 10_x.sql would sort ahead of 9_x.sql.
 for path in "$migrations_dir"/*.sql; do
-    # An unmatched glob stays literal, which is this directory's normal state
-    # until 001_init.sql lands (MEMO-04).
+    # An unmatched glob stays literal rather than expanding to nothing, so this
+    # guard is what stops a directory holding no .sql files from handing psql a
+    # path named `*.sql`.
     [ -f "$path" ] || continue
 
     filename=${path##*/}
