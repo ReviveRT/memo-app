@@ -102,12 +102,17 @@ final class JsonRequestBodyTest extends TestCase
 
     public function test_a_body_declared_as_something_other_than_json_is_not_judged_here(): void
     {
-        // Form-encoded, and the point is MEMO-11: its multipart audio upload must
-        // reach the route's own rules rather than being called malformed JSON. This
-        // middleware holds callers to the format they declared and does not sniff.
-        $this->post('/api/memos', [], ['Accept' => 'application/json'])
-            ->assertStatus(422)
-            ->assertJsonValidationErrors('text');
+        $this->app->instance(MemoRepository::class, new FakeMemoRepository);
+
+        // Form-encoded, carrying a real field, and asserted as a 201 rather than as
+        // some 4xx: a body that is not JSON must reach the route and work, not merely
+        // avoid being called malformed. That is the case MEMO-11 depends on -- its
+        // multipart audio upload arrives declared as something other than JSON, and
+        // this middleware holds callers to the format they declared instead of
+        // sniffing bodies.
+        $this->post('/api/memos', ['text' => 'from a form'], ['Accept' => 'application/json'])
+            ->assertCreated()
+            ->assertJsonPath('memo.transcript', 'from a form');
     }
 
     public function test_a_well_formed_body_still_reaches_the_route(): void

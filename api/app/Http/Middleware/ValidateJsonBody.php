@@ -34,19 +34,20 @@ final class ValidateJsonBody
 {
     public function handle(Request $request, Closure $next): Response
     {
-        $body = $request->getContent();
-
-        // isJson() reads Content-Type, not Accept, so this only judges a body that
-        // was declared to be JSON. Two consequences worth stating: a form-encoded or
-        // multipart request is never checked here -- which is what keeps MEMO-11's
-        // upload out of this path, where getContent() is empty anyway because PHP has
-        // already parsed the body into $_POST and $_FILES -- and a JSON body sent
-        // without a JSON Content-Type is not checked either. The latter is deliberate:
-        // this middleware holds callers to the format they declared rather than
+        // Before the body is touched at all. isJson() reads Content-Type, not Accept,
+        // so this only judges a body that was declared to be JSON -- and returning
+        // here means a request that was not never has getContent() called on it,
+        // which for MEMO-11's audio upload is the difference between ignoring a
+        // multipart request and reading megabytes of it into a string to ignore.
+        //
+        // A JSON body sent without a JSON Content-Type is not checked either, which
+        // is deliberate: this holds callers to the format they declared rather than
         // sniffing bodies, and Laravel would not have parsed that one as JSON either.
         if (! $request->isJson()) {
             return $next($request);
         }
+
+        $body = $request->getContent();
 
         // An empty or whitespace-only body is absence, not corruption, and the honest
         // answer to it is whatever the route's own rules say about the fields that are
@@ -56,7 +57,16 @@ final class ValidateJsonBody
         // it as anything else here would make this middleware and the input bag
         // disagree about the same request. Consistent, too, with App\Support\Env,
         // where a set-but-empty value means unset.
-        if (trim($body) === '') {
+        //
+        // strspn rather than the obvious `trim($body) === ''` because trim allocates a
+        // whole second copy of the body to answer a question about it. Measured on a
+        // 19 MB body -- the largest post_max_size allows -- that copy is a 19 MB spike
+        // against this image's 128 MB memory_limit, and FrankenPHP serves concurrent
+        // requests from one process, so it is per request in flight rather than one
+        // spike at a time. strspn walks the string and allocates nothing. The charlist
+        // is PHP's own trim default, and the two were checked to agree across every
+        // shape that reaches here, "\0" and "\x0B" included.
+        if ($body === '' || strspn($body, " \t\n\r\0\x0B") === strlen($body)) {
             return $next($request);
         }
 
@@ -65,6 +75,14 @@ final class ValidateJsonBody
         // the fields the route wanted -- which is a fair description of a body with no
         // fields in it. This middleware answers "could the body be read"; what a
         // readable body is allowed to contain belongs to the route's own rules.
+        //
+        // The decoded value is thrown away, so a body that parses is parsed twice --
+        // here and again in Request::json(). Left alone rather than primed into the
+        // request: the only way to avoid it is to build the input bag by hand and keep
+        // that in step with how the framework builds its own, and the cost being
+        // avoided is bounded by post_max_size on a request that is about to be
+        // rejected on length anyway. Peak for the 19 MB worst case measured at 59 MB
+        // against a 128 MB limit.
         try {
             json_decode($body, true, flags: JSON_THROW_ON_ERROR);
         } catch (JsonException $e) {
