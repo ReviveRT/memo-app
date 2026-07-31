@@ -35,13 +35,20 @@ export const DECAY_AFTER_MS = 60_000
  * It changes what is on screen and nothing about the timer. Giving up at a deadline
  * here would be the same mistake in a slower costume -- a stop condition invented by
  * the client, guessing at how long the server is allowed to take, and wrong for the
- * first recording longer than the guess. The only thing entitled to end a wait is a
- * terminal status, and MEMO-16's reaper is what guarantees one arrives: it requeues or
- * fails a memo abandoned in `processing`, which stops this poll the same way finishing
- * would. Until that task lands there is no reaper, so a memo whose worker was killed
- * mid-job is polled at 5s intervals for as long as the tab is open and visible. That
- * is a known and bounded cost -- one localhost request every 5 seconds -- and it is
- * the cheaper half of the trade against a client that stops early on a slow success.
+ * first recording longer than the guess. Only a terminal status ends a wait.
+ *
+ * Which makes ending it the server's business, and the guarantee there is narrower than
+ * it first looks. MEMO-16's reaper covers one case: a memo abandoned in `processing`
+ * past its lease, which it requeues or fails, stopping this poll the same way finishing
+ * would. It does not cover a memo sitting in `queued` because no worker is running at
+ * all -- both replicas stopped, or never started -- and nothing does. That one waits for
+ * a worker, however long that takes, so the open-ended case survives MEMO-16 rather than
+ * being closed by it.
+ *
+ * The cost of the open-ended case is one localhost request every 5 seconds while the tab
+ * is open and visible, and it is the cheaper half of the trade: the other half is a
+ * client that stops early on a slow success, which is the failure this whole task exists
+ * to prevent.
  */
 export const HINT_AFTER_MS = 45_000
 
@@ -116,13 +123,17 @@ export function usePolling(active, tick) {
   }
 
   function start() {
-    // Only the first of a run of true values sets the clock. `active` can flip false
-    // and true again within one stretch of waiting -- submit a second memo while the
-    // first is still queued and the list is briefly all-terminal in between -- and
-    // restarting the clock there would keep pushing the hint out of reach.
-    if (startedAt === 0) {
-      startedAt = Date.now()
-    }
+    // One clock per stretch of waiting, set unconditionally. `watch` fires only on a
+    // change and every false transition runs stop(), which clears it -- so this is
+    // never reached with a clock already running, and a guard against restarting one
+    // would be dead code dressed as caution.
+    //
+    // Note what the stretch is measured from: the moment the page went from all-terminal
+    // to not, which is not the moment any particular memo started waiting. Two memos
+    // queued a minute apart share one clock, and the hint fires 45s after the first of
+    // them. Per-memo timing would have to trust `created_at` against the browser's own
+    // clock, and the two belong to different machines.
+    startedAt = Date.now()
 
     schedule()
   }

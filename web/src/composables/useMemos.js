@@ -153,17 +153,23 @@ async function load({ background = false } = {}) {
  *
  * This is the "replace by id" half of MEMO-18, and what it is not is worth saying,
  * because Vue already handles the obvious thing: `v-for` is keyed by `memo.id` in
- * MemoList.vue, so DOM nodes are reused across a wholesale replacement regardless and
- * this buys no rescue from element churn.
+ * MemoList.vue, so DOM nodes are reused across a wholesale replacement regardless.
+ * Element churn is not what this rescues, and neither is anything living on those nodes
+ * -- an <audio> element mid-playback (MEMO-23) survives either way, because its <li> is
+ * never recreated.
  *
- * What it buys is that a tick which changes nothing writes nothing. Assigning a fresh
- * array of fresh objects every 2 seconds invalidates every row's reactive dependencies
- * and re-runs the render for all of them, forever, for a list that is usually
- * identical to the one already there. Here the array reference only moves when
- * membership or order does, and a row is only touched on the fields that differ -- so
- * the steady state of waiting on one memo among fifty is fifty untouched rows and one
- * status string. It is also what will let in-row state survive a tick once there is
- * any: MEMO-23's audio element is the case, mid-playback, every 2 seconds.
+ * What it buys is that a tick which finds nothing new triggers nothing. Assigning a
+ * fresh array of fresh objects moves the array reference and rewrites every field of
+ * every row, so the render effect re-runs and rebuilds fifty vnodes in order to
+ * conclude that the DOM is already correct -- every 2 seconds, for a page that is
+ * usually identical to the one on screen. Here neither happens: the reference moves
+ * only when membership or order does, no field is written unless it differs, and a tick
+ * that brings no news invalidates not one dependency.
+ *
+ * A tick that does bring news still re-renders the whole list once, because MemoList is
+ * a single render effect rather than fifty components -- so against a wholesale replace
+ * this saves nothing on the tick that matters. The whole win is in the common case, and
+ * the common case is nearly every tick.
  *
  * @param {Array<object>} page
  */
@@ -207,10 +213,16 @@ function replacePage(page) {
 /**
  * Whether writing `next` over `current` would be a no-op.
  *
- * The array branch exists for exactly one field. `tags` arrives as a fresh array in
- * every response, so `===` reports it as changed on every tick even when the memo has
- * carried the same three tags for a week -- and MEMO-21 is what puts tags on rows at
- * all. Shallow is enough: the elements are strings.
+ * The array branch exists for exactly one field, and it is load-bearing rather than a
+ * refinement. `tags` arrives as a fresh array in every response, so `===` calls it
+ * changed on every tick even when the memo has carried the same three tags for a week.
+ * MemoList reads it on every row -- `v-if="memo.tags?.length"` -- so writing it is a
+ * dependency invalidation on every row, and without this branch the "tick that brings
+ * no news" above would re-render the entire list every 2 seconds, which is the one
+ * thing replacePage exists to avoid.
+ *
+ * Shallow is enough: the elements are strings. It costs nothing today either -- MEMO-21
+ * is what first puts a tag on a row, so every array compared here is currently empty.
  */
 function unchanged(current, next) {
   if (Array.isArray(current) && Array.isArray(next)) {

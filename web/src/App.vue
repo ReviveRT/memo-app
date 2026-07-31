@@ -45,14 +45,17 @@ onMounted(() => load())
     <p v-if="loadError" class="notice notice--error" role="alert">{{ loadError }}</p>
 
     <!--
-      Non-blocking in both senses: nothing is disabled behind it, and role="status" is
-      the polite live region, so a screen reader finishes the sentence it was on rather
-      than interrupting to announce that waiting is still happening.
+      Non-blocking: nothing is disabled behind it, and role="status" is polite rather
+      than assertive, so it cannot interrupt a screen reader mid-sentence the way the
+      error banner's role="alert" is entitled to. The region is inserted along with its
+      text rather than sitting in the DOM empty, which is the less dependable of the two
+      arrangements for being announced at all -- it is what the banner above already
+      does, and buying it back would mean a permanently empty box above the list.
 
-      The wording aims at MEMO-10's voice path, which is the case that legitimately
-      takes this long. Today the only memo that can reach 45 seconds is a text one whose
-      worker died mid-job, and there is nothing honest to say about that until MEMO-16's
-      reaper exists to end it -- see usePolling.js.
+      The wording aims at MEMO-10's voice path, which is the case that legitimately takes
+      this long. A text memo reaches 45 seconds only when nothing picked it up -- both
+      ai-worker replicas stopped, or one that died mid-job -- and usePolling.js is where
+      the reason it keeps polling rather than giving up is written down.
     -->
     <p v-if="hinting" class="notice" role="status">
       Still transcribing — a long recording can take a while.
