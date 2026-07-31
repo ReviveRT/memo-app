@@ -3,10 +3,18 @@ import { onMounted } from 'vue'
 import MemoComposer from './components/MemoComposer.vue'
 import MemoList from './components/MemoList.vue'
 import { useMemos } from './composables/useMemos'
+import { usePolling } from './composables/usePolling'
 
-const { memos, loading, loadError, load } = useMemos()
+const { memos, pending, loading, loadError, load } = useMemos()
 
-onMounted(load)
+/*
+ * The one place the list and the timer are joined, and the only file that knows both
+ * exist. `pending` is the stop condition and lives with the statuses it reads;
+ * everything about when to fire lives in usePolling.
+ */
+const { hinting } = usePolling(pending, () => load({ background: true }))
+
+onMounted(() => load())
 </script>
 
 <template>
@@ -15,18 +23,14 @@ onMounted(load)
       <h1>Memos</h1>
 
       <!--
-        A manual refresh, which is still the honest control for the stack as it stands,
-        though no longer for the reason this comment used to give. It said the worker
-        does not exist yet, so a memo stays `queued` and nothing about it changes on its
-        own. MEMO-08 landed and both halves of that stopped being true: a replica claims
-        the memo and it reaches `ready` about a second later -- and that second is the
-        poll interval, not the work, which the MEMO-09 gate measured at 2-6ms. What is
-        missing is not the transition but any way for the browser to hear about it, so
-        the row on screen stays a snapshot of the moment it was submitted. MEMO-18
-        replaces this with a poll that stops on a terminal status; until then the button
-        is the only way to see a change that has already happened.
+        Kept, now that the poll exists, because the poll deliberately stops: once every
+        memo is `ready` or `failed` nothing on this screen is waiting for anything, and
+        a timer left running against a finished list is a request every 5 seconds
+        answering the same thing forever. A memo written from somewhere else -- a second
+        tab, curl -- is then invisible until something asks, and this is what asks. It
+        is also the way back when the tab was hidden long enough to be uninteresting.
       -->
-      <button type="button" :disabled="loading" @click="load">
+      <button type="button" :disabled="loading" @click="load()">
         {{ loading ? 'Refreshing…' : 'Refresh' }}
       </button>
     </header>
@@ -39,6 +43,20 @@ onMounted(load)
       like the memos were gone.
     -->
     <p v-if="loadError" class="notice notice--error" role="alert">{{ loadError }}</p>
+
+    <!--
+      Non-blocking in both senses: nothing is disabled behind it, and role="status" is
+      the polite live region, so a screen reader finishes the sentence it was on rather
+      than interrupting to announce that waiting is still happening.
+
+      The wording aims at MEMO-10's voice path, which is the case that legitimately
+      takes this long. Today the only memo that can reach 45 seconds is a text one whose
+      worker died mid-job, and there is nothing honest to say about that until MEMO-16's
+      reaper exists to end it -- see usePolling.js.
+    -->
+    <p v-if="hinting" class="notice" role="status">
+      Still transcribing — a long recording can take a while.
+    </p>
 
     <MemoList :memos="memos" :loading="loading" :failed="Boolean(loadError)" />
   </main>
