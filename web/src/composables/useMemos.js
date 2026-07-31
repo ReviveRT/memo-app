@@ -74,6 +74,14 @@ async function load() {
  * exists to guarantee that). It is also not optimistic -- nothing appears until the
  * database has the row -- so there is no rollback path to get wrong.
  *
+ * The one thing this does not survive is a GET that was already in flight when the POST
+ * landed: that response replaces the array wholesale and predates the new row, so the
+ * memo disappears from the screen until the next load, having been stored the whole
+ * time. Reachable by hitting Refresh and submitting in the same breath. Left alone
+ * rather than papered over with a generation counter -- MEMO-18 replaces the page by id
+ * instead of wholesale, which closes it properly and is the task that owns the polling
+ * this would matter for.
+ *
  * @param {string} text
  * @returns {Promise<boolean>} Whether the memo was stored. The composer clears the
  *   textarea only on true, so a rejected memo is still there to fix and resubmit.

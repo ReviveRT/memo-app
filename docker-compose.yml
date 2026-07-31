@@ -167,8 +167,11 @@ services:
       API_PROXY_TARGET: http://api:8080
     volumes:
       - ./web:/app
-      # Anonymous volume over node_modules, or the bind mount above hides the tree
-      # npm installed into the image and vite exits with "Cannot find package 'vue'".
+      # Anonymous volume over node_modules, or the bind mount above hides the tree npm
+      # installed into the image. On a clean checkout that is not a subtle failure and
+      # not a Vue one: the container exits immediately with "Error: Cannot find module
+      # '/app/node_modules/.bin/vite'", because the command in web/Dockerfile is that
+      # path. Reproduced by mounting a copy of ./web with node_modules removed.
       #
       # The trap it brings with it: compose carries an anonymous volume over to the
       # replacement container when it recreates a service, so after changing
@@ -188,6 +191,14 @@ services:
       # Nothing gates on this: `web` is the last service in the graph. It is here so
       # that `docker compose ps` tells the truth about the service the user actually
       # opens, and so MEMO-09's clean-checkout gate has something to wait for.
+      #
+      # What it does not prove, which is worth knowing before trusting it: it was run
+      # against a container whose node_modules volume was left root-owned, and it
+      # reported healthy while every dependency request 404'd and the page could not
+      # boot Vue. `/` is served from the bind mount and needs none of that. A probe deep
+      # enough to catch it would have to fetch an optimized dep by its hashed URL, which
+      # changes on every dependency change; the api's healthcheck is the one carrying
+      # real weight here, and `web` is gated on it.
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:5173/ || exit 1"]
       interval: 5s
       timeout: 3s

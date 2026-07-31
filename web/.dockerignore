@@ -4,9 +4,10 @@
 #
 # That does not fail, which is why it needs excluding rather than trusting. Checked by
 # mounting this checkout's darwin-arm64 tree into the linux image: rolldown silently
-# falls back to its wasm32-wasi build -- installed unconditionally, so it is always
-# there -- and the server starts, four "ExperimentalWarning: WASI is an experimental
-# feature" lines later, on a slower parser. A hard error would be easier to notice.
+# falls back to its wasm32-wasi build -- npm installs that one unconditionally, so it is
+# always there -- and the server comes up on the slower parser, announced by nothing but
+# four "ExperimentalWarning: WASI is an experimental feature" warnings. A hard error
+# would be easier to notice.
 node_modules/
 
 # Build output. Nothing in the compose stack serves it (the dev server is the server),

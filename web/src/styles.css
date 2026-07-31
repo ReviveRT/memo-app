@@ -3,9 +3,9 @@
  * legibility and nothing else: a readable column, a form that looks like a form, and
  * enough contrast between rows to see where one memo ends.
  *
- * Both colour schemes come from one set of custom properties and a
- * prefers-color-scheme block, which is ten lines and saves a light-on-light form for
- * anyone whose machine is set to dark.
+ * Both colour schemes come from one set of custom properties and a single
+ * prefers-color-scheme block that re-points them, which is the whole cost of not
+ * showing a light-on-light form to anyone whose machine is set to dark.
  */
 
 :root {
@@ -198,6 +198,10 @@ button:disabled {
  * occur today; the rest are here so the row a worker updates does not come back
  * unstyled.
  */
+.badge--source {
+  color: var(--muted);
+}
+
 .badge--queued {
   border-color: var(--accent);
   color: var(--accent);

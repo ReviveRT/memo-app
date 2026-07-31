@@ -70,8 +70,15 @@ function formatTimestamp(iso) {
 
       <p v-else class="memo__transcript memo__transcript--empty">No transcript yet.</p>
 
+      <!--
+        Keyed by position, not by the tag itself. Nothing guarantees these are unique --
+        `tags` is a plain text[] with no constraint and MEMO-21 fills it from model
+        output -- and a repeated tag would key two nodes the same, which Vue reports as
+        "Duplicate keys found during update" in the console. The list is short,
+        append-only and never reordered, so the index is a stable key here.
+      -->
       <ul v-if="memo.tags?.length" class="tags">
-        <li v-for="tag in memo.tags" :key="tag" class="tags__tag">{{ tag }}</li>
+        <li v-for="(tag, position) in memo.tags" :key="position" class="tags__tag">{{ tag }}</li>
       </ul>
     </li>
   </ul>

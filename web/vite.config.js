@@ -37,6 +37,14 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
 
+    // No `hmr` block, and that is the answer to the fourth container gotcha rather than
+    // an omission: HMR rides the same port the page came from, so publishing 5173 is all
+    // it needs. Checked both ways -- an edit on the host hot-updates the running page
+    // (inotify does cross this bind mount, so `watch.usePolling` is not needed either),
+    // and it keeps working with WEB_PORT remapped to 5199, because the client takes the
+    // socket port from the URL it was loaded from. A `hmr.clientPort` here would be the
+    // thing that breaks the remapped case.
+
     proxy: {
       // The whole CORS answer. The browser talks to one origin -- the dev server
       // -- and /api/* is forwarded to the API container over the compose network,
@@ -59,7 +67,13 @@ export default defineConfig({
         // hardcoded target would make `npm run dev` on a laptop fail on DNS. The
         // default is the compose case, which is the one that has to need no setup;
         // docker-compose.yml sets the variable explicitly anyway so that the
-        // service name appears next to the service it names.
+        // service name appears next to the service it names. Confirmed to be read
+        // rather than decorative: with API_PROXY_TARGET=http://nope:9999 the proxy
+        // fails on `getaddrinfo ENOTFOUND nope`.
+        //
+        // `||` and not `??`, so a set-but-empty value falls back to the default --
+        // the same reading of an empty variable that App\Support\Env applies on the
+        // PHP side, and the normal output of a template with nothing to put in it.
         target: process.env.API_PROXY_TARGET || 'http://api:8080',
       },
     },

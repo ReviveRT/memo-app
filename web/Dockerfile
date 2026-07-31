@@ -21,11 +21,19 @@ WORKDIR /app
 # number would imply an agreement that does not exist. What matters here is only that
 # a dev server executing project code is not root.
 #
-# /app is chowned before the install so npm runs unprivileged and the tree it writes
-# is owned by the user that later has to read it. That ownership is load-bearing under
+# /app is chowned before the install so npm runs unprivileged and the tree it writes is
+# owned by the user that later has to read it. That ownership is load-bearing under
 # compose: /app/node_modules is an anonymous volume, Docker seeds an empty volume from
-# the image mount point including its owner, and vite writes its dependency cache to
-# node_modules/.vite on every start. Left root-owned, the server dies on EACCES there.
+# the image mount point including its owner, and vite writes its optimized dependencies
+# into node_modules/.vite.
+#
+# Left root-owned it fails in the worst available way, which is why this is a chown and
+# not a comment asking for care. Reproduced with a deliberately root-owned volume: the
+# server starts, prints its banner and serves / with a 200 -- so the compose healthcheck
+# reports **healthy** -- and then loses the dependency optimizer to `EACCES: permission
+# denied, mkdir '/app/node_modules/.vite/deps_temp_…'`. Every dependency request 404s
+# after that, so the page loads and cannot boot Vue behind a container compose calls
+# fine.
 #
 # The usual objection to a non-root dev server -- that it has to write into a bind mount
 # whose owner is decided by the host -- does not apply, and that was checked rather than
@@ -54,9 +62,11 @@ COPY --chown=node:node . .
 EXPOSE 5173
 
 # The binary directly, not `npm run dev`. npm would sit between PID 1 and vite for no
-# reason, and the reason it matters is shutdown: vite installs its own SIGTERM handler,
-# so as PID 1 it stops on `docker compose stop` in well under a second instead of
-# waiting out the 10-second kill timeout.
+# reason, and the reason it matters is shutdown: PID 1 ignores any signal it has no
+# handler for, so an npm wrapper that does not forward SIGTERM turns every
+# `docker compose stop` into a 10-second wait for the kill. vite registers its own
+# (`process.once("SIGTERM", …)` in its dist, calling closeServerAndExit), which is what
+# makes `docker compose stop web` measure 0.25s here.
 #
 # Host and port come from vite.config.js rather than from flags here, so that a bare
 # `docker run -p 5173:5173` behaves like the compose service does.

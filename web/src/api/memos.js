@@ -67,9 +67,16 @@ export async function createMemo(text) {
  *      the reason for the branch: calling .json() on that throws `SyntaxError: Failed
  *      to execute 'json' on 'Response': Unexpected end of JSON input`, which reads as a
  *      bug in this file rather than as a container that is down.
- *   3. A JSON error body. Laravel puts the first validation failure in `message`,
- *      so a 422 already reads as "The text field is required." and there is no
- *      need to walk the `errors` map to say the same thing.
+ *   3. A JSON error body. Laravel puts the first validation failure in `message`, so a
+ *      422 already reads as "The text field is required." and there is no need to walk
+ *      the `errors` map to say the same thing.
+ *
+ *      A 500 is the weak case and deliberately not improved here: with APP_DEBUG off
+ *      the API answers `{"message":"Server Error"}` -- checked, by stopping the db
+ *      container -- so that is what the user sees, and the detail is on the api
+ *      container's stderr where LOG_CHANNEL puts it. MEMO-17 owns failure UX and is
+ *      where a better answer belongs; inventing one here would be a second, different
+ *      story about the same 500.
  */
 async function request(path, init) {
   let response
