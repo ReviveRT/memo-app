@@ -15,11 +15,16 @@ onMounted(load)
       <h1>Memos</h1>
 
       <!--
-        A manual refresh, which is the honest control for the stack as it stands: the
-        worker does not exist yet (MEMO-08), so a memo stays `queued` and nothing about
-        it changes on its own. MEMO-18 replaces this with a poll that stops on a
-        terminal status; until then a button beats a timer that would only ever fetch
-        the same rows back.
+        A manual refresh, which is still the honest control for the stack as it stands,
+        though no longer for the reason this comment used to give. It said the worker
+        does not exist yet, so a memo stays `queued` and nothing about it changes on its
+        own. MEMO-08 landed and both halves of that stopped being true: a replica claims
+        the memo and it reaches `ready` about a second later -- and that second is the
+        poll interval, not the work, which the MEMO-09 gate measured at 2-6ms. What is
+        missing is not the transition but any way for the browser to hear about it, so
+        the row on screen stays a snapshot of the moment it was submitted. MEMO-18
+        replaces this with a poll that stops on a terminal status; until then the button
+        is the only way to see a change that has already happened.
       -->
       <button type="button" :disabled="loading" @click="load">
         {{ loading ? 'Refreshing…' : 'Refresh' }}

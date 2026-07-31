@@ -6,12 +6,21 @@ from memo_ai.stt.base import Transcript
 
 # A constant, not a template, and phrased so it cannot be mistaken for output.
 #
-# Constant because the test suite asserts on it and MEMO-09's clean-checkout gate
-# reads it off the screen; interpolating the memo id would make both of those
-# weaker for no gain. Unmistakable because this string lands in `memos.transcript`,
+# Constant because the test suite asserts on it; interpolating the memo id would make
+# that weaker for no gain. Unmistakable because this string lands in `memos.transcript`,
 # is indexed into `search_vector`, and will be sitting in a demo database months
 # from now -- "hello world" or a lorem ipsum would eventually be read as a real
 # transcription that had gone wrong.
+#
+# This comment also gave MEMO-09's clean-checkout gate as a second reason to keep it
+# constant, on the grounds that the gate reads it off the screen. Running that gate
+# showed it cannot, for two independent reasons: the gate submits a *text* memo, which
+# carries its own transcript and so returns from transcribe_if_owed before any provider
+# is called (memo_ai/pipeline.py), and STT_PROVIDER defaults to `local` regardless,
+# which resolves to UnimplementedStt -- so FakeStt is never constructed on that path at
+# all. The worker logged `stt_provider=local` and `transcript already present`, and no
+# canned string reached the database. Nothing puts this on a screen until MEMO-11 adds
+# the upload endpoint and a voice memo becomes possible.
 CANNED_TRANSCRIPT = "Canned transcript from the fake speech-to-text provider. No audio was read."
 
 
