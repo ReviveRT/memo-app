@@ -93,19 +93,40 @@ class MemoRepository
      * declares `id uuid PRIMARY KEY` with no DEFAULT precisely so that omitting it
      * is a not-null violation instead of a silently unordered v4.
      *
-     * @param  string  $source  Memo::SOURCE_TEXT today; MEMO-11 adds the voice path,
-     *                          which also writes audio_path and audio_mime and passes
-     *                          a null transcript.
+     * The audio pair defaults to null rather than being required of every caller,
+     * because "this memo has no recording" is what a text memo is -- the same reading
+     * `transcript IS NULL` gets on the other side. Both columns are still named in the
+     * statement and bound as NULL, so there is one INSERT rather than two shapes of
+     * one.
+     *
+     * They travel together and are not independently optional: `audio_mime` describes
+     * `audio_path`, and a row carrying one without the other would be either a blob
+     * nothing can serve (MEMO-23 reads the mime to answer with) or a mime for a file
+     * that does not exist. Nothing here enforces the pairing -- MemoService is the only
+     * caller and passes both -- and it is not worth a CHECK constraint on a table
+     * written by one statement in one file.
+     *
+     * @param  string  $source  Memo::SOURCE_TEXT with a transcript and no audio, or
+     *                          Memo::SOURCE_VOICE with audio and a null transcript.
+     * @param  ?string  $audioPath  A storage *key*, relative to AUDIO_DIR -- never an
+     *                              absolute path. See App\Contracts\AudioStorage.
      */
-    public function insert(string $id, string $source, string $status, ?string $transcript): Memo
-    {
+    public function insert(
+        string $id,
+        string $source,
+        string $status,
+        ?string $transcript,
+        ?string $audioPath = null,
+        ?string $audioMime = null,
+    ): Memo {
         // selectFromWriteConnection, not select(). This is a write that returns
         // rows, and select() is the read path -- it is the same connection today
         // because config/database.php configures no read/write split, but the day
         // one is added a plain select() here would send an INSERT to a replica.
         $rows = $this->db->connection()->selectFromWriteConnection(
-            'INSERT INTO memos (id, source, status, transcript) VALUES (?, ?, ?, ?) RETURNING '.self::COLUMNS,
-            [$id, $source, $status, $transcript],
+            'INSERT INTO memos (id, source, status, transcript, audio_path, audio_mime)'
+                .' VALUES (?, ?, ?, ?, ?, ?) RETURNING '.self::COLUMNS,
+            [$id, $source, $status, $transcript, $audioPath, $audioMime],
         );
 
         $row = $rows[0] ?? null;

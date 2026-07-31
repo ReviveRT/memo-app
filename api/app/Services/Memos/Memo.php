@@ -27,8 +27,18 @@ use stdClass;
  */
 final class Memo
 {
-    /** The two values the source CHECK constraint allows. MEMO-11 writes the other one. */
+    /** The two values the source CHECK constraint allows. */
     public const SOURCE_TEXT = 'text';
+
+    /**
+     * A memo that arrived as a recording (MEMO-10).
+     *
+     * The distinction it draws is not "has audio" -- it is which of `transcript` and
+     * `audio_path` was set at INSERT time, and therefore what the worker owes the row.
+     * A voice memo starts with a NULL transcript and gets one; a text memo brings its
+     * own. `source` is what survives that difference once both rows look alike.
+     */
+    public const SOURCE_VOICE = 'voice';
 
     /**
      * Where every memo starts, audio or text.

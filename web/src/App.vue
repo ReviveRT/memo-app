@@ -2,6 +2,7 @@
 import { onMounted } from 'vue'
 import MemoComposer from './components/MemoComposer.vue'
 import MemoList from './components/MemoList.vue'
+import MemoRecorder from './components/MemoRecorder.vue'
 import MemoSearch from './components/MemoSearch.vue'
 import { useMemos } from './composables/useMemos'
 import { usePolling } from './composables/usePolling'
@@ -35,6 +36,13 @@ onMounted(() => load())
         {{ loading ? 'Refreshing…' : 'Refresh' }}
       </button>
     </header>
+
+    <!--
+      Above the composer, which is the order the README describes the app in: record a
+      memo, or type one. Both write to the same list through the same route, so the
+      order here is about which is offered first and nothing else.
+    -->
+    <MemoRecorder />
 
     <MemoComposer />
 

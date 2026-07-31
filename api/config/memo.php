@@ -29,9 +29,15 @@ return [
     // that the Python worker mounts at the same path and reads by key.
     'audio_dir' => Env::string('AUDIO_DIR', '/data/audio'),
 
-    // Byte cap enforced at the API edge (12 MiB). Deliberately looser than the
-    // duration cap: a WebM stream from MediaRecorder carries no duration element,
-    // so length is enforced in the worker after normalization, not here.
+    // Byte cap for the API edge (12 MiB). Deliberately looser than the duration
+    // cap: a WebM stream from MediaRecorder carries no duration element, so
+    // length is enforced in the worker after normalization, not here.
+    //
+    // Read by HealthService and by nothing else yet. MEMO-10 opened the upload
+    // path and MEMO-11 is what makes this number apply to it, so the cap in force
+    // today is upload_max_filesize from conf.d/uploads.ini rather than this. Kept
+    // configured rather than removed and re-added, because the healthcheck's whole
+    // job is to compare the two and say when they disagree.
     //
     // Raising this above upload_max_filesize in conf.d/uploads.ini silently
     // re-breaks uploads; GET /api/health reports both numbers side by side and

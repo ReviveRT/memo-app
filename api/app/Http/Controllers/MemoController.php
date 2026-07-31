@@ -25,15 +25,32 @@ use Symfony\Component\HttpFoundation\Response;
  * rendered as 422 JSON by bootstrap/app.php's unconditional shouldRenderJsonWhen,
  * and a database that is down is a 500 -- MEMO-17 owns failure UX, and inventing a
  * second, different answer for it here would be the thing that task then has to
- * undo.
+ * undo. An unwritable audio volume takes the same 500, and deliberately: a rejected
+ * recording is something the person recording can fix and a volume they cannot mount
+ * is not, which is the distinction App\Exceptions\StorageException exists to draw.
  */
 final class MemoController extends Controller
 {
     public function __construct(private readonly MemoService $memos) {}
 
+    /**
+     * One route, two accepted bodies: a typed memo as JSON, or a recording as
+     * multipart/form-data (MEMO-10).
+     *
+     * The branch is on which of the two the request carried rather than on the
+     * Content-Type, because that is the question the rules already answered -- and the
+     * two cannot both be present, which StoreMemoRequest refuses rather than resolves.
+     * Everything after the branch is identical, which is the point of putting them on
+     * one route: the same 201, carrying the same object, and a frontend that prepends
+     * it to the same list either way.
+     */
     public function store(StoreMemoRequest $request): JsonResponse
     {
-        $memo = $this->memos->createFromText($request->text());
+        $audio = $request->audio();
+
+        $memo = $audio === null
+            ? $this->memos->createFromText((string) $request->text())
+            : $this->memos->createFromAudio($audio);
 
         // 201, and the body is the stored row rather than an id to go and fetch:
         // the client needs status and created_at to render the memo as pending

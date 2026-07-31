@@ -9,9 +9,13 @@
  * visible now rather than being described in a comment somewhere.
  *
  * `duration_ms` and the failure UX are the two exceptions, left out rather than
- * guarded: duration only exists for voice memos (MEMO-10) and a failed memo needs the
- * retry action next to the reason (MEMO-17). Half of either now would be UI those tasks
- * have to undo.
+ * guarded: duration is written by the worker's ffprobe pass (MEMO-13) and is null on
+ * every row until then, voice memos included, and a failed memo needs the retry action
+ * next to the reason (MEMO-17). Half of either now would be UI those tasks have to undo.
+ *
+ * "No transcript yet." was written for a text memo that could not reach it, and MEMO-10
+ * is what gives it a case: a voice memo is inserted with a null transcript and carries
+ * that line until the worker replaces it.
  */
 defineProps({
   memos: { type: Array, required: true },

@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue'
-import { createMemo, listMemos } from '../api/memos'
+import { createMemo, createVoiceMemo, listMemos } from '../api/memos'
 
 /*
  * The memo list, and the four things that change it: the first load, the Refresh button,
@@ -11,11 +11,15 @@ import { createMemo, listMemos } from '../api/memos'
  * to reach it through props and events routed via App.vue.
  *
  * No Pinia. A store would buy devtools time-travel and module namespacing for an app
- * whose entire state is the nine refs below, and it fails the same over-engineering
+ * whose entire state is the dozen refs and computeds below, and it fails the same over-engineering
  * test this project applies to every other dependency. The shape a store would give
  * is already here -- state outside the component tree, mutated only by the functions
  * in this file -- so swapping it in later is a mechanical change if there is ever a
  * reason to.
+ *
+ * The microphone is deliberately not part of this. useRecorder owns a MediaRecorder and
+ * a live MediaStream, which belong to the one component drawing the button rather than
+ * to the app; all this file knows about MEMO-10 is that a Blob can be posted.
  */
 
 /**
@@ -91,6 +95,21 @@ const saving = ref(false)
  */
 const loadError = ref(null)
 const saveError = ref(null)
+
+/**
+ * The third one, for a recording that could not be uploaded (MEMO-10).
+ *
+ * Separate from `saveError` by the same argument the two above are separate by: a
+ * rejected recording and a rejected typed memo are different actions with different
+ * remedies -- record again, or fix the text -- and each message belongs next to the
+ * control that produced it. Folding them together would blank the composer's
+ * explanation the moment a recording failed, and would put "could not save the memo"
+ * under a textarea nobody had touched.
+ *
+ * It is the *upload* half only. Why the microphone would not open is useRecorder's,
+ * and MemoRecorder renders whichever of the two applies.
+ */
+const audioError = ref(null)
 
 /**
  * What is in the search box. Bound by MemoSearch, and the only thing that decides whether
@@ -420,14 +439,10 @@ function unchanged(current, next) {
 /**
  * POST one text memo and put it at the top of the list.
  *
- * Prepending the returned row rather than re-running load(): the API answers 201 with
- * the stored memo precisely so the client does not need a second round trip, and the
- * row it returns is the same shape the list carries (api/app/Services/Memos/Memo.php
- * exists to guarantee that). It is also not optimistic -- nothing appears until the
- * database has the row -- so there is no rollback path to get wrong.
- *
  * The row arrives `queued`, which flips `pending` and is what starts the poll. Nothing
- * here talks to the timer.
+ * here talks to the timer. The row it returns is the same shape the list carries
+ * (api/app/Services/Memos/Memo.php exists to guarantee that), which is what lets store()
+ * below prepend it rather than re-running load().
  *
  * Prepending is also what keeps the new memo on screen while a filter is active, and it
  * agrees with what the API would answer rather than working around it: a memo that has not
@@ -440,7 +455,57 @@ function unchanged(current, next) {
  * @returns {Promise<boolean>} Whether the memo was stored. The composer clears the
  *   textarea only on true, so a rejected memo is still there to fix and resubmit.
  */
-async function submit(text) {
+function submit(text) {
+  // Trimmed before it goes out, so the string the composer judged against the length
+  // cap is the string the API is asked to store. StoreMemoRequest trims again -- that
+  // is agreement, not reliance -- and the composer's own guard is what refuses a
+  // whitespace-only memo before it ever reaches here.
+  return store(() => createMemo(text.trim()), saveError, 'Could not save the memo')
+}
+
+/**
+ * POST one recording and put it at the top of the list (MEMO-10).
+ *
+ * Everything true of submit() above is true here, which is the point of both paths
+ * being one route: the API answers the same 201 carrying the same object, so the row
+ * this prepends is the row the next poll brings back, and MEMO-18 reconciles it by id
+ * without knowing which kind of memo it is.
+ *
+ * The one difference is what the row arrives holding. A voice memo has no transcript
+ * yet, so it renders as "No transcript yet." until the worker gets to it -- and it is
+ * `queued` like any other, which flips `pending` and starts the poll that will replace
+ * it. That wait is the case App.vue's "still transcribing" hint was written for.
+ *
+ * @param {Blob} blob
+ * @param {string} filename
+ * @returns {Promise<boolean>}
+ */
+function submitAudio(blob, filename) {
+  return store(
+    () => createVoiceMemo(blob, filename),
+    audioError,
+    'Could not upload the recording',
+  )
+}
+
+/**
+ * The write path both of the above share: post, prepend, count the write.
+ *
+ * `saving` is one flag across both, so the two controls cannot post at the same time.
+ * That is a stronger guarantee than either needs on its own and it is deliberate --
+ * two memos created in the same instant is not a failure, but a shared guard also
+ * means the composer's button reports honestly while a recording is uploading rather
+ * than looking idle. What it costs is that a slow upload disables the textarea's Save
+ * for its duration, which on localhost is the length of one POST.
+ *
+ * @param {() => Promise<object>} create Performs the request and returns the stored row.
+ * @param {import('vue').Ref<?string>} target Where this action's failures are reported.
+ * @param {string} failure Prefix, so a stopped api container -- which fails every one
+ *   of these with the same sentence -- still says which action it broke.
+ * @returns {Promise<boolean>} Whether the memo was stored. The composer clears the
+ *   textarea only on true, so a rejected memo is still there to fix and resubmit.
+ */
+async function store(create, target, failure) {
   if (saving.value) {
     return false
   }
@@ -448,21 +513,21 @@ async function submit(text) {
   saving.value = true
 
   try {
-    // Trimmed before it goes out, so the string the composer judged against the
-    // length cap is the string the API is asked to store. StoreMemoRequest trims
-    // again -- that is agreement, not reliance -- and the composer's own guard is
-    // what refuses a whitespace-only memo before it ever reaches here.
-    memos.value = [await createMemo(text.trim()), ...memos.value]
+    // Not optimistic -- nothing appears until the database has the row -- so there is
+    // no rollback path to get wrong. Prepending rather than re-running load(): the API
+    // answers 201 with the stored memo precisely so the client needs no second round
+    // trip, and the row it returns is the same shape the list carries.
+    memos.value = [await create(), ...memos.value]
 
     // Synchronous with the line above, and it has to be: anything between the two
     // could be an in-flight GET resolving into the gap.
     revision += 1
 
-    saveError.value = null
+    target.value = null
 
     return true
   } catch (error) {
-    saveError.value = `Could not save the memo — ${error.message}`
+    target.value = `${failure} — ${error.message}`
 
     return false
   } finally {
@@ -479,6 +544,7 @@ export function useMemos() {
     saving,
     loadError,
     saveError,
+    audioError,
     query,
 
     // `appliedQuery` itself is deliberately not exported. It is the raw echo, and a
@@ -490,5 +556,6 @@ export function useMemos() {
     searchNow,
     clearSearch,
     submit,
+    submitAudio,
   }
 }

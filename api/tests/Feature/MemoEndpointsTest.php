@@ -4,22 +4,30 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Contracts\AudioStorage;
 use App\Http\Requests\ListMemosRequest;
 use App\Http\Requests\StoreMemoRequest;
 use App\Repositories\MemoRepository;
 use App\Services\Memos\Memo;
+use Illuminate\Http\UploadedFile;
 use Tests\Support\FakeMemoRepository;
+use Tests\Support\RecordingAudioStorage;
 use Tests\TestCase;
 
 /**
- * The decisions MEMO-06 makes that do not depend on the driver. The SQL itself --
- * ordering, to_jsonb over a real text[], the generated tsvector column -- needs a
- * live Postgres and belongs to MEMO-25; see FakeMemoRepository for why the seam is
- * drawn here.
+ * The decisions MEMO-06 and MEMO-10 make that do not depend on the driver. The SQL
+ * itself -- ordering, to_jsonb over a real text[], the generated tsvector column --
+ * needs a live Postgres and belongs to MEMO-25; see FakeMemoRepository for why the
+ * seam is drawn here.
  */
 final class MemoEndpointsTest extends TestCase
 {
     private FakeMemoRepository $repository;
+
+    private RecordingAudioStorage $storage;
+
+    /** Upload temp files created by a test, removed afterwards. @var list<string> */
+    private array $temporaryFiles = [];
 
     protected function setUp(): void
     {
@@ -27,6 +35,21 @@ final class MemoEndpointsTest extends TestCase
 
         $this->repository = new FakeMemoRepository;
         $this->app->instance(MemoRepository::class, $this->repository);
+
+        // Bound by interface, which is the same seam AppServiceProvider swaps at --
+        // so what these tests exercise is the wiring the container actually resolves
+        // rather than a service constructed by hand.
+        $this->storage = new RecordingAudioStorage;
+        $this->app->instance(AudioStorage::class, $this->storage);
+    }
+
+    protected function tearDown(): void
+    {
+        foreach ($this->temporaryFiles as $path) {
+            @unlink($path);
+        }
+
+        parent::tearDown();
     }
 
     public function test_posting_text_writes_a_queued_text_memo_and_returns_it_with_its_id(): void
@@ -124,6 +147,158 @@ final class MemoEndpointsTest extends TestCase
         // in ASCII.
         $this->postJson('/api/memos', ['text' => str_repeat('あ', StoreMemoRequest::MAX_TEXT_LENGTH)])
             ->assertCreated();
+    }
+
+    public function test_posting_a_recording_writes_a_queued_voice_memo_and_returns_it(): void
+    {
+        $response = $this->post('/api/memos', [
+            StoreMemoRequest::AUDIO_FIELD => $this->recording(self::containers()['Chrome']['bytes']),
+        ]);
+
+        $response->assertCreated()
+            ->assertJsonPath('memo.source', 'voice')
+            ->assertJsonPath('memo.status', 'queued')
+            // No transcript yet, which is what the worker reads as "this row owes a
+            // transcription", and what MemoList renders as "No transcript yet."
+            ->assertJsonPath('memo.transcript', null)
+            // The same field set a text memo answers with, asserted for the same reason
+            // it is asserted there: MEMO-18 replaces polled rows by id against the
+            // object this response produced, and the frontend prepends both kinds of
+            // memo to one list. A voice-only field here would break that reconciliation
+            // -- which is also why `audio_path` is not in the projection at all.
+            ->assertJsonStructure([
+                'memo' => [
+                    'id', 'source', 'status', 'transcript', 'title',
+                    'summary', 'tags', 'duration_ms', 'last_error', 'created_at',
+                ],
+            ]);
+
+        $this->assertCount(1, $this->repository->inserted);
+        $insert = $this->repository->inserted[0];
+
+        $this->assertSame(Memo::SOURCE_VOICE, $insert['source']);
+        $this->assertSame(Memo::STATUS_QUEUED, $insert['status']);
+        $this->assertNull($insert['transcript']);
+
+        // The row points at a key, and the bytes are under that key. This is the whole
+        // contract between the API and the Python worker: it resolves `audio_path`
+        // against its own AUDIO_DIR on the shared volume (MEMO-12) and opens whatever
+        // it finds.
+        $this->assertSame(
+            self::containers()['Chrome']['bytes'],
+            $this->storage->blobs[(string) $insert['audio_path']] ?? null,
+        );
+
+        $this->assertSame($insert['id'], $response->json('memo.id'));
+    }
+
+    public function test_every_container_the_three_browsers_produce_is_accepted_and_named_correctly(): void
+    {
+        // MEMO-10's acceptance is that Chrome, Safari and Firefox all upload
+        // successfully. The browsers themselves are Pavel's half of that -- no test can
+        // produce real microphone input -- and this is the half that can be pinned here:
+        // that the API accepts each of the three containers and records what it actually
+        // received rather than what it was told.
+        //
+        // Firefox is the case that makes it worth doing. It reports WebM from
+        // MediaRecorder and produces Ogg, so the mime below is `audio/ogg` while the
+        // request said `audio/webm` -- the two genuinely disagree, and the row follows
+        // the bytes.
+        foreach (self::containers() as $browser => $container) {
+            $this->post('/api/memos', [
+                StoreMemoRequest::AUDIO_FIELD => $this->recording($container['bytes']),
+            ])->assertCreated();
+
+            $insert = end($this->repository->inserted);
+
+            $this->assertSame($container['mime'], $insert['audio_mime'], "{$browser}: stored mime");
+            $this->assertSame(
+                "{$insert['id']}.{$container['extension']}",
+                $insert['audio_path'],
+                "{$browser}: storage key",
+            );
+        }
+
+        $this->assertCount(count(self::containers()), $this->repository->inserted);
+    }
+
+    public function test_the_stored_mime_is_sniffed_from_the_bytes_rather_than_read_off_the_request(): void
+    {
+        // A text file wearing an audio name and an audio Content-Type -- the dishonest
+        // version of the Firefox mismatch above, and the case where believing the label
+        // is most obviously wrong.
+        $this->post('/api/memos', [
+            StoreMemoRequest::AUDIO_FIELD => $this->recording('This is plainly not a recording.'),
+        ])->assertCreated();
+
+        $insert = $this->repository->inserted[0];
+
+        $this->assertSame('text/plain', $insert['audio_mime']);
+
+        // And the storage key follows the sniffed type rather than the name the client
+        // chose, because that name is the one thing in this request nobody vouches for
+        // and it would otherwise become part of a filesystem path.
+        $this->assertSame("{$insert['id']}.txt", $insert['audio_path']);
+
+        // Note what this test is *not* asserting: that the upload was refused. It was
+        // accepted, and MEMO-11 is the task that rejects it -- "a .txt renamed to .webm
+        // is rejected" is that task's acceptance criterion, and the allowlist it needs
+        // is built on exactly the sniffed value pinned above.
+    }
+
+    public function test_text_and_audio_in_one_request_are_refused_rather_than_merged(): void
+    {
+        // There is no honest reading of both: the text could be the transcript of the
+        // recording or a second memo, and picking one would silently discard whichever
+        // the caller meant. Nothing sends both today, so this is here so that a client
+        // which starts to finds out on the first request.
+        $this->post('/api/memos', [
+            'text' => 'Call the dentist',
+            StoreMemoRequest::AUDIO_FIELD => $this->recording(self::containers()['Chrome']['bytes']),
+        ])->assertStatus(422);
+
+        $this->assertSame([], $this->repository->inserted);
+        $this->assertSame([], $this->storage->written);
+    }
+
+    public function test_a_request_carrying_neither_text_nor_audio_names_both(): void
+    {
+        // Relaxing `text` from required to required_without is the change that could
+        // quietly make an empty POST succeed. Both fields are named so the message says
+        // what the route accepts rather than only mentioning the older half of it.
+        $this->postJson('/api/memos', [])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['text', StoreMemoRequest::AUDIO_FIELD]);
+
+        $this->assertSame([], $this->repository->inserted);
+    }
+
+    public function test_an_audio_field_that_is_not_a_file_is_refused(): void
+    {
+        // `audio` as a plain string satisfies required_without and nothing else. Worth
+        // pinning because the failure would not be a 422: it would reach
+        // StoreMemoRequest::audio(), find no UploadedFile, return null, and the
+        // controller would then treat a request with no `text` as a text memo.
+        $this->postJson('/api/memos', [StoreMemoRequest::AUDIO_FIELD => 'not-a-file'])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(StoreMemoRequest::AUDIO_FIELD);
+
+        $this->assertSame([], $this->repository->inserted);
+    }
+
+    public function test_a_recording_the_volume_will_not_take_is_a_500_rather_than_a_rejected_memo(): void
+    {
+        $this->storage->failOnPut = true;
+
+        // An unwritable volume is not something the person recording can fix, and
+        // answering 4xx would tell them their memo was the problem. See
+        // App\Exceptions\StorageException, which exists to draw that line, and MEMO-17
+        // for the failure UX this eventually gets.
+        $this->post('/api/memos', [
+            StoreMemoRequest::AUDIO_FIELD => $this->recording(self::containers()['Chrome']['bytes']),
+        ])->assertStatus(500);
+
+        $this->assertSame([], $this->repository->inserted, 'No row may exist without its audio.');
     }
 
     public function test_listing_renders_every_field_and_keeps_the_order_it_was_given(): void
@@ -333,6 +508,94 @@ final class MemoEndpointsTest extends TestCase
             'no-store',
             (string) $response->headers->get('Cache-Control'),
         );
+    }
+
+    /**
+     * The opening bytes of each container MediaRecorder actually produces, one per
+     * browser, so the sniffing these tests are about has something real to sniff.
+     *
+     * Headers rather than recordings: finfo reads the magic at the start of a file and
+     * nothing after it, so a real memo would add a megabyte to the repository to prove
+     * the same thing. Every mime below was read off this image's libmagic rather than
+     * assumed, and they are the ones MEMO-11's page predicts -- note that audio-only
+     * WebM and MP4 both sniff as **video/** types, which is why an allowlist of
+     * `audio/*` would reject every genuine recording.
+     *
+     * A method rather than a const because the Ogg page below has to be assembled, and
+     * that is the point: written out as one literal it was two bytes too long, which
+     * pushed `OpusHead` off the offset libmagic reads and sniffed the whole thing as
+     * application/octet-stream. A header built from its named fields cannot drift like
+     * that, and it says what the bytes are.
+     *
+     * @return array<string, array{bytes: string, mime: string, extension: string}>
+     */
+    private static function containers(): array
+    {
+        return [
+            // Chrome and Edge: an EBML header whose DocType is "webm". The DocType is
+            // what decides it -- the same header saying "matroska" sniffs as
+            // video/x-matroska.
+            'Chrome' => [
+                'bytes' => "\x1a\x45\xdf\xa3\x01\x00\x00\x00\x00\x00\x00\x1f"
+                    ."\x42\x86\x81\x01\x42\xf7\x81\x01\x42\xf2\x81\x04\x42\xf3\x81\x08"
+                    ."\x42\x82\x84webm\x42\x87\x81\x02\x42\x85\x81\x02",
+                'mime' => 'video/webm',
+                'extension' => 'webm',
+            ],
+
+            // Firefox: Ogg, even when MediaRecorder reported WebM (Mozilla bug 1501308).
+            // One Ogg page: the 27-byte header -- capture pattern, version 0, a
+            // beginning-of-stream flag, then 20 bytes of granule position, serial,
+            // sequence and CRC that no sniffer reads -- then a one-entry segment table,
+            // then the Opus identification packet that gives it `audio/` rather than
+            // `application/ogg`.
+            'Firefox' => [
+                'bytes' => 'OggS'."\x00\x02".str_repeat("\x00", 20)."\x01\x1e"
+                    .'OpusHead'."\x01\x01\x38\x01\x80\xbb\x00\x00\x00\x00\x00",
+                'mime' => 'audio/ogg',
+                'extension' => 'ogg',
+            ],
+
+            // Safari: MP4 or fragmented MP4, recognised from the `ftyp` box.
+            'Safari' => [
+                'bytes' => "\x00\x00\x00\x20".'ftypisom'."\x00\x00\x02\x00".'isomiso2avc1mp41',
+                'mime' => 'video/mp4',
+                'extension' => 'mp4',
+            ],
+        ];
+    }
+
+    /**
+     * A multipart upload of exactly these bytes, always announced as `memo.webm` and
+     * `audio/webm` no matter what is inside it.
+     *
+     * A real UploadedFile in test mode rather than UploadedFile::fake(), and the
+     * difference is the entire point of the tests above. Laravel's testing double
+     * overrides getMimeType() to guess from the *filename* -- so against a fake, an
+     * assertion that this endpoint sniffs its input passes whether it sniffs or not.
+     * Found the honest way: the first version of these tests used the fake, and the one
+     * asserting that a text file is recorded as text/plain answered video/webm, which is
+     * the filename talking. Symfony's UploadedFile leaves getMimeType() as finfo over
+     * the bytes and puts the request's label on getClientMimeType(), where nothing reads
+     * it.
+     *
+     * The fixed name and label are what make every one of these a mismatch case by
+     * construction: a Firefox recording really does arrive labelled WebM, so the tests
+     * cannot pass by accident on a client that happened to be honest.
+     *
+     * The file is left on disk for tearDown. `$test: true` is what keeps
+     * is_uploaded_file() out of it -- without it the framework treats the path as not
+     * having come from an upload and the `file` rule fails every one of these.
+     */
+    private function recording(string $contents): UploadedFile
+    {
+        $path = tempnam(sys_get_temp_dir(), 'memo-recording-');
+
+        $this->assertIsString($path);
+        file_put_contents($path, $contents);
+        $this->temporaryFiles[] = $path;
+
+        return new UploadedFile($path, 'memo.webm', 'audio/webm', test: true);
     }
 
     private function memo(string $id, string $transcript): Memo
