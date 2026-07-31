@@ -19,6 +19,27 @@
 #      commented-out or blank line in someone's `.env` produces.
 #
 # Real API keys stay optional. The keyless path is the default path.
+#
+# MEMO-09 ran the whole of this from a fresh `git clone` with no `.env` and no keys,
+# which is the first time every service in the graph existed at once. It converged
+# unattended: `db` healthy, `migrate` applying both files and exiting 0, `api` and
+# `web` healthy behind it, two `ai-worker` replicas polling. A memo typed into
+# localhost:5173 was stored, claimed by a replica and reached `ready`.
+#
+# It was run twice, because the first pass proved less than it appeared to. A checkout
+# can be spotlessly clean and the *build* still not be: 21 layers came from earlier
+# tasks' images, so that pass said nothing about what a stranger's first
+# `docker compose up` actually does. Anyone re-running this gate should assume the same
+# trap. Repeated with `--no-cache` across all three Dockerfiles -- api 918MB, web 317MB,
+# ai-worker 237MB, with the base images already pulled, which is the one thing still not
+# measured here -- and every step above held identically on the images that came out.
+#
+# `docker compose down` and up again is the half worth recording, because it is the
+# one this file cannot fix on its own: `migrate` restarts and re-runs, reports
+# "schema up to date, nothing to apply", and leaves `applied_at` on both rows at the
+# first run's timestamps. That is the ledger in db/migrate.sh holding, not the
+# ordering here -- the ordering only guarantees the service runs, and running it
+# twice is exactly what would break the stack without it.
 
 name: memo-app
 
