@@ -17,20 +17,17 @@ import { useMemos } from '../composables/useMemos'
  * -- filter now, without waiting out the debounce -- and a page reload is not it.
  */
 
-const { query, displayedFilter, memos, search, searchNow, clearSearch } = useMemos()
-
-/**
- * Mirrors Memo::IN_FLIGHT_STATUSES in the API, the same way MemoComposer mirrors
- * MAX_TEXT_LENGTH: two runtimes cannot share a constant, so the value is repeated with a
- * note saying where the other copy is. These are the statuses the search pins into a
- * filtered page regardless of match, which is the only reason this file needs to know
- * them.
+/*
+ * `pending` is MEMO-18's -- "something on this page is still going to change" -- and it is
+ * exactly the question this file needs answered: those are the rows the API pinned into a
+ * filtered page regardless of match, so they are why the count cannot be called a match
+ * count. Reusing it rather than testing the statuses here is not only deduplication. This
+ * file first shipped with its own `['queued','processing']`, which is the positive list
+ * MEMO-18 exists to argue against: it is one value short the moment a status is added, and
+ * MEMO-16 adds a retry path. Behind `pending`, an unknown status is treated as unfinished,
+ * which is the answer that stays right.
  */
-const IN_FLIGHT_STATUSES = ['queued', 'processing']
-
-const hasInFlight = computed(() =>
-  memos.value.some((memo) => IN_FLIGHT_STATUSES.includes(memo.status)),
-)
+const { query, displayedFilter, memos, pending, search, searchNow, clearSearch } = useMemos()
 
 /**
  * Whether to describe the list as filtered.
@@ -109,7 +106,7 @@ const isFiltered = computed(() => displayedFilter.value !== null && memos.value.
     which reads like the page said it twice because something went wrong.
   -->
   <p v-if="isFiltered" class="search__status">
-    <template v-if="hasInFlight">
+    <template v-if="pending">
       {{ memos.length === 1 ? '1 memo' : `${memos.length} memos` }} shown for
       <strong>{{ displayedFilter }}</strong
       >, including any still being processed

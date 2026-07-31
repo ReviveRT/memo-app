@@ -205,7 +205,7 @@ class MemoRepository
      *
      * **3. The in-flight pin.** A memo still being transcribed has no transcript, so it
      * matches nothing and would vanish from the list the moment a filter was active --
-     * right after the user recorded it. Memo::IN_FLIGHT_STATUSES says which statuses that
+     * right after the user recorded it. Memo::inFlightStatuses() says which statuses that
      * covers and why 'failed' is not one of them.
      *
      * Worth knowing about the pin: a *text* memo is inserted with its transcript already
@@ -251,9 +251,9 @@ class MemoRepository
     public function search(string $query, int $limit): array
     {
         // Built from the constant rather than written out, so adding a status to
-        // Memo::IN_FLIGHT_STATUSES cannot leave the placeholder count behind and turn a
+        // Memo::inFlightStatuses() cannot leave the placeholder count behind and turn a
         // lifecycle change into a bound-parameter mismatch.
-        $inFlight = implode(', ', array_fill(0, count(Memo::IN_FLIGHT_STATUSES), '?'));
+        $inFlight = implode(', ', array_fill(0, count(Memo::inFlightStatuses()), '?'));
 
         $rows = $this->db->connection()->select(
             'SELECT '.self::COLUMNS
@@ -265,7 +265,7 @@ class MemoRepository
             [
                 $query,
                 self::likePattern($query),
-                ...Memo::IN_FLIGHT_STATUSES,
+                ...Memo::inFlightStatuses(),
                 $limit,
             ],
         );
