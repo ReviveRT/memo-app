@@ -50,7 +50,7 @@ reference and contains no real credentials.
 | `POSTGRES_PORT` | `5432` | Host port for Postgres. Change it if something else on your machine owns 5432 |
 | `API_PORT` | `8080` | Host port for the API |
 | `WEB_PORT` | `5173` | Host port for the frontend |
-| `STT_PROVIDER` | `local` | Primary transcription provider: `openai` \| `local` \| `fake` |
+| `STT_PROVIDER` | `local` | Primary transcription provider: `openai` \| `local` \| `fake`. Only `fake` is implemented so far — see below |
 | `STT_FALLBACK` | `local` | Provider used when the primary errors or its key is absent |
 | `STT_MODEL` | `base` | Model for the chosen provider — the main cost lever on the hosted path |
 | `OPENAI_API_KEY` | _(empty)_ | Optional. Enables hosted transcription |
@@ -58,7 +58,17 @@ reference and contains no real credentials.
 | `ENRICH_MODEL` | `claude-opus-5` | Claude model for title/summary/tags/category |
 | `MAX_AUDIO_BYTES` | `12582912` | Upload byte cap enforced at the API edge (12 MiB) |
 | `MAX_AUDIO_SECONDS` | `600` | Duration cap enforced in the worker after normalization |
+| `WORKER_POLL_SECONDS` | `1.0` | How long an `ai-worker` replica waits after finding the queue empty. Bounds how long a new memo sits in `queued`, not how fast the queue drains |
 | `AUDIO_DIR` | `/data/audio` | Audio path inside the containers, on the shared `audio` volume. Changing it needs a rebuild with a matching `--build-arg AUDIO_DIR` — see the note in `.env.example` |
+
+### Transcription today
+
+Only `STT_PROVIDER=fake` is implemented so far (MEMO-08); `local` and `openai`
+arrive with MEMO-14. The default of `local` is still safe to leave alone — the
+worker starts normally on it and text memos are unaffected, because a typed memo
+carries its own transcript and never reaches a provider. A *voice* memo would stop
+at `status=failed` with a `last_error` explaining it, and there is no way to create
+one yet in any case: the upload endpoint arrives in MEMO-11.
 
 ### Using the hosted providers
 
@@ -101,5 +111,21 @@ NOTES.md (MEMO-27)._
 
 ## Development
 
-_TODO (MEMO-26): running tests, running a service outside Docker, applying a new
-migration._
+### Running the worker's tests
+
+`pytest` is not in the `ai` image — it installs `requirements.txt` only, the same
+way the api image runs `composer install --no-dev` — so the suite installs the dev
+dependencies first and runs in one throwaway container:
+
+```bash
+docker compose run --rm --no-deps --user 0:0 --entrypoint sh ai-worker -c 'pip install -q -r requirements-dev.txt && python -m pytest'
+```
+
+One invocation, because each `docker compose run` starts from the image again and
+the install does not persist. `--user 0:0` because the worker runs as a non-root
+user that cannot write into site-packages. No database is needed: the tests that
+would need one are the claim and the fence, and those are verified against a real
+Postgres instead — `ai/memo_ai/memos.py` records what those runs showed.
+
+_TODO (MEMO-26): running the api tests, running a service outside Docker, applying
+a new migration._

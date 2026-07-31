@@ -33,12 +33,15 @@ x-audio-dir: &audio-dir ${AUDIO_DIR:-/data/audio}
 #
 # Not overridable from .env on purpose. Both numbers are also build args in
 # api/Dockerfile -- which creates the matching `memo` user and seeds the volume's
-# mode from the image -- so a variable here would let the two drift apart, and the
-# symptom of that is an EACCES on delete rather than anything that looks like a
-# configuration error. Changing it means editing both files and rebuilding.
+# mode from the image -- and in ai/Dockerfile as of MEMO-08, which creates the same
+# user. A variable here would let the three drift apart, and the symptom of that is
+# an EACCES on delete rather than anything that looks like a configuration error.
+# Changing it means editing all three files and rebuilding.
 #
-# `user:` overrides the image's own USER, so this also holds the ai image to the
-# contract before its Dockerfile exists (MEMO-08).
+# `user:` overrides the image's own USER, so it is also the backstop if either
+# Dockerfile ever ships without one. Checked end to end once both existed: the api
+# container writes a blob and the worker container reads and unlinks it, with
+# /data/audio arriving drwxrwsr-x memo memo and /cache drwxr-xr-x memo memo.
 x-audio-user: &audio-user "10001:10001"
 
 services:
@@ -213,24 +216,36 @@ services:
   ai-worker:
     build:
       context: ./ai
-    # The other half of the audio contract (MEMO-12). This line is what makes it
-    # true today, since ai/Dockerfile does not exist until MEMO-08 -- and it keeps
-    # being what makes it true if that Dockerfile ships without a USER of its own.
+    # The other half of the audio contract (MEMO-12), and now a backstop rather than
+    # the whole of it: ai/Dockerfile arrived with MEMO-08 and does all three things
+    # this comment used to ask of it.
     #
-    # Two things MEMO-08 owes this, both learned from doing it to api/Dockerfile:
-    #
-    #   * create a `memo` user at 10001:10001 in the image, so the numbers below
-    #     resolve to a name and a bare `docker run` behaves the same way;
-    #   * pre-create /cache (HF_HOME below lives under it) owned by that user.
-    #     An empty named volume inherits the mount point's owner from the image, so
+    #   * a `memo` user at 10001:10001 in the image, so the numbers below resolve to
+    #     a name and a bare `docker run` behaves the same way. Confirmed from inside
+    #     the running container: `uid=10001(memo) gid=10001(memo)`.
+    #   * /cache pre-created and owned by that user (HF_HOME below lives under it).
+    #     An empty named volume inherits its mount point's owner from the image, so
     #     without it `whisper-cache` comes up root-owned and the non-root worker
-    #     cannot write a model. That failure is at least loud, unlike this one.
+    #     cannot write a model. It comes up drwxr-xr-x memo memo.
+    #   * no AUDIO_DIR. An image without that path leaves an already-seeded volume
+    #     alone, which is why the api image alone can own the mode -- one that
+    #     created it under a different owner would win the seed whenever it started
+    #     first, and these two services start concurrently. The ai image has no
+    #     /data at all, checked directly against it.
     #
-    # And one thing it must NOT do: create AUDIO_DIR in the ai image. An image
-    # without that path leaves an already-seeded volume alone, which is why the api
-    # image alone can own the mode -- but one that creates it under a different
-    # owner would win the seed whenever it starts first, and these two services
-    # start concurrently. Verified in both orders.
+    #     What that does *not* mean, now that it has been run rather than reasoned
+    #     about: starting ai-worker alone on a brand-new volume is not a no-op. With
+    #     nothing in the image to seed from, Docker creates the mount point itself
+    #     and /data/audio comes up root:root 0755. It heals on the next start where
+    #     the volume is still empty -- bringing api up afterwards re-seeded it to
+    #     drwxrwsr-x memo memo, carrying the api image's build mtime, which is the
+    #     second row of the table in NOTES.md. Benign either way, because the worker
+    #     only reads and unlinks and there is nothing there yet to read, but the
+    #     window exists and this is where somebody would look for it.
+    #
+    # This line stays because `user:` overrides the image's own USER, so a bad rebase
+    # or a revert that drops that USER is still held to the contract here rather than
+    # quietly filling the volume with blobs the other container cannot delete.
     user: *audio-user
     depends_on:
       db:
@@ -245,6 +260,11 @@ services:
       STT_FALLBACK: ${STT_FALLBACK:-local}
       STT_MODEL: ${STT_MODEL:-base}
       ENRICH_MODEL: ${ENRICH_MODEL:-claude-opus-5}
+      # How long a replica waits after finding an empty queue. Only ever a sleep on
+      # the *idle* path: after a claim that found work the worker loops straight back
+      # without waiting, so this is not a rate limit and it does not bound throughput.
+      # It is roughly the delay between POST /api/memos and the row leaving `queued`.
+      WORKER_POLL_SECONDS: ${WORKER_POLL_SECONDS:-1.0}
       # Deliberately defaulted to empty rather than left unset: the container
       # sees a defined-but-blank key and takes the local path.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -260,7 +280,10 @@ services:
     restart: unless-stopped
 
   # A sixth service, ai-api, joins this file only if "Ask my memos" lands (MEMO-24).
-  # It shares the ai image with a different entrypoint.
+  # It shares the ai image with a different entrypoint -- concretely, `build:
+  # context: ./ai` again plus a `command:` override, since ai/Dockerfile's CMD is
+  # `python -m memo_ai.worker` and memo_ai is one package with room for a second
+  # entrypoint beside it.
 
 volumes:
   pgdata:
