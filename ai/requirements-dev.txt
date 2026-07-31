@@ -1,0 +1,10 @@
+# Test-only, and deliberately not in the image. ai/Dockerfile installs
+# requirements.txt alone, the same way api/Dockerfile runs `composer install
+# --no-dev`, so the shipped image carries no test framework.
+#
+# The consequence is that `pytest` is not present in a running container and the
+# suite is run by installing these first. README.md's Development section has the
+# one-liner.
+-r requirements.txt
+
+pytest==9.1.1

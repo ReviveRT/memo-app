@@ -24,18 +24,25 @@ stale timestamp is indistinguishable from a fresh one.
 
 **Why a trigger and not `updated_at = now()` in every UPDATE.** Two runtimes
 write this table, and the convention was already broken by the next task in the
-build order before it was written down. MEMO-08's claim statement is specified as
+build order before it was written down. MEMO-08's claim statement is
 
 ```sql
 UPDATE memos SET status='processing', locked_at=now(), attempts=attempts+1
-WHERE id = (...) RETURNING *
+WHERE id = (...) RETURNING id, source, transcript, audio_path, attempts, locked_at
 ```
 
 which never mentions `updated_at`. Under a convention that is a silent bug in
 Python, found by nobody, in a codebase whose author has no reason to read the PHP
 repository. That exact statement was run against this schema with the trigger
-installed: `updated_at` moved. A trigger cannot be forgotten by a new writer, a
-second worker replica, or a future `ai-api`.
+installed: `updated_at` moved, and it moves in the shipped worker too. A trigger
+cannot be forgotten by a new writer, a second worker replica, or a future `ai-api`.
+
+The projection differs from the `RETURNING *` this entry first quoted, and for a
+reason that belongs with the column list rather than here: `search_vector` is a
+STORED generated column and therefore part of `*`, so the one statement that runs
+on every poll of an empty queue would have carried a full stemmed copy of every
+transcript. `ai/memo_ai/memos.py` and `MemoRepository::COLUMNS` state that rule on
+their own sides.
 
 **What this column is still not good for.** It is not a delta cursor, and the
 trigger does not make it one. `now()` is transaction-start time, so a row whose
@@ -65,8 +72,11 @@ row was last written*; a delta feed needs a monotonic sequence, not a clock.
 `10001:10001`, a user named `memo`. `AUDIO_DIR` is `2775` (group-writable,
 setgid) and the blobs inside it are `0664`. The numbers live in
 `api/Dockerfile` (as `APP_UID` / `APP_GID` build args) and in the
-`x-audio-user` anchor in `docker-compose.yml`; `ai/Dockerfile` must create the
-same user when it lands (MEMO-08).
+`x-audio-user` anchor in `docker-compose.yml`. `ai/Dockerfile` landed with MEMO-08
+and creates the same user; the cross-container half of the acceptance criterion has
+now been run for real rather than reasoned about — the api container writes a blob
+and the worker container reads it and unlinks it, with `/data/audio` arriving
+`drwxrwsr-x memo memo`.
 
 **Why it needs deciding at all.** The API writes a blob and the worker reads it
 and then deletes it. `unlink(2)` checks write permission on the *directory*, not
@@ -84,12 +94,13 @@ in. Both identities were checked container-to-container on a fresh volume — sa
 uid, and group-only at uid 12345 — and the modes they depend on are pinned by
 `api/tests/Unit/SharedAudioVolumeTest.php`.
 
-**One thing MEMO-08 should know.** A file the *worker* creates on this volume
-comes out `0644` under the default umask, not `0664`. Nothing today cares, because
-the API only ever unlinks one and unlink is permitted by the directory rather than
-by the file. A worker that writes a normalized copy the API later has to *modify*
-wants `umask(0o002)` or an explicit `chmod`, for the same reason
-`LocalAudioStorage` sets its own modes by hand.
+**One thing MEMO-13 should know.** A file the *worker* creates on this volume comes
+out `0644` under the default umask, not `0664`. Nothing today cares: MEMO-08's
+worker only ever reads and unlinks, and unlink is permitted by the directory rather
+than by the file. MEMO-13 is the task that changes that — it writes a normalized
+copy back to the volume — and a copy the API later has to *modify* wants
+`umask(0o002)` or an explicit `chmod`, for the same reason `LocalAudioStorage` sets
+its own modes by hand.
 
 **How the mode gets onto the volume.** `api/Dockerfile` creates `AUDIO_DIR` in
 the image with the right owner and mode, and Docker copies a named volume's mount
@@ -97,16 +108,26 @@ point — uid, gid and mode — out of the image. So the first `docker compose u
 a clean checkout comes up `drwxrwsr-x memo memo` rather than the `drwxr-xr-x root
 root` Docker would otherwise create.
 
-The exact rule matters, and all four cases were checked rather than assumed.
+The exact rule matters, and every case here was checked rather than assumed.
 Docker applies the image's owner and mode whenever the volume is **empty** at
 container start — not only at creation:
 
 | Volume state | Result |
 | --- | --- |
 | Never mounted | Seeded from the api image. Correct. |
-| Empty, created by a pre-MEMO-12 (root) image | Re-seeded on the next start. Self-heals. |
+| Never mounted, and `ai-worker` starts first | Docker creates the mount point itself: `root:root 0755`. Heals as soon as `api` starts — see the row below. |
+| Empty, created by a pre-MEMO-12 (root) image, or by the ai image alone | Re-seeded on the next start. Self-heals. |
 | Empty, already seeded, then mounted by an image without that path | Left alone. Still correct. |
 | Holds blobs from a root-era build | Stays `root:root 0755`. The API cannot write. |
+
+The second row is the one that was reasoned about first and measured later, once
+`ai/Dockerfile` existed to measure. Bringing `ai-worker` up on its own gives a
+`root:root 0755` `/data/audio`, because an image with no such path has nothing for
+Docker to seed from; bringing `api` up afterwards re-seeds it to `drwxrwsr-x memo
+memo`, still carrying the api image's build mtime. It is benign — the worker only
+reads and unlinks, and an untouched volume holds nothing to read — but "the ai image
+does not create the path" is not the same claim as "the ai image starting first
+changes nothing", and only the first one is true.
 
 Only the last row needs a human: `docker compose down -v`, or
 `docker volume rm memo-app_audio` with the stack down to keep `pgdata`. The

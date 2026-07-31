@@ -1,0 +1,13 @@
+# Build caches and local artefacts. Nothing here belongs in a layer.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# tests/ is deliberately NOT ignored, and requirements-dev.txt is not either.
+# Both are needed to run the suite from this image -- the same arrangement as the
+# api container, where the tests ship and only the dev dependencies are left out.
+# See README.md's Development section for the invocation.

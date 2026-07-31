@@ -1,0 +1,16 @@
+# Runtime dependencies, pinned exactly. A range here would let a rebuild months
+# from now resolve a different driver than the one this stack was verified
+# against, on an image that is otherwise reproducible.
+#
+# psycopg 3, not psycopg2, and the [binary] extra rather than the pure-python
+# build. The extra ships a wheel with libpq compiled in, which is what keeps this
+# image free of `libpq-dev`, gcc and an apt layer -- there is no `apt-get` in
+# ai/Dockerfile at all, and that is why.
+#
+# What this does *not* decide is glibc versus musl, and the first version of this
+# comment claimed it did. Checked against PyPI instead of asserted: psycopg-binary
+# 3.3.4 publishes musllinux_1_2 wheels for x86_64, aarch64, ppc64le and riscv64
+# alongside the manylinux ones, so alpine would install it from a wheel just fine.
+# ai/Dockerfile has the reason the base image is slim anyway, and it is a different
+# package's problem.
+psycopg[binary]==3.3.4

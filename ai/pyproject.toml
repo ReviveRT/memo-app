@@ -1,0 +1,11 @@
+# Configuration only. Not a package: the worker is run as `python -m memo_ai.worker`
+# from /app, so there is nothing to build, install or version here.
+#
+# `pythonpath = ["."]` is what lets `from tests.support import ...` and
+# `from memo_ai import ...` both resolve without a src layout or an editable
+# install -- pytest puts the rootdir on sys.path before collecting.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q --strict-markers"
