@@ -90,7 +90,7 @@ class FakeCursor:
     def __exit__(self, *_exc_info) -> bool:
         return False
 
-    def execute(self, sql: str, params: dict | None = None) -> None:
+    def execute(self, sql: str, params: dict[str, object] | None = None) -> None:
         self._connection.executed.append((sql, params))
         self.rowcount = self._connection.rowcount
 
@@ -102,7 +102,7 @@ class FakeConnection:
     """Records every statement and hands back a canned rowcount or row."""
 
     def __init__(self, rowcount: int = 1, row=None) -> None:
-        self.executed: list[tuple[str, dict | None]] = []
+        self.executed: list[tuple[str, dict[str, object] | None]] = []
         self.rowcount = rowcount
         self.row = row
 
@@ -113,7 +113,7 @@ class FakeConnection:
         return FakeCursor(self)
 
     @property
-    def last_params(self) -> dict | None:
+    def last_params(self) -> dict[str, object] | None:
         return self.executed[-1][1]
 
     @property

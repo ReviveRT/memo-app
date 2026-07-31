@@ -6,6 +6,8 @@ Both rules were regressions on the PHP side rather than theory, which is why the
 are pinned here on the first task that reads an environment variable in Python.
 """
 
+import logging
+
 import pytest
 
 from memo_ai import stt
@@ -15,6 +17,7 @@ from memo_ai.config import (
     DEFAULT_STT_FALLBACK,
     DEFAULT_STT_MODEL,
     DEFAULT_STT_PROVIDER,
+    LOG_LEVELS,
     ConfigError,
     Settings,
 )
@@ -99,6 +102,17 @@ def test_a_valid_poll_interval_is_parsed_as_a_float():
 
 def test_log_level_is_case_insensitive():
     assert Settings.from_env(MINIMAL | {"LOG_LEVEL": "debug"}).log_level == "DEBUG"
+
+
+def test_every_offered_log_level_is_one_logging_can_resolve():
+    # log.configure() indexes logging.getLevelNamesMapping() with whatever this
+    # module accepted, so a name here that logging does not know would be a KeyError
+    # at startup -- *after* config parsing had already pronounced it valid. That is
+    # the worst place for it, because the error would name logging rather than the
+    # variable the user set.
+    for name in LOG_LEVELS:
+        assert name in logging.getLevelNamesMapping()
+        assert Settings.from_env(MINIMAL | {"LOG_LEVEL": name}).log_level == name
 
 
 def test_an_unknown_log_level_is_refused_rather_than_defaulted():

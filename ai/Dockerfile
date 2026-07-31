@@ -6,10 +6,17 @@
 # context, one dependency set, one uid.
 #
 # `python:3.12-slim`, and both halves of that are chosen rather than default.
-# 3.12 because compose already documents this image as it; slim rather than alpine
-# because psycopg-binary publishes manylinux wheels and no musl ones, so alpine
-# would build libpq from source and need a toolchain this image otherwise has no
-# use for. See ai/requirements.txt.
+# 3.12 because NOTES.md already documents this image as it, from MEMO-12's survey of
+# which base images run as root.
+#
+# slim rather than alpine, and the honest reason is a package that is not here yet.
+# It is not psycopg: psycopg-binary publishes musllinux_1_2 wheels alongside the
+# manylinux ones, so alpine would install the driver from a wheel perfectly well --
+# checked against PyPI after an earlier version of this comment claimed otherwise.
+# The constraint is `ctranslate2`, which faster-whisper runs on and which MEMO-14
+# adds: 4.8.1 ships manylinux wheels and *zero* musllinux ones. On alpine that is a
+# C++ build from source inside the image. Committing to glibc now costs nothing and
+# saves discovering it two tasks later, on the task that also bakes model weights.
 #
 # There is no `apt-get` in this file. Nothing here needs a system package yet --
 # ffmpeg and ffprobe arrive with MEMO-13, and that is the task that owns the apt

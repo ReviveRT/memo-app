@@ -31,9 +31,8 @@ def test_fake_records_no_model():
 
 def test_fake_never_touches_the_filesystem():
     # The path below does not exist, and it must not matter. This is what lets
-    # MEMO-08 prove the queue nine tasks before an upload endpoint can put real
-    # bytes on the volume (MEMO-10, MEMO-11), and what MEMO-14 means by "`fake` is
-    # instant".
+    # MEMO-08 (build order 9) prove the queue before MEMO-11 (build order 14) can
+    # put real bytes on the volume, and what MEMO-14 means by "`fake` is instant".
     result = stt.resolve("fake", SETTINGS).transcribe(
         Path("/data/audio/definitely/not/here/nope.webm")
     )

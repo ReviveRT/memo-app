@@ -147,19 +147,27 @@ def _install_signal_handlers(shutdown: threading.Event) -> None:
     So without this handler the worker is never asked to stop, only killed. With it,
     `docker compose stop ai-worker` takes 0.3s and both replicas exit 0 after
     logging their last line; with the command swapped for a handler-less sleep, the
-    same call takes 1.2s and exits 137. The seconds are the least interesting part
-    of that -- what matters is that 137 is a SIGKILL, so the in-flight job is
-    destroyed rather than finished. The gap also scales with the grace period: at
-    the 10s `stop_grace_period` documents, the same container takes 10.2s to die.
+    same call exits 137. 137 is a SIGKILL, which is the part that matters: the
+    in-flight job is destroyed rather than finished.
 
     The first reason is what it does with the flag. Shutdown stops the worker
     *claiming*; the job already in flight runs to completion and writes its result.
     That matters more before MEMO-16 than after: there is no reaper yet, so a memo
     abandoned in `processing` is stuck for good, and a `docker compose down` in the
-    middle of one would be the ordinary way to produce that. A SIGKILL still leaves
-    the row in `processing` -- and once transcription takes real time (MEMO-14), so
-    does a job that outlives the grace period. Those are the reaper's cases, and
-    the reason it is on the list rather than optional.
+    middle of one would be the ordinary way to produce that.
+
+    How long that grace lasts is not this file's decision and turned out not to be
+    the documented one either. The Compose spec gives `stop_grace_period` a default
+    of 10s; measured on Compose v5.0.2, an unset grace period SIGKILLs a
+    handler-less container after **1.2s**, while an explicit `stop_grace_period: 10s`
+    takes 10.2s. Since a job today finishes in about 4 ms either number is ample, but
+    a 1.2s window would silently stop being ample the moment MEMO-14 makes
+    transcription take seconds -- so docker-compose.yml now sets the value rather
+    than inheriting it, and says why at the line.
+
+    A SIGKILL still leaves the row in `processing`, and so does any job that outlives
+    whatever that grace period is. Those are the reaper's cases, and the reason it is
+    on MEMO-16's list rather than optional.
 
     The handler only sets the event: no logging inside it. A signal handler runs
     between bytecode instructions in the main thread, so one that logs can be

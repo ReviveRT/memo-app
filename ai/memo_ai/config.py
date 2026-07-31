@@ -24,7 +24,6 @@ it, the same way ``api/config/memo.php`` mirrors its own -- these values also
 have to be right under a bare ``docker run`` with no compose file in sight.
 """
 
-import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -49,6 +48,14 @@ DEFAULT_AUDIO_DIR = "/data/audio"
 # loops back without waiting, so this bounds pickup latency, not throughput.
 DEFAULT_POLL_SECONDS = 1.0
 DEFAULT_LOG_LEVEL = "INFO"
+
+# The five real levels, rather than logging.getLevelNamesMapping(), which was the
+# first version of this and offers eight. The three it adds are all wrong to put in
+# front of a user: `WARN` and `FATAL` are deprecated aliases, and `NOTSET` is not a
+# verbosity at all -- it means "inherit", which on the root logger resolves to
+# "everything" (checked: root.level 0, isEnabledFor(INFO) true). Listing it in the
+# error message for a mistyped level recommends it.
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 
 class ConfigError(Exception):
@@ -138,13 +145,10 @@ def _positive_float(env: Mapping[str, str], key: str, default: float) -> float:
 def _log_level(env: Mapping[str, str], key: str, default: str) -> str:
     name = _string(env, key, default).upper()
 
-    # Validated against logging's own table rather than a hand-written tuple, and
-    # refused rather than defaulted. `LOG_LEVEL=INF` would otherwise leave
-    # basicConfig with a level it cannot resolve; getLevelName() answers a
-    # *string* ("Level INF") for an unknown name instead of raising, so the
-    # mistake would survive all the way to a logger that emits nothing.
-    if name not in logging.getLevelNamesMapping():
-        allowed = ", ".join(sorted(logging.getLevelNamesMapping()))
-        raise ConfigError(f"{key} must be one of {allowed}, got {name!r}.")
+    # Refused rather than defaulted. getLevelName() answers a *string* ("Level INF")
+    # for an unknown name instead of raising, so `LOG_LEVEL=INF` would otherwise
+    # survive all the way to a logger that emits nothing.
+    if name not in LOG_LEVELS:
+        raise ConfigError(f"{key} must be one of {', '.join(LOG_LEVELS)}, got {name!r}.")
 
     return name

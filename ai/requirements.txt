@@ -7,7 +7,10 @@
 # image free of `libpq-dev`, gcc and an apt layer -- there is no `apt-get` in
 # ai/Dockerfile at all, and that is why.
 #
-# It is also the reason the base image is `python:3.12-slim` (glibc) rather than
-# alpine: psycopg-binary publishes manylinux wheels and no musl ones, so alpine
-# would fall back to building from source and need the toolchain this avoids.
+# What this does *not* decide is glibc versus musl, and the first version of this
+# comment claimed it did. Checked against PyPI instead of asserted: psycopg-binary
+# 3.3.4 publishes musllinux_1_2 wheels for x86_64, aarch64, ppc64le and riscv64
+# alongside the manylinux ones, so alpine would install it from a wheel just fine.
+# ai/Dockerfile has the reason the base image is slim anyway, and it is a different
+# package's problem.
 psycopg[binary]==3.3.4

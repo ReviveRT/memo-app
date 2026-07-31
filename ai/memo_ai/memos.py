@@ -52,9 +52,10 @@ class ClaimedMemo:
 
     # The fence token. Read here so it can be handed straight back to the result
     # write -- see :meth:`MemoQueue.finish_ready`. `timestamptz` and Python's
-    # `datetime` are both microsecond-precision, so the round trip is exact; the
-    # equality in the WHERE clause was checked against a value that had been out to
-    # Python and back rather than assumed from that.
+    # `datetime` are both microsecond-precision, so the round trip is exact, and that
+    # was checked from both directions rather than inferred: a value that had been
+    # out to Python and back still matches in the WHERE clause, and two claims of the
+    # same row 3.6 ms apart produced tokens that differ.
     locked_at: datetime
 
 
@@ -215,7 +216,7 @@ class MemoQueue:
             "fail",
         )
 
-    def _fenced(self, sql: str, params: dict, memo: ClaimedMemo, what: str) -> bool:
+    def _fenced(self, sql: str, params: dict[str, object], memo: ClaimedMemo, what: str) -> bool:
         """
         Run a write fenced on ``locked_at`` and report whether it landed.
 
@@ -230,6 +231,15 @@ class MemoQueue:
         running, because a reaped job is not a stopped one -- must not be able to
         overwrite the new attempt. Fencing is also why the two writes above never
         touch ``locked_at``: the token has to stay put for the claim's whole life.
+
+        Played out against a real Postgres rather than left as an argument, because
+        a fence that never loses and a fence that never fires look identical from
+        the outside. Worker A claims; a reaper requeues the row; worker B re-claims
+        it and gets a different token; A then writes. A's ``finish_ready`` returned
+        False, the transcript column was still NULL, and the row still carried B's
+        claim -- and B's own write then landed normally. ``fail()`` is fenced the
+        same way and was checked the same way: A could not move the row to
+        ``failed`` either.
 
         Warning rather than raising: losing the fence is a correct outcome of a
         correct design, and the row is already in the hands of whoever holds the

@@ -277,6 +277,23 @@ services:
       - whisper-cache:/cache
     deploy:
       replicas: 2
+    # Set rather than inherited, because the inherited value is not the documented
+    # one. The Compose spec gives stop_grace_period a default of 10s; measured on
+    # Compose v5.0.2, an unset grace period SIGKILLs a handler-less container after
+    # 1.2s, and an explicit `10s` takes 10.2s. So the default here is ~1s.
+    #
+    # That matters because the worker handles SIGTERM specifically so the job in
+    # flight finishes and writes its result (memo_ai/worker/__main__.py) -- and with
+    # ~1s of grace that guarantee holds only while a job takes milliseconds, which is
+    # true of the fake provider and stops being true at MEMO-14. Today's jobs finish
+    # in about 4 ms, so this costs nothing and is purely for the version of the
+    # worker that transcribes for real.
+    #
+    # 30s rather than MAX_AUDIO_SECONDS: a `docker compose down` that hangs for ten
+    # minutes is not a better outcome than a reaped row, and reaping is what MEMO-16
+    # builds for exactly this case. That task owns the deliberate version of this
+    # number, together with the reaper's own threshold -- which has to stay above it.
+    stop_grace_period: 30s
     restart: unless-stopped
 
   # A sixth service, ai-api, joins this file only if "Ask my memos" lands (MEMO-24).

@@ -9,9 +9,29 @@ and memo_ai/memos.py records what those runs showed. What is left here is the
 marshalling around them, which is where a mistake would be silent rather than loud.
 """
 
-from memo_ai.memos import MAX_LAST_ERROR_CHARS, MemoQueue
+from dataclasses import fields
+
+from memo_ai.memos import _CLAIM_COLUMNS, MAX_LAST_ERROR_CHARS, ClaimedMemo, MemoQueue
 from memo_ai.stt.base import Transcript
 from tests.support import LOCKED_AT, FakeConnection, claimed_memo
+
+
+def test_the_claim_projection_and_claimedmemo_name_the_same_columns():
+    # The drift guard, moved forward from runtime to test time.
+    #
+    # psycopg's class_row passes every returned column to ClaimedMemo as a keyword
+    # argument, so the two do already fail loudly on their own -- confirmed against
+    # real Postgres: an extra `status` in the projection raises "got an unexpected
+    # keyword argument 'status'", and dropping `audio_path` raises "missing 1
+    # required positional argument: 'audio_path'". Both name the column. But that
+    # happens on the first claim, in a worker container, which is a slower and more
+    # confusing place to learn it than here.
+    #
+    # Sets rather than a list: class_row matches by name, so reordering the
+    # projection is harmless and should not fail a test.
+    projected = {column.strip() for column in _CLAIM_COLUMNS.split(",")}
+
+    assert projected == {field.name for field in fields(ClaimedMemo)}
 
 
 def test_the_fence_token_is_the_locked_at_that_was_claimed():

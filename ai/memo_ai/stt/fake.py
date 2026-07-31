@@ -20,10 +20,10 @@ class FakeStt:
     Instant, deterministic, and it never touches the filesystem.
 
     Not reading the file is a deliberate trade and it is what makes this provider
-    useful here. MEMO-08 lands nine tasks before an upload endpoint exists
-    (MEMO-10, MEMO-11), so there is no way to get real bytes onto the `audio`
-    volume yet -- a fake that stat'd its argument could not be used to prove the
-    queue works, which is the one thing this task is for. It also keeps the
+    useful here. MEMO-08 is build order 9 and the upload endpoint is MEMO-11 at
+    build order 14, so there is no way to get real bytes onto the `audio` volume for
+    another five positions -- a fake that stat'd its argument could not be used to
+    prove the queue works, which is the one thing this task is for. It also keeps the
     provider usable from a test that has no volume mounted at all, and it is what
     MEMO-14 means when it specifies "`fake` is instant".
 

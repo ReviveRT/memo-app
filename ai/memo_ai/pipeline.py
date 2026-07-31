@@ -116,8 +116,12 @@ def audio_file(audio_dir: Path, key: str) -> Path:
     The traversal check mirrors ``LocalAudioStorage::path`` for the reason stated
     there: the key reaches this function from an id the API generated, and "it is
     trusted today" is not a property that survives refactoring. This side has the
-    stronger claim on it, because the worker is also what *deletes* these files
-    from MEMO-16 onwards.
+    stronger claim on it, because under MEMO-12's uid/gid contract the worker is the
+    container that *unlinks* on this volume -- so a key that escaped the root here
+    would escape it with delete rights rather than read rights. Which task actually
+    performs that unlink is still open: MEMO-12 settled the permissions, and MEMO-23
+    adds audio playback, which implies the blobs are kept rather than dropped after
+    transcription. Nothing in this file deletes anything today.
     """
     if not key or "\0" in key:
         raise SttError("The audio key on this memo is empty or contains a null byte.")
