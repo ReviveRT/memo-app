@@ -253,7 +253,11 @@ export function useRecorder() {
       error.value = `Recording stopped unexpectedly (${event.error?.name ?? 'unknown error'}).`
     })
 
-    recorder.addEventListener('stop', finish)
+    // Bound to the instance rather than to `recorder`, so a `stop` event that arrives
+    // after this recorder has been replaced cannot act on its successor. See finish().
+    const instance = recorder
+
+    recorder.addEventListener('stop', () => finish(instance))
 
     try {
       recorder.start(TIMESLICE_MS)
@@ -284,14 +288,43 @@ export function useRecorder() {
   }
 
   /**
+   * Answer whoever is awaiting stop(), exactly once, and forget them.
+   *
+   * Every exit from a recording goes through here rather than calling `settle` directly,
+   * because the failure it prevents is invisible: a path that returns without settling
+   * leaves the awaiting async function suspended for the life of the page, and from the
+   * screen that is indistinguishable from a Stop button that did nothing. There are
+   * three such exits -- the recording finishing, discard(), and unmount -- and the last
+   * two were each missing it.
+   */
+  function answer(recorded) {
+    const settled = settle
+
+    settle = null
+    settled?.(recorded)
+  }
+
+  /**
    * Stop, and resolve with the recording once the browser has flushed it.
    *
-   * Resolves null when there was nothing to stop, when the recorder errored, or when
-   * the result is zero bytes -- a microphone that produced silence still produces a
-   * container, but one that produced nothing at all is not a memo to send.
+   * Resolves null rather than rejecting for every outcome that is not a recording:
+   * nothing was running, a stop is already in progress, the recorder errored, the result
+   * was zero bytes, or it was discarded out from under this call. A microphone that
+   * produced silence still produces a container, so an empty blob means no audio reached
+   * the browser at all -- which finish() reports in words rather than leaving to be
+   * inferred from a button that did nothing.
    */
   function stop() {
     if (!recording.value || recorder === null) {
+      return Promise.resolve(null)
+    }
+
+    // Already stopping. Without this a second click overwrites `settle` with the second
+    // caller's resolve, and the first promise never settles at all -- an await in the
+    // component that hangs for the lifetime of the page. Answering null is right rather
+    // than merely safe: only one of the two callers can be handed the recording, and it
+    // is the one that asked first.
+    if (settle !== null) {
       return Promise.resolve(null)
     }
 
@@ -303,7 +336,7 @@ export function useRecorder() {
       // Calling stop() on it throws InvalidStateError, so finish() is called directly
       // and does the same cleanup the event would have triggered.
       if (recorder.state === 'inactive') {
-        finish()
+        finish(recorder)
       } else {
         recorder.stop()
       }
@@ -312,40 +345,57 @@ export function useRecorder() {
 
   /** Throw the recording away and let go of the microphone. */
   function discard() {
-    if (recording.value && recorder?.state !== 'inactive') {
-      // The `stop` event still fires and still runs finish(), which is what releases
-      // the stream. `settle` is null, so the assembled blob is dropped on the floor
-      // rather than reaching a caller -- which is the whole difference between this and
-      // stop().
-      recorder?.stop()
+    const instance = recorder
+
+    if (recording.value && instance?.state !== 'inactive') {
+      instance?.stop()
     }
 
     chunks = []
     elapsedMs.value = 0
     recording.value = false
     stopTicking()
+
+    // Released here rather than left to the `stop` event, and this is the fix for two
+    // faults rather than tidiness. The small one is that the microphone stays open --
+    // and the OS keeps saying so -- for as long as the browser takes to finalize a
+    // container nobody is going to read.
+    //
+    // The real one is that this method re-enables the Record button *synchronously*
+    // while the event is still queued. Start another recording inside that window and
+    // the late event ran finish() against whatever `recorder` pointed at by then --
+    // which was the new recorder -- releasing its stream and stopping its timer, so the
+    // recording that had just started silently died. Releasing now means the late event
+    // finds an instance that is no longer current, and finish() drops it.
+    release()
+
+    // Both buttons are on screen together, so Discard is reachable while a stop() is
+    // still waiting for its blob. That call is now never going to be answered by
+    // finish() -- release() above made its event a no-op -- so it is answered here.
+    answer(null)
   }
 
   /**
    * The `stop` event: assemble the chunks, release the microphone, answer the caller.
    *
-   * Reached with no caller waiting in two cases -- discard(), and a recording the
-   * browser ended on its own -- so everything here has to be safe to run for its side
-   * effects alone.
+   * Exactly one case reaches the body with no caller waiting: a recording the browser
+   * ended by itself. discard() and unmount both release before their event lands, so the
+   * instance guard below turns those into no-ops -- which is what the last branch relies
+   * on when it treats `settle === null` as "this stopped on its own".
+   *
+   * @param {MediaRecorder} instance The recorder this call is about. Anything else is a
+   *   `stop` event from a recorder that has since been replaced or released, and acting
+   *   on it would apply one recording's ending to a different recording.
    */
-  function finish() {
-    // Already finished. Reachable because `stop` is an event as well as something
-    // stop() can call directly, and because unmounting stops the recorder after
-    // releasing it -- so the queued event arrives at a recorder that is gone. Without
-    // this the late call would overwrite a resolved recording with an empty Blob.
-    if (recorder === null) {
+  function finish(instance) {
+    if (instance !== recorder) {
       return
     }
 
     stopTicking()
     recording.value = false
 
-    const type = recorder?.mimeType || chunks[0]?.type || ''
+    const type = instance.mimeType || chunks[0]?.type || ''
 
     // The type is carried on the Blob as well as being used for the filename, because
     // it is what fetch puts in the part's Content-Type. The API does not believe it --
@@ -356,10 +406,40 @@ export function useRecorder() {
     chunks = []
     release()
 
-    const answer = settle
-    settle = null
+    if (failed) {
+      answer(null)
 
-    answer?.(failed || blob.size === 0 ? null : { blob, filename: `memo.${extensionFor(type)}` })
+      return
+    }
+
+    // Zero bytes with nothing else wrong: a track that ended before it produced a
+    // sample, or a device that was open but silent in the way a disconnected input is.
+    // It needs its own sentence, because returning null on its own means the Stop button
+    // does nothing at all and says nothing about why -- the silent failure this whole
+    // file is written against.
+    if (blob.size === 0) {
+      error.value = 'That recording came back empty — no audio reached the browser.'
+      answer(null)
+
+      return
+    }
+
+    // A real recording with nobody waiting for it, which by elimination means the
+    // browser ended this one itself: the device was unplugged, or the permission was
+    // revoked from the address bar mid-recording. discard() and unmount both release
+    // first, so their late events are stopped by the instance guard above and never
+    // arrive here.
+    //
+    // The blob is lost either way -- the UI left the recording state the moment this
+    // ran, and there is nowhere to put it -- but it must not be lost in silence, which
+    // is a Record button that returns to idle mid-sentence and explains nothing.
+    if (settle === null) {
+      error.value =
+        'Recording stopped on its own — the microphone was disconnected or its permission ' +
+        'was withdrawn. Nothing was saved.'
+    }
+
+    answer({ blob, filename: `memo.${extensionFor(type)}` })
   }
 
   /**
@@ -392,6 +472,11 @@ export function useRecorder() {
 
     stopTicking()
     release()
+
+    // Same reasoning as discard(): release() has already made the queued `stop` event a
+    // no-op, so a stop() that was in flight when the component went away is answered
+    // here or never.
+    answer(null)
   })
 
   return { recording, elapsedMs, error, start, stop, discard }

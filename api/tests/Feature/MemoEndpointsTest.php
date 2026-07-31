@@ -273,6 +273,36 @@ final class MemoEndpointsTest extends TestCase
         $this->assertSame([], $this->repository->inserted);
     }
 
+    public function test_an_empty_text_part_alongside_a_recording_is_absence_rather_than_a_conflict(): void
+    {
+        // A multipart body with both an empty `text` and the file. ConvertEmptyStringsToNull
+        // makes that a null which is *present*, which is not the same as absent -- before
+        // `nullable` this answered 422 "The text field must be a string." to a request
+        // whose only content was a recording.
+        $this->post('/api/memos', [
+            'text' => '',
+            StoreMemoRequest::AUDIO_FIELD => $this->recording(self::containers()['Chrome']['bytes']),
+        ])->assertCreated()->assertJsonPath('memo.source', 'voice');
+
+        $this->assertSame(Memo::SOURCE_VOICE, $this->repository->inserted[0]['source']);
+        $this->assertNull($this->repository->inserted[0]['transcript']);
+    }
+
+    public function test_an_empty_text_on_its_own_is_still_refused(): void
+    {
+        // The other half of `nullable`, and the one worth pinning: it must not have
+        // turned an empty memo into an accepted one. required_without is implicit, so it
+        // still judges a null -- but that is a property of Laravel's rule ordering rather
+        // than something obvious from reading the list.
+        foreach ([['text' => ''], ['text' => null], ['text' => '   ']] as $body) {
+            $this->postJson('/api/memos', $body)
+                ->assertStatus(422)
+                ->assertJsonValidationErrors('text');
+        }
+
+        $this->assertSame([], $this->repository->inserted);
+    }
+
     public function test_an_audio_field_that_is_not_a_file_is_refused(): void
     {
         // `audio` as a plain string satisfies required_without and nothing else. Worth

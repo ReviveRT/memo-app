@@ -112,6 +112,22 @@ final class StoreMemoRequest extends FormRequest
             // there, and `string` refuses it.
             'text' => [
                 'required_without:'.self::AUDIO_FIELD,
+
+                // Paired with the rule above, not a relaxation of it. `nullable` only
+                // affects rules that are not implicit, and required_without is implicit
+                // -- so a null `text` with no audio still fails, and a null `text`
+                // alongside audio now stops running the string rules against nothing.
+                //
+                // The case is a multipart body carrying an empty `text` part as well as
+                // the file. Laravel's ConvertEmptyStringsToNull turns that into a null
+                // that is *present*, which is different from absent: `string` then ran
+                // and answered "The text field must be a string." to a request whose
+                // only content was a recording. Nothing this app sends looks like that
+                // -- api/memos.js appends the file and nothing else -- but it is the
+                // obvious shape for anyone building the same request by hand, and being
+                // told the wrong field is wrong is a bad first answer to give them.
+                'nullable',
+
                 'string',
                 'min:1',
                 'max:'.self::MAX_TEXT_LENGTH,

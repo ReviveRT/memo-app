@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 import { useMemos } from '../composables/useMemos'
 import { useRecorder } from '../composables/useRecorder'
 
@@ -16,7 +16,7 @@ import { useRecorder } from '../composables/useRecorder'
  * buttons and the decision about which of several things to say in one line of status.
  */
 
-const { saving, audioError, submitAudio } = useMemos()
+const { uploading, audioError, submitAudio } = useMemos()
 
 const {
   recording,
@@ -26,16 +26,6 @@ const {
   stop,
   discard,
 } = useRecorder()
-
-/**
- * Whether the POST in flight is *this* component's.
- *
- * `saving` is shared with the composer -- one write at a time across the whole app --
- * so it cannot be used to say "uploading": a typed memo being saved would light this
- * component up too. It is still the right thing to disable the button on, which is why
- * both exist.
- */
-const uploading = ref(false)
 
 const elapsed = computed(() => formatElapsed(elapsedMs.value))
 
@@ -67,13 +57,11 @@ async function onStop() {
     return
   }
 
-  uploading.value = true
-
-  try {
-    await submitAudio(recorded.blob, recorded.filename)
-  } finally {
-    uploading.value = false
-  }
+  // `uploading` is held by submitAudio itself rather than around it here, so the flag
+  // the button reads and the flag that guards re-entry are the same one. Set here, the
+  // two could disagree -- and it is the guard, not the label, that decides whether this
+  // recording is posted at all.
+  await submitAudio(recorded.blob, recorded.filename)
 }
 
 /**
@@ -101,7 +89,12 @@ function formatElapsed(ms) {
     the whole of what a form would have added.
   -->
   <section class="recorder" aria-label="Record a voice memo">
-    <button v-if="!recording" type="button" :disabled="saving" @click="start()">
+    <!--
+      Disabled on `uploading` and not on the composer's `saving`: a typed memo being
+      saved is no reason this button cannot be pressed, and the two write paths are
+      independent all the way to two rows.
+    -->
+    <button v-if="!recording" type="button" :disabled="uploading" @click="start()">
       {{ uploading ? 'Uploading…' : 'Record' }}
     </button>
 

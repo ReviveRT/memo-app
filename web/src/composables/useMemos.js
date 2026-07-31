@@ -11,7 +11,7 @@ import { createMemo, createVoiceMemo, listMemos } from '../api/memos'
  * to reach it through props and events routed via App.vue.
  *
  * No Pinia. A store would buy devtools time-travel and module namespacing for an app
- * whose entire state is the dozen refs and computeds below, and it fails the same over-engineering
+ * whose entire state is the dozen-odd refs and computeds below, and it fails the same over-engineering
  * test this project applies to every other dependency. The shape a store would give
  * is already here -- state outside the component tree, mutated only by the functions
  * in this file -- so swapping it in later is a mechanical change if there is ever a
@@ -75,6 +75,28 @@ const pending = computed(() => memos.value.some((memo) => !TERMINAL_STATUSES.has
 const loading = ref(false)
 
 const saving = ref(false)
+
+/**
+ * The same thing for the recording path, and separate from `saving` rather than sharing
+ * it (MEMO-10).
+ *
+ * One flag across both was the first shape and it loses memos. Each of these is a
+ * re-entry guard -- `store()` refuses to start while its own flag is set -- so a shared
+ * one also refuses the *other* action, and the two are not equally cheap to refuse. A
+ * refused Save leaves the text in the textarea to try again. A refused upload has
+ * nothing to go back to: useRecorder has already assembled the Blob, released the
+ * microphone and forgotten the chunks, so the only copy of that recording is the
+ * argument being dropped on the floor -- silently, since a guard that returns early sets
+ * no error either.
+ *
+ * Reachable by typing a memo, pressing Save, and pressing Stop while that POST is in
+ * flight. Nothing prevented that: the composer stays live during a recording.
+ *
+ * What the shared flag was bought for -- "the two controls cannot post at once" -- was
+ * never needed. Two POSTs in flight make two independent rows, which is what two memos
+ * are.
+ */
+const uploading = ref(false)
 
 /**
  * Two error refs, not one. A failed refresh must not blank the message explaining why
@@ -460,7 +482,7 @@ function submit(text) {
   // cap is the string the API is asked to store. StoreMemoRequest trims again -- that
   // is agreement, not reliance -- and the composer's own guard is what refuses a
   // whitespace-only memo before it ever reaches here.
-  return store(() => createMemo(text.trim()), saveError, 'Could not save the memo')
+  return store(() => createMemo(text.trim()), saving, saveError, 'Could not save the memo')
 }
 
 /**
@@ -483,6 +505,7 @@ function submit(text) {
 function submitAudio(blob, filename) {
   return store(
     () => createVoiceMemo(blob, filename),
+    uploading,
     audioError,
     'Could not upload the recording',
   )
@@ -491,26 +514,25 @@ function submitAudio(blob, filename) {
 /**
  * The write path both of the above share: post, prepend, count the write.
  *
- * `saving` is one flag across both, so the two controls cannot post at the same time.
- * That is a stronger guarantee than either needs on its own and it is deliberate --
- * two memos created in the same instant is not a failure, but a shared guard also
- * means the composer's button reports honestly while a recording is uploading rather
- * than looking idle. What it costs is that a slow upload disables the textarea's Save
- * for its duration, which on localhost is the length of one POST.
+ * The guard is a parameter rather than one flag in this file, so each action only ever
+ * refuses itself. `uploading` above has the whole argument for why that separation is
+ * load-bearing rather than tidy.
  *
  * @param {() => Promise<object>} create Performs the request and returns the stored row.
+ * @param {import('vue').Ref<boolean>} guard This action's re-entry flag. Held for the
+ *   duration of the request, and read by whichever control reports it.
  * @param {import('vue').Ref<?string>} target Where this action's failures are reported.
  * @param {string} failure Prefix, so a stopped api container -- which fails every one
  *   of these with the same sentence -- still says which action it broke.
  * @returns {Promise<boolean>} Whether the memo was stored. The composer clears the
  *   textarea only on true, so a rejected memo is still there to fix and resubmit.
  */
-async function store(create, target, failure) {
-  if (saving.value) {
+async function store(create, guard, target, failure) {
+  if (guard.value) {
     return false
   }
 
-  saving.value = true
+  guard.value = true
 
   try {
     // Not optimistic -- nothing appears until the database has the row -- so there is
@@ -531,7 +553,7 @@ async function store(create, target, failure) {
 
     return false
   } finally {
-    saving.value = false
+    guard.value = false
   }
 }
 
@@ -542,6 +564,7 @@ export function useMemos() {
     loading,
     busy,
     saving,
+    uploading,
     loadError,
     saveError,
     audioError,
