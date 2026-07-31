@@ -15,6 +15,13 @@
  */
 defineProps({
   memos: { type: Array, required: true },
+
+  /**
+   * Whether a fresher list is coming -- App.vue passes the composable's `busy`, which spans
+   * a pending filter change as well as a request in flight. Named for what this component
+   * does with it rather than for its source: it is the difference between "empty because
+   * nothing has arrived yet" and "empty because that is the answer".
+   */
   loading: { type: Boolean, default: false },
 
   /**
@@ -30,8 +37,11 @@ defineProps({
    * database, and it is false when the memos are there and the filter excluded them. The
    * two empty states also want different actions -- type a memo, or change the filter.
    *
-   * It is the query the API echoed rather than the one in the box, so the sentence names
-   * the query that actually returned nothing.
+   * `displayedFilter` from the composable, so the sentence names the query that actually
+   * returned nothing rather than whatever the box says now -- and so this and MemoSearch's
+   * status line cannot disagree about whether a filter is in effect at all. They did: this
+   * one used to read the API's echo alone and went on saying "No memos match xylophone"
+   * under an emptied box until the unfiltered response landed.
    */
   query: { type: String, default: null },
 })

@@ -17,7 +17,7 @@ import { useMemos } from '../composables/useMemos'
  * -- filter now, without waiting out the debounce -- and a page reload is not it.
  */
 
-const { query, appliedQuery, memos, search, searchNow, clearSearch } = useMemos()
+const { query, displayedFilter, memos, search, searchNow, clearSearch } = useMemos()
 
 /**
  * Mirrors Memo::IN_FLIGHT_STATUSES in the API, the same way MemoComposer mirrors
@@ -35,22 +35,21 @@ const hasInFlight = computed(() =>
 /**
  * Whether to describe the list as filtered.
  *
- * Three conditions, and the first is the one worth explaining. It reads the *box*, while
- * everything the line then says reads `appliedQuery` -- so an emptied box hides the line at
- * once, rather than leaving "3 memos shown for dentist" above an unfiltered list for as
- * long as the request to unfilter it takes.
+ * `displayedFilter` carries the whole of that judgement -- it is null both while the box is
+ * empty and before the first filtered response has arrived -- and it is shared with
+ * MemoList so the two cannot disagree about when a filter is in effect. See the composable
+ * for why the box and the echo each decide half of it.
  *
- * `appliedQuery` covers the opposite gap: a filter typed but not yet answered has no rows
- * of its own to count, and the previous query's are not what the box now says.
+ * The count is the only condition added here, and only because MemoList's empty state
+ * covers that case better; see the template.
  *
- * Gating on `loading` instead would do both of those by accident and cost a flicker for it,
- * hiding the line on every keystroke that reaches the network. Nothing here is stale in a
- * way that misleads -- the count and the quoted query always come from the same response --
- * so there is no reason to blank it while the next one is in the air.
+ * Gating on `loading` instead -- which this did at first -- gets the emptied-box case right
+ * by accident and charges a flicker for it, hiding the line on every keystroke that reaches
+ * the network. Nothing here is stale in a way that misleads: the count and the quoted query
+ * always come from the same response, so there is no reason to blank it while the next one
+ * is in the air.
  */
-const isFiltered = computed(
-  () => query.value.trim() !== '' && appliedQuery.value !== null && memos.value.length > 0,
-)
+const isFiltered = computed(() => displayedFilter.value !== null && memos.value.length > 0)
 </script>
 
 <template>
@@ -89,9 +88,9 @@ const isFiltered = computed(
 
   <!--
     Only rendered while the list is filtered (see isFiltered), so an unfiltered list carries
-    no extra furniture. The sentence itself is built from appliedQuery rather than the box,
-    so it describes the rows underneath it: the count and the quoted query always come from
-    the same response, instead of the number lagging a query the user has already replaced.
+    no extra furniture. The sentence itself quotes displayedFilter rather than the box, so it
+    describes the rows underneath it: the count and the quoted query always come from the
+    same response, instead of the number lagging a query the user has already replaced.
 
     Two wordings, because only one of them can honestly use the word "match". The API
     returns matches *and* memos pinned in because they are still being transcribed, and
@@ -104,7 +103,7 @@ const isFiltered = computed(
 
     Neither branch calls the number a total. It is what came back under the API's limit.
 
-    The empty case is isFiltered's third condition rather than a third wording here, because
+    The empty case is isFiltered's count condition rather than a third wording here, because
     MemoList's empty state already covers it and covers it better -- it suggests what to do
     about it. Both at once renders "0 memos match x" directly above "No memos match x",
     which reads like the page said it twice because something went wrong.
@@ -112,13 +111,13 @@ const isFiltered = computed(
   <p v-if="isFiltered" class="search__status">
     <template v-if="hasInFlight">
       {{ memos.length === 1 ? '1 memo' : `${memos.length} memos` }} shown for
-      <strong>{{ appliedQuery }}</strong
+      <strong>{{ displayedFilter }}</strong
       >, including any still being processed
     </template>
 
     <template v-else>
       {{ memos.length === 1 ? '1 memo matches' : `${memos.length} memos match` }}
-      <strong>{{ appliedQuery }}</strong>
+      <strong>{{ displayedFilter }}</strong>
     </template>
   </p>
 </template>

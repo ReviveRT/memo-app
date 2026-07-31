@@ -5,7 +5,7 @@ import MemoList from './components/MemoList.vue'
 import MemoSearch from './components/MemoSearch.vue'
 import { useMemos } from './composables/useMemos'
 
-const { memos, loading, loadError, appliedQuery, load } = useMemos()
+const { memos, loading, busy, loadError, displayedFilter, load } = useMemos()
 
 onMounted(load)
 </script>
@@ -49,11 +49,17 @@ onMounted(load)
     -->
     <p v-if="loadError" class="notice notice--error" role="alert">{{ loadError }}</p>
 
+    <!--
+      `busy`, not `loading`. This component's job is to say why the list is empty, and a
+      filter change that is still inside its debounce has not started a request yet -- so on
+      `loading` it would answer that question from the previous filter's result. The button
+      above stays on `loading`, which is about a request actually running.
+    -->
     <MemoList
       :memos="memos"
-      :loading="loading"
+      :loading="busy"
       :failed="Boolean(loadError)"
-      :query="appliedQuery"
+      :query="displayedFilter"
     />
   </main>
 </template>

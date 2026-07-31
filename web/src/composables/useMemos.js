@@ -1,4 +1,4 @@
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { createMemo, listMemos } from '../api/memos'
 
 /*
@@ -10,7 +10,7 @@ import { createMemo, listMemos } from '../api/memos'
  * to reach it through props and events routed via App.vue.
  *
  * No Pinia. A store would buy devtools time-travel and module namespacing for an app
- * whose entire state is the five refs below, and it fails the same over-engineering
+ * whose entire state is the seven refs below, and it fails the same over-engineering
  * test this project applies to every other dependency. The shape a store would give
  * is already here -- state outside the component tree, mutated only by the functions
  * in this file -- so swapping it in later is a mechanical change if there is ever a
@@ -61,11 +61,59 @@ const query = ref('')
 const appliedQuery = ref(null)
 
 /**
+ * The filter the list should be *described* as being under, or null for "not filtered".
+ *
+ * Not exported as two separate facts, because both places that describe a filtered list
+ * -- the status line in MemoSearch and the empty state in MemoList -- have to agree about
+ * when one is in effect, and they were not. The status line was corrected to hide the
+ * moment the box empties; the empty state was left reading `appliedQuery` alone and went
+ * on saying "No memos match xylophone" under an empty box for as long as the request to
+ * unfilter took. One derived value, read by both, is what stops that drifting again.
+ *
+ * The box decides *whether* a filter is in effect and the API's echo decides *what to call
+ * it*. Each is authoritative for its half: the box is ahead of the network, so it is the
+ * only thing that knows the filter has been dropped, while the rows on screen belong to
+ * whatever the API last answered -- naming them after the box would caption them with a
+ * query they were not the answer to.
+ *
+ * @type {import('vue').ComputedRef<?string>}
+ */
+const displayedFilter = computed(() => (query.value.trim() === '' ? null : appliedQuery.value))
+
+/**
  * Long enough that ordinary typing produces one request instead of one per character,
  * short enough that the list feels attached to the box. The API is same-origin through
  * the dev proxy, so there is no round trip worth hiding behind a longer wait.
  */
 const DEBOUNCE_MS = 250
+
+/**
+ * Whether a filter change has been typed but its request has not started yet.
+ *
+ * This exists because `loading` alone leaves a hole exactly the width of the debounce, and
+ * MemoList decides what to say about an empty list by asking whether one is in flight. In
+ * that window nothing is in flight and the list is already out of date, so an empty list
+ * gets described with certainty from a request that has not happened: backspace the last
+ * character of a filter that matched nothing and the page states, for a quarter of a
+ * second, that there are no memos at all -- the one claim that component's own comment
+ * says it must never make falsely.
+ *
+ * @type {import('vue').Ref<boolean>}
+ */
+const pending = ref(false)
+
+/**
+ * "The list on screen is not the answer to the current filter, and something is on its way."
+ * True across both halves of that: the debounce and the request.
+ *
+ * Kept separate from `loading` rather than folded into it, because the two answer different
+ * questions. The Refresh button reflects a request actually running, so it stays on
+ * `loading` -- disabling it during a debounce would be a button greyed out by somebody
+ * typing in a different field.
+ *
+ * @type {import('vue').ComputedRef<boolean>}
+ */
+const busy = computed(() => loading.value || pending.value)
 
 let debounce = null
 
@@ -144,8 +192,12 @@ function search(next) {
 
   clearTimeout(debounce)
 
+  // Set before the timer, not inside it: the whole point is to cover the wait.
+  pending.value = true
+
   debounce = setTimeout(() => {
     debounce = null
+    pending.value = false
     load()
   }, DEBOUNCE_MS)
 }
@@ -159,6 +211,10 @@ function search(next) {
 function searchNow() {
   clearTimeout(debounce)
   debounce = null
+
+  // The wait is over rather than cancelled -- load() takes over from here, and leaving this
+  // set would strand `busy` true for good if that load returned before Vue next rendered.
+  pending.value = false
 
   load()
 }
@@ -227,11 +283,16 @@ export function useMemos() {
   return {
     memos,
     loading,
+    busy,
     saving,
     loadError,
     saveError,
     query,
-    appliedQuery,
+
+    // `appliedQuery` itself is deliberately not exported. It is the raw echo, and a
+    // component reading it directly is the bug displayedFilter exists to prevent.
+    displayedFilter,
+
     load,
     search,
     searchNow,
