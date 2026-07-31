@@ -233,9 +233,18 @@ class MemoRepository
      *     dropped outright once there are `limit` matches. The memo the pin exists to
      *     keep on screen is the first thing rank ordering throws away.
      *
-     * created_at DESC needs no special term for any of that: in-flight rows are the
-     * newest rows, so they sort to the top on their own, and the list keeps one order
-     * whether or not a filter is active.
+     * created_at DESC needs no special term for any of that: a memo recorded seconds ago is
+     * the newest row there is, so it sorts to the top on its own, and the list keeps one
+     * order whether or not a filter is active.
+     *
+     * What the pin does not survive is the LIMIT, and only for a memo that has been
+     * in-flight long enough to stop being near the top -- one stuck behind a stopped worker
+     * for days. Measured: with 60 newer matches and `limit=50`, a ten-day-old queued memo is
+     * not in the response. Left as is, because the unfiltered list drops that same row for
+     * the same reason, so the filter is not hiding anything the app would otherwise show,
+     * and pinning it regardless would mean a UNION with a limit of its own -- which then
+     * makes a stalled queue able to crowd the matches out of the page instead. The window
+     * the pin exists for is seconds long, and it is comfortably inside this.
      *
      * @return list<Memo>
      */

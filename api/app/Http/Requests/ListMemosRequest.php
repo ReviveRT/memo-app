@@ -91,6 +91,26 @@ final class ListMemosRequest extends FormRequest
     }
 
     /**
+     * `q` is renamed for the message, because the message is not read by whoever wrote the
+     * query string.
+     *
+     * The frontend renders a failed GET's `message` verbatim -- web/src/api/memos.js is
+     * explicit that every error it can produce has to say something a human can act on --
+     * and this one is reachable without meaning to: pasting a paragraph into the filter box
+     * answers 422, and the default wording is "The q field must not be greater than 200
+     * characters." Named, it reads "The filter field ...", which is the box the user is
+     * looking at.
+     *
+     * `limit` is left alone. It is already an English word, and nothing in the UI sends it.
+     *
+     * @return array<string, string>
+     */
+    public function attributes(): array
+    {
+        return ['q' => 'filter'];
+    }
+
+    /**
      * Rejected rather than clamped, which is why this only has to apply the default.
      * A silently clamped ?limit=5000 answers 200 with 200 rows and looks to the
      * caller like there are only 200 memos; a 422 naming the cap cannot be
@@ -112,6 +132,11 @@ final class ListMemosRequest extends FormRequest
      * parameter missing, and the parameter present but blank -- collapse here rather
      * than at the three call sites downstream, so no layer below this has to decide
      * whether '' is a filter that matches everything or no filter at all.
+     *
+     * `!== ''` rather than a truthiness test, and it is not style: '0' is falsy in PHP and
+     * is a perfectly good thing to search for. `empty($query)` here would make a filter of
+     * "0" mean "no filter" and quietly answer the whole list. Pinned by a test for exactly
+     * that query.
      */
     public function searchQuery(): ?string
     {

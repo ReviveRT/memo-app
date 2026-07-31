@@ -226,6 +226,35 @@ final class MemoEndpointsTest extends TestCase
         }
     }
 
+    public function test_a_query_that_is_falsy_as_a_string_is_still_a_query(): void
+    {
+        // '0' is falsy in PHP and in JavaScript, so both halves of this feature have a
+        // truthiness test one refactor away from turning a search for "0" into no filter at
+        // all -- answering the entire list and looking like the search silently broke.
+        // Reachable: "0" is what you type looking for a memo about a zero.
+        $this->getJson('/api/memos?q=0')
+            ->assertOk()
+            ->assertJsonPath('query', '0');
+
+        $this->assertTrue($this->repository->searched);
+        $this->assertSame('0', $this->repository->lastQuery);
+    }
+
+    public function test_a_rejected_filter_says_so_in_words_a_reader_can_act_on(): void
+    {
+        // The frontend renders this message verbatim (web/src/api/memos.js), and a paste
+        // into the filter box is how a 422 gets reached without meaning to. Unnamed, the
+        // field reads "The q field must not be greater than 200 characters." -- a sentence
+        // about a query-string parameter, shown to somebody looking at a box labelled
+        // "Filter memos".
+        $response = $this->getJson('/api/memos?q='.str_repeat('a', ListMemosRequest::MAX_QUERY_LENGTH + 1));
+
+        $response->assertStatus(422);
+
+        $this->assertStringContainsString('filter', (string) $response->json('message'));
+        $this->assertStringNotContainsString('q field', (string) $response->json('message'));
+    }
+
     public function test_surrounding_whitespace_is_trimmed_from_the_query(): void
     {
         // So the ILIKE pattern is `%dentist%` rather than `%  dentist  %`, which would
