@@ -1,0 +1,235 @@
+/*
+ * Plain CSS, one file, no framework. The brief says not to polish pixels, so this is
+ * legibility and nothing else: a readable column, a form that looks like a form, and
+ * enough contrast between rows to see where one memo ends.
+ *
+ * Both colour schemes come from one set of custom properties and a
+ * prefers-color-scheme block, which is ten lines and saves a light-on-light form for
+ * anyone whose machine is set to dark.
+ */
+
+:root {
+  --bg: #f7f7f8;
+  --surface: #ffffff;
+  --border: #d8d8dd;
+  --text: #1b1b1f;
+  --muted: #62626b;
+  --accent: #2f5eff;
+  --accent-text: #ffffff;
+  --error: #b3261e;
+  --error-bg: #fdecea;
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16161a;
+    --surface: #1f1f25;
+    --border: #34343d;
+    --text: #ececf1;
+    --muted: #a0a0ad;
+    --accent: #7d9bff;
+    --accent-text: #10121a;
+    --error: #ff9d94;
+    --error-bg: #3a1d1a;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.app {
+  max-width: 44rem;
+  margin: 0 auto;
+  padding: 2rem 1rem 4rem;
+}
+
+.app__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+button {
+  padding: 0.5rem 0.9rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.app__header button {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text);
+  font-weight: 400;
+}
+
+/* --- composer -------------------------------------------------------------- */
+
+.composer {
+  margin: 1.25rem 0;
+}
+
+.composer__text {
+  display: block;
+  width: 100%;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  resize: vertical;
+}
+
+.composer__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 0.6rem;
+}
+
+.composer__hint {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+/* --- notices --------------------------------------------------------------- */
+
+.notice {
+  margin: 0.75rem 0;
+  color: var(--muted);
+}
+
+.notice--error {
+  padding: 0.6rem 0.75rem;
+  border-radius: 6px;
+  background: var(--error-bg);
+  color: var(--error);
+}
+
+/* --- memo list ------------------------------------------------------------- */
+
+.memos,
+.tags {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.memos {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.memo {
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.memo__meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.memo__title {
+  margin: 0.5rem 0 0;
+  font-size: 1.05rem;
+}
+
+.memo__summary {
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+}
+
+.memo__transcript {
+  margin: 0.5rem 0 0;
+  /* The newlines somebody typed into the textarea are part of the memo. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.memo__transcript--empty {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.badge {
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+/*
+ * The four statuses 001_init.sql allows, plus the source. Only `queued` and `text` can
+ * occur today; the rest are here so the row a worker updates does not come back
+ * unstyled.
+ */
+.badge--queued {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.badge--processing {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-style: italic;
+}
+
+.badge--ready {
+  border-color: currentcolor;
+  color: var(--text);
+}
+
+.badge--failed {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.6rem;
+}
+
+.tags__tag {
+  padding: 0.1rem 0.45rem;
+  border-radius: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-size: 0.8rem;
+}

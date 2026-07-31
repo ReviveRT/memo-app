@@ -167,11 +167,32 @@ services:
       API_PROXY_TARGET: http://api:8080
     volumes:
       - ./web:/app
+      # Anonymous volume over node_modules, or the bind mount above hides the tree
+      # npm installed into the image and vite exits with "Cannot find package 'vue'".
+      #
+      # The trap it brings with it: compose carries an anonymous volume over to the
+      # replacement container when it recreates a service, so after changing
+      # web/package.json a plain `docker compose up --build` starts a new image with
+      # the *old* node_modules. `docker compose up --build --renew-anon-volumes web`
+      # is the fix, and `down -v` is the bigger hammer.
       - /app/node_modules
     ports:
       # Open http://localhost:5173, not a LAN IP — getUserMedia needs a secure
       # context and fails silently outside one.
       - "${WEB_PORT:-5173}:5173"
+    healthcheck:
+      # busybox wget, because node:alpine ships no curl. A 200 for / means the dev
+      # server is listening and serving index.html — the one thing a human opening
+      # localhost:5173 needs to be true.
+      #
+      # Nothing gates on this: `web` is the last service in the graph. It is here so
+      # that `docker compose ps` tells the truth about the service the user actually
+      # opens, and so MEMO-09's clean-checkout gate has something to wait for.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:5173/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
     restart: unless-stopped
 
   # --- Python worker ---------------------------------------------------------

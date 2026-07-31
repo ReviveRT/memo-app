@@ -1,0 +1,22 @@
+# node_modules is the one that matters, and the reason is not the obvious one. The
+# image installs its own tree from the lock file; a host tree copied in carries the
+# wrong platform's binding for rolldown's native parser (vite 8 bundles with rolldown).
+#
+# That does not fail, which is why it needs excluding rather than trusting. Checked by
+# mounting this checkout's darwin-arm64 tree into the linux image: rolldown silently
+# falls back to its wasm32-wasi build -- installed unconditionally, so it is always
+# there -- and the server starts, four "ExperimentalWarning: WASI is an experimental
+# feature" lines later, on a slower parser. A hard error would be easier to notice.
+node_modules/
+
+# Build output. Nothing in the compose stack serves it (the dev server is the server),
+# and a stale copy in the image would only be confusing.
+dist/
+.vite/
+
+.env
+.env.*
+Dockerfile
+.dockerignore
+.DS_Store
+*.log
