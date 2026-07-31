@@ -179,6 +179,162 @@ final class MemoEndpointsTest extends TestCase
         }
     }
 
+    public function test_a_query_reaches_the_search_statement_exactly_as_it_was_typed(): void
+    {
+        // Whatever the query means is decided by websearch_to_tsquery and by the ILIKE
+        // pattern, both in SQL. Nothing between the query string and the bound parameter
+        // may rewrite it -- stripping the quotes from a phrase or the minus from an
+        // exclusion here would silently turn the two features the search advertises into
+        // a bag of words.
+        foreach (['dentist', '"call the dentist"', 'dentist -thursday', 'reorg', '50%'] as $query) {
+            $this->getJson('/api/memos?q='.urlencode($query))->assertOk();
+
+            $this->assertTrue($this->repository->searched);
+            $this->assertSame($query, $this->repository->lastQuery);
+        }
+    }
+
+    public function test_the_query_is_echoed_back_so_a_stale_response_can_be_discarded(): void
+    {
+        // Searching is debounced and polled, so a response can arrive after the box has
+        // moved on. The client compares this key to decide whether the rows it just
+        // received still belong on screen.
+        $this->getJson('/api/memos?q=dentist')
+            ->assertOk()
+            ->assertJsonPath('query', 'dentist');
+
+        // Always present, so the client reads one key rather than branching on whether it
+        // exists.
+        $this->getJson('/api/memos')
+            ->assertOk()
+            ->assertJsonPath('query', null);
+    }
+
+    public function test_a_blank_query_is_no_filter_rather_than_a_filter_matching_everything(): void
+    {
+        // Three spellings of "the user has not typed anything". The frontend's search box
+        // is empty most of the time, so these are the ordinary request: `?q=` is what a
+        // query string built around an empty box looks like, and %20 is what one space in
+        // it looks like.
+        foreach (['/api/memos', '/api/memos?q=', '/api/memos?q=%20%20'] as $url) {
+            $this->getJson($url)->assertOk()->assertJsonPath('query', null);
+
+            // The unfiltered statement, which is the one with the index scan. A filter
+            // matching everything would answer the same rows and lose that plan.
+            $this->assertFalse($this->repository->searched);
+            $this->assertNull($this->repository->lastQuery);
+        }
+    }
+
+    public function test_a_query_that_is_falsy_as_a_string_is_still_a_query(): void
+    {
+        // '0' is falsy in PHP and in JavaScript, so both halves of this feature have a
+        // truthiness test one refactor away from turning a search for "0" into no filter at
+        // all -- answering the entire list and looking like the search silently broke.
+        // Reachable: "0" is what you type looking for a memo about a zero.
+        $this->getJson('/api/memos?q=0')
+            ->assertOk()
+            ->assertJsonPath('query', '0');
+
+        $this->assertTrue($this->repository->searched);
+        $this->assertSame('0', $this->repository->lastQuery);
+    }
+
+    public function test_a_rejected_filter_says_so_in_words_a_reader_can_act_on(): void
+    {
+        // The frontend renders this message verbatim (web/src/api/memos.js), and a paste
+        // into the filter box is how a 422 gets reached without meaning to. Unnamed, the
+        // field reads "The q field must not be greater than 200 characters." -- a sentence
+        // about a query-string parameter, shown to somebody looking at a box labelled
+        // "Filter memos".
+        $response = $this->getJson('/api/memos?q='.str_repeat('a', ListMemosRequest::MAX_QUERY_LENGTH + 1));
+
+        $response->assertStatus(422);
+
+        $this->assertStringContainsString('filter', (string) $response->json('message'));
+        $this->assertStringNotContainsString('q field', (string) $response->json('message'));
+    }
+
+    public function test_surrounding_whitespace_is_trimmed_from_the_query(): void
+    {
+        // So the ILIKE pattern is `%dentist%` rather than `%  dentist  %`, which would
+        // match nothing. Trailing space is easy to arrive at by pasting.
+        $this->getJson('/api/memos?q='.urlencode('  dentist  '))->assertOk();
+
+        $this->assertSame('dentist', $this->repository->lastQuery);
+    }
+
+    public function test_an_oversized_or_null_byte_query_is_rejected(): void
+    {
+        $this->getJson('/api/memos?q='.str_repeat('a', ListMemosRequest::MAX_QUERY_LENGTH + 1))
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('q');
+
+        // libpq truncates a bound parameter at the first NUL, so without this the search
+        // would quietly run against a prefix of what was typed and the page would show
+        // results for a query nobody asked for.
+        $this->getJson('/api/memos?q='.urlencode("dentist\0ignored"))
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('q');
+
+        // Neither rejected request reached the database. Asserted before the passing case
+        // below, since that one legitimately sets this.
+        $this->assertFalse($this->repository->searched);
+
+        // Exactly at the cap passes, so the boundary is a cap and not an off-by-one.
+        $this->getJson('/api/memos?q='.str_repeat('a', ListMemosRequest::MAX_QUERY_LENGTH))
+            ->assertOk();
+    }
+
+    public function test_the_query_and_the_limit_are_honoured_together(): void
+    {
+        // The cap has to bound a filtered page as well as an unfiltered one -- the rows
+        // carry full transcripts either way, and searching is the request most likely to
+        // be scripted.
+        $this->getJson('/api/memos?q=dentist&limit=10')->assertOk();
+
+        $this->assertSame('dentist', $this->repository->lastQuery);
+        $this->assertSame(10, $this->repository->lastLimit);
+
+        $this->getJson('/api/memos?q=dentist')->assertOk();
+        $this->assertSame(ListMemosRequest::DEFAULT_LIMIT, $this->repository->lastLimit);
+
+        // A bad limit is still a 422 with a filter attached; the filter must not become a
+        // way around the cap.
+        $this->getJson('/api/memos?q=dentist&limit='.(ListMemosRequest::MAX_LIMIT + 1))
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('limit');
+    }
+
+    public function test_a_filtered_list_renders_the_same_row_shape_as_an_unfiltered_one(): void
+    {
+        $this->repository->rows = [$this->memo('019fb4ef-0d71-7011-b678-0cb4004dc2a7', 'call the dentist')];
+
+        $this->getJson('/api/memos?q=dentist')
+            ->assertOk()
+            ->assertJsonCount(1, 'memos')
+            // MEMO-18 replaces polled rows by id, and it polls the filtered list too, so
+            // a field that appeared only when unfiltered would break that reconciliation.
+            ->assertJsonStructure([
+                'memos' => [[
+                    'id', 'source', 'status', 'transcript', 'title',
+                    'summary', 'tags', 'duration_ms', 'last_error', 'created_at',
+                ]],
+            ]);
+    }
+
+    public function test_a_filtered_list_is_never_cached_either(): void
+    {
+        // Same reason as the unfiltered list: every poll exists because the answer may
+        // have changed, and a cached filtered page would freeze a search mid-transcription.
+        $response = $this->getJson('/api/memos?q=dentist');
+
+        $this->assertStringContainsString(
+            'no-store',
+            (string) $response->headers->get('Cache-Control'),
+        );
+    }
+
     private function memo(string $id, string $transcript): Memo
     {
         return new Memo(

@@ -16,6 +16,38 @@ use stdClass;
  */
 final class MemoTest extends TestCase
 {
+    public function test_the_pinned_statuses_are_every_status_that_is_not_terminal(): void
+    {
+        $this->assertSame(['queued', 'processing'], Memo::inFlightStatuses());
+
+        // Derived, not listed, and this is the property that matters: a status added to
+        // the lifecycle is pinned into a filtered page unless it is explicitly declared
+        // terminal. The alternative -- a hand-written list of unfinished statuses -- is
+        // one value short the moment MEMO-16 adds its retry status, and the symptom is
+        // silent: a memo that is still being worked on simply stops appearing while a
+        // filter is active. Unknown must mean not finished.
+        $this->assertSame(
+            [],
+            array_intersect(Memo::inFlightStatuses(), Memo::TERMINAL_STATUSES),
+            'A terminal status must never be pinned.',
+        );
+
+        $this->assertSame(
+            Memo::STATUSES,
+            array_merge(Memo::inFlightStatuses(), Memo::TERMINAL_STATUSES),
+            'Every allowed status must be classified as exactly one of the two.',
+        );
+
+        // Positional bindings are spread from this, so a gapped array would bind in an
+        // order nobody intended. array_diff preserves keys; array_values is what removes
+        // them.
+        $this->assertSame(
+            array_keys(Memo::inFlightStatuses()),
+            range(0, count(Memo::inFlightStatuses()) - 1),
+            'The list must be a list, not a gapped array.',
+        );
+    }
+
     public function test_the_response_carries_exactly_the_documented_fields(): void
     {
         // Asserted as an ordered whole rather than field by field, because the thing

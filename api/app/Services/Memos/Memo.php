@@ -41,6 +41,59 @@ final class Memo
      */
     public const STATUS_QUEUED = 'queued';
 
+    /** Claimed by a worker replica. The other half of "still owes work". */
+    public const STATUS_PROCESSING = 'processing';
+
+    /**
+     * Every value 001_init.sql's CHECK constraint allows, in lifecycle order.
+     *
+     * @var list<string>
+     */
+    public const STATUSES = [self::STATUS_QUEUED, self::STATUS_PROCESSING, 'ready', 'failed'];
+
+    /**
+     * The statuses nothing further happens to.
+     *
+     * Stated as the terminal set so inFlightStatuses() below can be everything else, which
+     * is the direction MEMO-18 argues for on the frontend and it is the same argument here:
+     * a positive list of unfinished statuses is one value short the moment a status is
+     * added, and MEMO-16 adds a retry path. Getting that wrong is quiet -- a memo in a
+     * status this file has never heard of would simply stop being pinned, and would vanish
+     * from a filtered list while it was still being worked on. Unknown means not finished.
+     *
+     * @var list<string>
+     */
+    public const TERMINAL_STATUSES = ['ready', 'failed'];
+
+    /**
+     * The statuses that mean a memo is not finished with: every allowed value that is not
+     * terminal. Today that is 'queued' and 'processing'.
+     *
+     * Derived rather than listed, so adding a status to STATUSES pins it by default and
+     * only an explicit entry in TERMINAL_STATUSES stops that. One edit, not two, and the
+     * edit that is easy to forget is the safe one to forget.
+     *
+     * Why the search pins these at all: a memo still being transcribed has no transcript,
+     * so it matches no query and would drop off the list while a filter was active --
+     * immediately after the user recorded it. See MemoRepository::search.
+     *
+     * 'failed' is terminal, so it is deliberately not pinned. It is also unmatchable
+     * (transcription failed, so there is nothing to match), but it is a settled outcome
+     * rather than a gap in the pipeline, and pinning it would put every past failure at
+     * the top of every search. MEMO-17 owns surfacing those.
+     *
+     * A method rather than a constant, only because a constant expression cannot call
+     * array_diff. The array_values is not cosmetic: array_diff preserves the original keys,
+     * and MemoRepository::search spreads this into positional bindings, where a gapped
+     * array would bind in an order nobody intended.
+     *
+     * @return list<string>
+     */
+    public static function inFlightStatuses(): array
+    {
+        return array_values(array_diff(self::STATUSES, self::TERMINAL_STATUSES));
+    }
+
     /**
      * Every column fromRow() needs, which is every output name in
      * MemoRepository::COLUMNS. The two have to agree, and this is what says so out
