@@ -3,7 +3,7 @@ import App from './App.vue'
 import './styles.css'
 
 /*
- * The whole frontend is this file, App.vue, two components, one composable and one
+ * The whole frontend is this file, App.vue, two components, two composables and one
  * fetch wrapper. What it deliberately does not have, since each absence is a question
  * somebody reading it will otherwise ask:
  *
