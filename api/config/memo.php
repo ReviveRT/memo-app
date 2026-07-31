@@ -33,6 +33,16 @@ return [
     // cap: a WebM stream from MediaRecorder carries no duration element, so
     // length is enforced in the worker after normalization, not here.
     //
+    // Measured against real recordings from MEMO-10, rather than taken from the
+    // ticket. ffprobe over a 197 KB Chrome recording reports Opus, 48 kHz mono,
+    // `duration=N/A`; the same probe over a Safari one reports AAC, 48 kHz mono,
+    // duration 6.252. Both decode to completion.
+    //
+    // So the asymmetry is the point: a duration check at this edge would work on
+    // Safari and quietly pass everything from Chrome, which is worse than having
+    // no check at all -- it would look enforced. It also says MEMO-13 normalizes
+    // two codecs, not one.
+    //
     // Read by HealthService and by nothing else yet. MEMO-10 opened the upload
     // path and MEMO-11 is what makes this number apply to it, so the cap in force
     // today is upload_max_filesize from conf.d/uploads.ini rather than this. Kept
