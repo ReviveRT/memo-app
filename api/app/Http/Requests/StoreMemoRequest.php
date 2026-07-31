@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace App\Http\Requests;
 
-use Closure;
+use App\Http\Rules\NoNullBytes;
 use Illuminate\Foundation\Http\FormRequest;
 
 /**
@@ -76,39 +76,15 @@ final class StoreMemoRequest extends FormRequest
                 'string',
                 'min:1',
                 'max:'.self::MAX_TEXT_LENGTH,
-                self::rejectNullBytes(),
+
+                // A NUL here is silently destructive rather than fatal: libpq truncates
+                // the bound parameter at it, so this endpoint answered 201 with a
+                // one-character transcript for a three-character POST. The rule carries
+                // the rest of that story, and ListMemosRequest shares it because the
+                // truncation belongs to the driver rather than to either field.
+                new NoNullBytes,
             ],
         ];
-    }
-
-    /**
-     * A NUL anywhere in the text has to be refused here, because nothing downstream
-     * will refuse it for us -- it is silently destructive rather than fatal.
-     *
-     * Postgres itself does reject a null character in `text` (SQLSTATE 54000, "null
-     * character not permitted"), which is what made this look safe. It never gets the
-     * chance: libpq passes bound parameters as C strings, so the value is truncated at
-     * the first NUL before the server sees it. Verified twice over -- through PDO,
-     * `SELECT length(?::text)` bound with "a\0b" returns 1, and through this endpoint,
-     * a three-character POST answered 201 with a one-character transcript. The user's
-     * memo is silently thrown away and the response says it was stored.
-     *
-     * The edges are already covered by the trim in prepareForValidation, since PHP's
-     * default trim charlist includes "\0" -- which is precisely why the interior case
-     * is the one that survives to reach the driver, and why this cannot be left to
-     * the trim.
-     *
-     * Refused rather than stripped: the same call this repeats in
-     * LocalAudioStorage::path(), and for the same reason. Quietly editing a memo is
-     * not better than declining to store it.
-     */
-    private static function rejectNullBytes(): Closure
-    {
-        return static function (string $attribute, mixed $value, Closure $fail): void {
-            if (is_string($value) && str_contains($value, "\0")) {
-                $fail('The :attribute field must not contain null bytes.');
-            }
-        };
     }
 
     /** The validated text, which is exactly what lands in `transcript`. */

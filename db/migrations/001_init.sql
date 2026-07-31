@@ -122,6 +122,13 @@ CREATE TABLE memos (
     --     only by a tag scores exactly 0 under ts_rank_cd — verified, against
     --     0.1 for a transcript match on the same row. Plain ts_rank does give it
     --     a nonzero score. Rank with ts_rank, or tag-only hits sort dead last.
+    --
+    --     MEMO-19 landed and ranks with neither: it orders by created_at, because
+    --     a row matched by its ILIKE fallback rather than by the tsquery scores 0
+    --     under ts_rank too — the same trap one arm further along — and because
+    --     the in-flight rows that search pins score 0 as well, so rank ordering
+    --     drops them at the LIMIT. The measurement above still stands and still
+    --     rules out ts_rank_cd; it just no longer decides an ordering.
     --   * the column is part of SELECT *, and it is the largest thing on the
     --     row. The API enumerates the columns it returns rather than shipping
     --     this to the client, and an INSERT naming it fails outright with

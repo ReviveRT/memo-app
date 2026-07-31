@@ -41,18 +41,30 @@ final class MemoService
     }
 
     /**
-     * Newest first, capped.
+     * Newest first, capped, and filtered when there is something to filter by.
      *
      * Unpaginated by design rather than by omission. MEMO-18 polls this route and
-     * replaces the page keyed by id, and MEMO-19 filters it -- neither wants a
-     * cursor, and a `since` parameter is specifically ruled out there because a
-     * timestamp cannot serve as one. So `limit` is the whole of the contract, and
-     * the cap on it lives in ListMemosRequest.
+     * replaces the page keyed by id, and the search below filters it -- neither wants a
+     * cursor, and a `since` parameter is specifically ruled out because a timestamp
+     * cannot serve as one. So `limit` is the whole of the contract, and the cap on it
+     * lives in ListMemosRequest.
      *
+     * The branch is here rather than in the controller because "an empty filter is no
+     * filter" is a statement about what the list means, and the two arms are genuinely
+     * different queries -- the unfiltered one is an index scan straight down
+     * memos_created_idx, and putting a filter in front of it would cost that plan for
+     * every request that had nothing to filter by. ListMemosRequest::searchQuery has
+     * already collapsed a missing `q` and a blank one into null, so null is the only
+     * spelling of "unfiltered" that reaches here.
+     *
+     * @param  ?string  $query  Already trimmed, non-empty, and capped at
+     *                          ListMemosRequest::MAX_QUERY_LENGTH.
      * @return list<Memo>
      */
-    public function recent(int $limit): array
+    public function recent(?string $query, int $limit): array
     {
-        return $this->repository->recent($limit);
+        return $query === null
+            ? $this->repository->recent($limit)
+            : $this->repository->search($query, $limit);
     }
 }

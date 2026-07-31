@@ -119,6 +119,59 @@ button:disabled {
   font-size: 0.8rem;
 }
 
+/* --- search ---------------------------------------------------------------- */
+
+.search {
+  display: flex;
+  gap: 0.5rem;
+  margin: 1.25rem 0 0.5rem;
+}
+
+.search__input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+}
+
+/*
+ * WebKit's own clear affordance for type="search", hidden because the Clear button next to
+ * it does the same job on every browser and two clear controls side by side read as one of
+ * them being broken.
+ */
+.search__input::-webkit-search-cancel-button {
+  appearance: none;
+}
+
+.search__clear {
+  flex: none;
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text);
+  font-weight: 400;
+}
+
+.search__status {
+  margin: 0 0 0.75rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/*
+ * The quoted query, in both the status line and the empty state. Not bold -- <strong> is
+ * here for the emphasis being semantic, and at this size a weight change on somebody's
+ * search term is louder than the sentence around it.
+ */
+.search__status strong,
+.notice strong {
+  font-weight: 400;
+  color: var(--text);
+}
+
 /* --- notices --------------------------------------------------------------- */
 
 .notice {

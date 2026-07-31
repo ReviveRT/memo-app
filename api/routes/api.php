@@ -25,7 +25,12 @@ Route::get('/health', [HealthController::class, 'show'])->name('health');
 // `required` on `text` to required_without:audio -- but it is why the route is
 // named for the collection and not for the text case.
 //
-// Still to attach here: the search parameter on the list (MEMO-19), the retry
-// action (MEMO-17) and the audio range endpoint (MEMO-23).
+// The list also takes `?q=` (MEMO-19). It is a parameter on this same route rather than
+// a /api/memos/search of its own, because it returns the same rows in the same order and
+// the frontend swaps between filtered and unfiltered on every keystroke -- two routes
+// would mean two response shapes to reconcile for one list.
+//
+// Still to attach here: the retry action (MEMO-17) and the audio range endpoint
+// (MEMO-23).
 Route::get('/memos', [MemoController::class, 'index'])->name('memos.index');
 Route::post('/memos', [MemoController::class, 'store'])->name('memos.store');

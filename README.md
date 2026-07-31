@@ -24,6 +24,26 @@ Then open **<http://localhost:5173>**.
 
 _TODO (MEMO-26): first-build time and image size, given the baked whisper weights._
 
+## Searching
+
+The **Filter memos** box narrows the list as you type. Plain words are matched by
+stemming, so `meeting` finds "meetings" and `walk` finds "walked". Three extras
+are worth knowing because nothing on the page advertises them:
+
+| Type | To get |
+| --- | --- |
+| `"call the dentist"` | that exact phrase, in that order |
+| `dentist -thursday` | memos about the dentist, minus any mentioning Thursday |
+| `dentist or plumber` | either word |
+
+Part of a word works too, anywhere in it: `reorg` and `organis` both find
+"reorganise". Fragments shorter than three characters still match, but they match
+a great deal, so expect the list to fill up.
+
+A memo that is still being transcribed has no text to match yet, so it stays in
+the list whatever the filter says, rather than vanishing in the seconds after you
+record it. The line under the box says when that is happening.
+
 ## Configuration
 
 Everything has a working default. `.env` is optional — copy `.env.example` to

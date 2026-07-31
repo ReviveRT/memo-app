@@ -58,8 +58,13 @@ class MemoRepository
      * it needs a name that cannot collide instead of a comment asking for care.
      * `ORDER BY memos.created_at DESC` also fixes it, and was rejected: it restores
      * the index scan by relying on the same subtlety, one dropped qualifier away from
-     * regressing. MEMO-19 adds a ts_rank ordering to this query and should not have
-     * to know any of this.
+     * regressing.
+     *
+     * This paragraph used to end by saying MEMO-19 would add a ts_rank ordering here and
+     * should not have to know any of the above. It did have to know, and then it did not
+     * add one -- search() below orders by created_at too, for reasons measured there. So
+     * the aliasing still matters, and now it matters to both statements rather than to
+     * one of them plus a future one.
      */
     private const COLUMNS = <<<'SQL'
         id,
@@ -151,6 +156,154 @@ class MemoRepository
             [$limit],
         );
 
+        return $this->hydrate($rows);
+    }
+
+    /**
+     * The same page, filtered by text.
+     *
+     * Three OR'd predicates, and Postgres serves all three from an index -- confirmed as
+     * a BitmapOr over memos_search_idx, memos_trgm_idx and memos_claim_idx on a 5,006-row
+     * table, with bound parameters rather than literals so the plan is the one this
+     * statement actually gets.
+     *
+     * **1. The full-text match.** `websearch_to_tsquery`, not `to_tsquery` or
+     * `plainto_tsquery`. It gives quoted phrases and minus-exclusion for free -- `"call
+     * the dentist"` compiles to `'call' <2> 'dentist'` and `dentist -thursday` to
+     * `'dentist' & !'thursday'` -- and, unlike to_tsquery, it never raises on input a
+     * human typed. That is the part that matters here, because the input is a search box:
+     * `to_tsquery('english', 'dentist &')` is `ERROR: no operand in tsquery` and
+     * `'a | | b'` is `ERROR: syntax error in tsquery`, both of which would be a 500 for a
+     * half-typed query. websearch_to_tsquery answers `'dentist'` and `'b'`.
+     *
+     * A query of nothing but punctuation or stop words compiles to the empty tsquery,
+     * which matches no row -- `@@` returns false, not null, so it does not poison the OR.
+     * The ILIKE arm is what keeps such a query useful.
+     *
+     * **2. The ILIKE fallback,** for the two cases the tsvector cannot reach: a partial
+     * word, and a run-together token. Both are spelled out in 001_init.sql next to the
+     * index that serves them.
+     *
+     * Not the similarity operator, and this is the trap worth naming: `%` looks like the
+     * right tool and silently matches nothing. Against a 751-character transcript
+     * containing "reorganise", `similarity('reorg', transcript)` is 0.0129 -- similarity
+     * divides by the union of both trigram sets, so a long transcript drives any short
+     * needle towards zero -- and the default threshold is 0.3, so `'reorg' % transcript`
+     * is false. `word_similarity` scores the same pair 0.8333 and would work, but it
+     * reads its threshold from a session GUC (`set_limit`/`show_limit`), which makes the
+     * result depend on connection state this application never sets. ILIKE has no
+     * threshold to be wrong about, and it is the operator whose semantics match what
+     * somebody typing five characters means: this substring, exactly.
+     *
+     * Only `transcript`, matching the one gin_trgm_ops index there is. Extending the
+     * fallback to `title` and `summary` was measured and rejected: with no trigram index
+     * on either, the added OR arms drop the whole statement to a Seq Scan over every row.
+     * Little is lost -- both columns are generated from the transcript by MEMO-21, so a
+     * partial word in a title is almost always a partial word in the transcript as well
+     * -- and the full-text arm covers them exactly, since search_vector spans title,
+     * summary, transcript and tags.
+     *
+     * **3. The in-flight pin.** A memo still being transcribed has no transcript, so it
+     * matches nothing and would vanish from the list the moment a filter was active --
+     * right after the user recorded it. Memo::IN_FLIGHT_STATUSES says which statuses that
+     * covers and why 'failed' is not one of them.
+     *
+     * Worth knowing about the pin: a *text* memo is inserted with its transcript already
+     * set, so it is searchable while queued and does not need the pin to be visible. What
+     * the pin buys it is the enrichment window -- its title, summary and tags land later,
+     * so a query that only its future tags would match finds it from the start rather
+     * than when the worker gets to it. The voice path (MEMO-11) is the case the pin is
+     * really for.
+     *
+     * **Ordering: created_at DESC, the same as recent().** Both 001_init.sql and COLUMNS
+     * above expected a ts_rank ordering here. Three measurements against the schema said
+     * otherwise, and the third is decisive:
+     *
+     *   * ts_rank cannot rank the ILIKE half of this predicate. A row matched only by
+     *     substring does not match the tsquery, so its rank is exactly 0 -- the same trap
+     *     001_init.sql documented for tag-only rows under ts_rank_cd, one arm further
+     *     along. Ordering by rank would bury every partial-word hit beneath every
+     *     full-text hit.
+     *   * where ts_rank does apply, it barely separates anything: 0.0760 for a transcript
+     *     match against 0.0608 for a tag-only match on the same query. It encodes which
+     *     column matched more than how relevant the memo is.
+     *   * rank ordering puts the pinned in-flight rows *last*. They score 0 like every
+     *     other non-tsquery match, so `ORDER BY rank DESC` sorts them below every hit --
+     *     measured, both of them under both dentist memos -- and with a LIMIT they are
+     *     dropped outright once there are `limit` matches. The memo the pin exists to
+     *     keep on screen is the first thing rank ordering throws away.
+     *
+     * created_at DESC needs no special term for any of that: in-flight rows are the
+     * newest rows, so they sort to the top on their own, and the list keeps one order
+     * whether or not a filter is active.
+     *
+     * @return list<Memo>
+     */
+    public function search(string $query, int $limit): array
+    {
+        // Built from the constant rather than written out, so adding a status to
+        // Memo::IN_FLIGHT_STATUSES cannot leave the placeholder count behind and turn a
+        // lifecycle change into a bound-parameter mismatch.
+        $inFlight = implode(', ', array_fill(0, count(Memo::IN_FLIGHT_STATUSES), '?'));
+
+        $rows = $this->db->connection()->select(
+            'SELECT '.self::COLUMNS
+                ." FROM memos\n"
+                ."WHERE (search_vector @@ websearch_to_tsquery('english', ?) OR transcript ILIKE ?)\n"
+                ."   OR status IN ({$inFlight})\n"
+                ."ORDER BY created_at DESC\n"
+                .'LIMIT ?',
+            [
+                $query,
+                self::likePattern($query),
+                ...Memo::IN_FLIGHT_STATUSES,
+                $limit,
+            ],
+        );
+
+        return $this->hydrate($rows);
+    }
+
+    /**
+     * Wraps a user's query in `%` for a substring ILIKE, escaping the three characters
+     * that would otherwise be pattern syntax.
+     *
+     * This is not hygiene -- the query is a bound parameter and was never an injection
+     * risk. It is that `%` and `_` are wildcards inside a LIKE pattern, so without this
+     * the user's own punctuation quietly changes what they searched for. Measured against
+     * the fixture: unescaped, `q=50%` builds the pattern `%50%%`, whose trailing pair
+     * reads as "anything", and it matched **102 rows** where one memo mentions a margin of
+     * 50%. `_` is the quieter version of the same bug -- it matches exactly one character,
+     * so `created_at` and `createdXat` are the same query.
+     *
+     * Backslash is escaped first and for a different reason: it is LIKE's default escape
+     * character, so a lone trailing `\` in the query would leave a dangling escape and
+     * make Postgres raise on the pattern. Order matters -- doing `%` and `_` first would
+     * then escape the backslashes this step just added.
+     *
+     * The escaped pattern is still index-driven; `%created\_%` plans as a Bitmap Index
+     * Scan on memos_trgm_idx exactly as the unescaped one does, so this costs nothing but
+     * correctness. What it cannot fix is that a pattern with fewer than three
+     * non-wildcard characters has no trigram to look up and falls back to a Seq Scan --
+     * `%re%` scans all 5,006 rows. That is a property of trigram indexes rather than of
+     * this function, and it is bounded by MAX_LIMIT and the size of this table.
+     *
+     * Public and static so it can be tested for what it returns rather than for what
+     * Postgres does with it: LikePatternTest asserts the pattern this builds for `50%`, so
+     * what is pinned is the escaping that prevents those 102 rows rather than the count
+     * itself, which would need a live database to reach.
+     */
+    public static function likePattern(string $query): string
+    {
+        return '%'.str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $query).'%';
+    }
+
+    /**
+     * @param  list<stdClass>  $rows
+     * @return list<Memo>
+     */
+    private function hydrate(array $rows): array
+    {
         return array_values(array_map(
             static fn (stdClass $row): Memo => Memo::fromRow($row),
             $rows,

@@ -8,26 +8,49 @@
  * configuration at all.
  *
  * Both responses are envelopes, `{"memos": [...]}` and `{"memo": {...}}`, rather
- * than a bare array and a bare row. That is the API's decision, made so MEMO-19 can
- * add what a search matched on without changing the type of anything already read
- * here; see api/app/Http/Controllers/MemoController.php.
+ * than a bare array and a bare row. That was decided for a search that did not exist
+ * yet, and the room got used: the list now also carries `query`. Nothing already read
+ * here changed type; see api/app/Http/Controllers/MemoController.php.
  */
 
 /** Matches application/json and the +json suffix types, ignoring any charset. */
 const JSON_CONTENT_TYPE = /^application\/(?:[\w.+-]+\+)?json\b/i
 
 /**
- * GET /api/memos -- newest first, capped by the API's own default limit of 50.
+ * GET /api/memos -- newest first, capped by the API's own default limit of 50, and
+ * filtered by `query` when there is one.
  *
- * @returns {Promise<Array<object>>}
+ * URLSearchParams rather than a template string, and it is load-bearing rather than
+ * tidy: the query is somebody's raw typing, and `&`, `#`, `+` and `%` all mean something
+ * in a query string. Interpolated raw, `milk & eggs` arrives as `q=milk ` plus a stray
+ * parameter named `eggs`, `+` decodes to a space, and a bare `%` is the start of an escape
+ * sequence rather than a percent sign. Encoded, each of them reaches the API as the
+ * character that was typed. The API then escapes the same string again on its own side,
+ * for LIKE rather than for URLs -- two different syntaxes, two separate escapes, neither
+ * standing in for the other.
+ *
+ * @param {?string} query Null for the unfiltered list. An empty string would be sent as
+ *   `?q=` and mean the same thing to the API, but null keeps the parameter off the URL
+ *   entirely so the common request has one canonical form.
+ * @returns {Promise<{memos: Array<object>, query: ?string}>} The rows, and the filter the
+ *   API says they came back for. See useMemos for what the echo is used for.
  */
-export async function listMemos() {
-  const body = await request('/api/memos')
+export async function listMemos(query = null) {
+  const path =
+    query === null ? '/api/memos' : `/api/memos?${new URLSearchParams({ q: query }).toString()}`
 
-  // Defensive because the alternative is a template crash: `v-for` over a
-  // non-iterable throws inside the render function, and the stack trace names
-  // MemoList rather than the response that caused it.
-  return Array.isArray(body?.memos) ? body.memos : []
+  const body = await request(path)
+
+  return {
+    // Defensive because the alternative is a template crash: `v-for` over a
+    // non-iterable throws inside the render function, and the stack trace names
+    // MemoList rather than the response that caused it.
+    memos: Array.isArray(body?.memos) ? body.memos : [],
+
+    // Normalised to null for anything that is not a string, so callers compare against
+    // one absent value rather than against null, undefined and a missing key.
+    query: typeof body?.query === 'string' ? body.query : null,
+  }
 }
 
 /**

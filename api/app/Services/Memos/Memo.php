@@ -41,6 +41,31 @@ final class Memo
      */
     public const STATUS_QUEUED = 'queued';
 
+    /** Claimed by a worker replica. The other half of "still owes work". */
+    public const STATUS_PROCESSING = 'processing';
+
+    /**
+     * The two statuses that mean a memo is not finished with, out of the four
+     * 001_init.sql's CHECK constraint allows.
+     *
+     * Named here rather than spelled into the search statement because the list is a
+     * claim about the lifecycle, not about SQL: 'ready' and 'failed' are terminal, and a
+     * fifth status added to that CHECK has to be classified as one or the other before
+     * MemoRepository::search can decide whether to pin it.
+     *
+     * Why the search pins these at all: a memo still being transcribed has no
+     * transcript, so it matches no query and would drop off the list while a filter was
+     * active -- immediately after the user recorded it. See MemoRepository::search.
+     *
+     * 'failed' is deliberately not in here. It is also unmatchable (transcription
+     * failed, so there is nothing to match), but it is a settled outcome rather than a
+     * gap in the pipeline, and pinning it would put every past failure at the top of
+     * every search. MEMO-17 owns surfacing those.
+     *
+     * @var list<string>
+     */
+    public const IN_FLIGHT_STATUSES = [self::STATUS_QUEUED, self::STATUS_PROCESSING];
+
     /**
      * Every column fromRow() needs, which is every output name in
      * MemoRepository::COLUMNS. The two have to agree, and this is what says so out

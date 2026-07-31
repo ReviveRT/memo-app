@@ -37,8 +37,21 @@ final class FakeMemoRepository extends MemoRepository
      */
     public array $rows = [];
 
-    /** The limit recent() was last called with, which is how the default is asserted. */
+    /** The limit the last call was made with, which is how the default is asserted. */
     public ?int $lastLimit = null;
+
+    /**
+     * The query search() was last called with, or null when the last call was recent().
+     *
+     * Two separate assertions ride on this: that a blank `?q=` reaches the unfiltered
+     * statement rather than a filter matching everything, and that a query arrives
+     * trimmed and otherwise exactly as it was typed -- the SQL is what interprets it, and
+     * nothing between the query string and the bound parameter may rewrite it.
+     */
+    public ?string $lastQuery = null;
+
+    /** Whether the last call was search() rather than recent(). */
+    public bool $searched = false;
 
     public function __construct() {}
 
@@ -73,6 +86,30 @@ final class FakeMemoRepository extends MemoRepository
     public function recent(int $limit): array
     {
         $this->lastLimit = $limit;
+        $this->lastQuery = null;
+        $this->searched = false;
+
+        return $this->rows;
+    }
+
+    /**
+     * Records the query and returns the same rows.
+     *
+     * Deliberately not filtering $rows to whatever matches: the filtering is
+     * websearch_to_tsquery, a trigram ILIKE and a status pin, and a PHP imitation of
+     * those would be a second, wrong definition of what the search does -- passing while
+     * the SQL was broken, or failing while it was right. Each arm of that predicate was
+     * measured against a live Postgres and the numbers are recorded on
+     * MemoRepository::search; what this pins is everything up to it, which is the half
+     * that has an HTTP contract. MEMO-25 owns running the statement itself.
+     *
+     * @return list<Memo>
+     */
+    public function search(string $query, int $limit): array
+    {
+        $this->lastLimit = $limit;
+        $this->lastQuery = $query;
+        $this->searched = true;
 
         return $this->rows;
     }

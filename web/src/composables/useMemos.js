@@ -41,28 +41,133 @@ const loadError = ref(null)
 const saveError = ref(null)
 
 /**
+ * What is in the search box. Bound by MemoSearch, and the only thing that decides
+ * whether the next GET is filtered.
+ *
+ * @type {import('vue').Ref<string>}
+ */
+const query = ref('')
+
+/**
+ * The filter the rows currently on screen came back for, as the API reported it -- not
+ * what is in the box.
+ *
+ * The two differ for as long as a keystroke is debounced or a request is in flight, and
+ * the distinction is what keeps the empty state honest: "No memos match X" has to name
+ * the query that produced the empty list, not the one the user has since typed half of.
+ *
+ * @type {import('vue').Ref<?string>}
+ */
+const appliedQuery = ref(null)
+
+/**
+ * Long enough that ordinary typing produces one request instead of one per character,
+ * short enough that the list feels attached to the box. The API is same-origin through
+ * the dev proxy, so there is no round trip worth hiding behind a longer wait.
+ */
+const DEBOUNCE_MS = 250
+
+let debounce = null
+
+/** Set when a load is asked for while one is running. See load(). */
+let reloadWanted = false
+
+/**
+ * The box's contents as the API wants them: trimmed, and null rather than empty.
+ *
+ * Trimmed here and again by ListMemosRequest, which is agreement rather than reliance --
+ * without the client-side half, a trailing space from a paste would be sent as part of
+ * the filter and the ILIKE pattern would be `%dentist %`.
+ */
+function activeQuery() {
+  const trimmed = query.value.trim()
+
+  return trimmed === '' ? null : trimmed
+}
+
+/**
  * GET the list and replace it wholesale.
  *
  * The in-flight guard is not about load: it is about two responses. Overlapping GETs
  * resolve in whatever order the network decides, so the last one to arrive wins --
- * which can be the older answer. That is reachable today by double-clicking Refresh,
- * and MEMO-18 turns this into a timer where it would be routine.
+ * which can be the older answer. That was reachable by double-clicking Refresh, and
+ * searching makes it routine rather than exotic: every debounced keystroke wants a
+ * request, and the one that returns last decides what is on screen.
+ *
+ * So the guard now defers rather than discards. Returning early was fine while the only
+ * caller was a button -- dropping a duplicate refresh costs nothing -- but a dropped
+ * search is a list stuck showing the results for a query the user has already changed.
+ * `reloadWanted` makes the last request always happen: at most one GET is in flight, and
+ * whatever was asked for meanwhile runs the moment it lands. One request at a time is
+ * also what removes the need to version responses, because two answers can never be in
+ * the air to arrive out of order.
  */
 async function load() {
   if (loading.value) {
+    reloadWanted = true
+
     return
   }
 
   loading.value = true
 
   try {
-    memos.value = await listMemos()
+    const page = await listMemos(activeQuery())
+
+    memos.value = page.memos
+    appliedQuery.value = page.query
     loadError.value = null
   } catch (error) {
     loadError.value = `Could not load memos — ${error.message}`
   } finally {
     loading.value = false
+
+    if (reloadWanted) {
+      reloadWanted = false
+
+      // Not awaited, and it must not be: this is inside the finally of the load that
+      // just finished, so awaiting here would keep that call on the stack for as long
+      // as the chain of follow-ups lasts.
+      load()
+    }
   }
+}
+
+/**
+ * Type into the filter. Debounced, so holding a key down is one request at the end
+ * rather than one per repeat.
+ *
+ * @param {string} next
+ */
+function search(next) {
+  query.value = next
+
+  clearTimeout(debounce)
+
+  debounce = setTimeout(() => {
+    debounce = null
+    load()
+  }, DEBOUNCE_MS)
+}
+
+/**
+ * Filter now, without waiting out the debounce -- what Enter and the clear button do.
+ *
+ * The pending timer is cancelled rather than left to fire, so pressing Enter mid-debounce
+ * results in one request instead of two identical ones a quarter of a second apart.
+ */
+function searchNow() {
+  clearTimeout(debounce)
+  debounce = null
+
+  load()
+}
+
+/** Empty the box and show everything again. */
+function clearSearch() {
+  query.value = ''
+
+  searchNow()
 }
 
 /**
@@ -81,6 +186,13 @@ async function load() {
  * rather than papered over with a generation counter -- MEMO-18 replaces the page by id
  * instead of wholesale, which closes it properly and is the task that owns the polling
  * this would matter for.
+ *
+ * Prepending is also what keeps the new memo on screen while a filter is active, and it
+ * agrees with what the API would have answered rather than working around it: a memo
+ * that has not been enriched yet is pinned into every filtered page regardless of match
+ * (MemoRepository::search), so the row this puts at the top is the row the next GET
+ * brings back. Once the worker finishes with it, a memo that does not match the filter
+ * drops out -- which is the filter working, not the memo being lost.
  *
  * @param {string} text
  * @returns {Promise<boolean>} Whether the memo was stored. The composer clears the
@@ -112,5 +224,18 @@ async function submit(text) {
 }
 
 export function useMemos() {
-  return { memos, loading, saving, loadError, saveError, load, submit }
+  return {
+    memos,
+    loading,
+    saving,
+    loadError,
+    saveError,
+    query,
+    appliedQuery,
+    load,
+    search,
+    searchNow,
+    clearSearch,
+    submit,
+  }
 }

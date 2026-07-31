@@ -23,6 +23,17 @@ defineProps({
    * which is a claim about the database that a failed request cannot support.
    */
   failed: { type: Boolean, default: false },
+
+  /**
+   * The filter these rows came back for, or null when unfiltered. Only used for the empty
+   * state, and for the same reason `failed` exists: "No memos yet" is a claim about the
+   * database, and it is false when the memos are there and the filter excluded them. The
+   * two empty states also want different actions -- type a memo, or change the filter.
+   *
+   * It is the query the API echoed rather than the one in the box, so the sentence names
+   * the query that actually returned nothing.
+   */
+  query: { type: String, default: null },
 })
 
 /**
@@ -42,10 +53,11 @@ function formatTimestamp(iso) {
 
 <template>
   <!--
-    Four states. Two of them are the reason `loading` and `failed` are props at all: an
-    empty list because the first GET is still in flight, and an empty list because the
-    GET failed, are both different from having no memos -- and answering either with
-    "No memos yet" is a small lie that reads as a bug.
+    Five states. Three of them are the reason `loading`, `failed` and `query` are props at
+    all: an empty list because the first GET is still in flight, an empty list because the
+    GET failed, and an empty list because a filter excluded everything are all different
+    from having no memos -- and answering any of them with "No memos yet" is a small lie
+    that reads as a bug.
   -->
   <p v-if="loading && memos.length === 0" class="notice">Loading…</p>
 
@@ -82,6 +94,15 @@ function formatTimestamp(iso) {
       </ul>
     </li>
   </ul>
+
+  <!--
+    The filter came back empty. Quoting it matters: a typo is the likeliest reason, and a
+    message that does not repeat what was searched for gives nothing to spot it in.
+  -->
+  <p v-else-if="query !== null && !failed" class="notice">
+    No memos match <strong>{{ query }}</strong
+    >. Try fewer words, or clear the filter.
+  </p>
 
   <p v-else-if="!failed" class="notice">No memos yet. Type one above.</p>
 </template>

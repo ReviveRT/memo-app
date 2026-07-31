@@ -2,9 +2,10 @@
 import { onMounted } from 'vue'
 import MemoComposer from './components/MemoComposer.vue'
 import MemoList from './components/MemoList.vue'
+import MemoSearch from './components/MemoSearch.vue'
 import { useMemos } from './composables/useMemos'
 
-const { memos, loading, loadError, load } = useMemos()
+const { memos, loading, loadError, appliedQuery, load } = useMemos()
 
 onMounted(load)
 </script>
@@ -34,12 +35,25 @@ onMounted(load)
     <MemoComposer />
 
     <!--
+      Below the composer, not above it. Writing a memo is what this page is for and the
+      filter is how you find one again, so the order matches: the thing you always do,
+      then the thing you sometimes do. It also keeps the search box next to the list it
+      filters rather than separated from it by a textarea.
+    -->
+    <MemoSearch />
+
+    <!--
       The list's own error, kept above the list rather than replacing it: a failed
       refresh leaves the rows that did load on screen, and blanking them would look
       like the memos were gone.
     -->
     <p v-if="loadError" class="notice notice--error" role="alert">{{ loadError }}</p>
 
-    <MemoList :memos="memos" :loading="loading" :failed="Boolean(loadError)" />
+    <MemoList
+      :memos="memos"
+      :loading="loading"
+      :failed="Boolean(loadError)"
+      :query="appliedQuery"
+    />
   </main>
 </template>
