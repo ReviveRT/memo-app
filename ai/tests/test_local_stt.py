@@ -24,6 +24,7 @@ from memo_ai.stt.local import (
     BATCH_SIZE,
     DEADLINE_FLOOR_SECONDS,
     DETECT_MIN_CONFIDENCE,
+    PUNCTUATION_PRIMER,
     REPETITION_PENALTY,
     TEMPERATURE,
     VAD_SPEECH_PAD_MS,
@@ -41,9 +42,14 @@ class StubSegment:
 
 
 class StubInfo:
-    def __init__(self, duration: float) -> None:
+    def __init__(self, duration: float, language: str = "en") -> None:
         self.duration = duration
         self.duration_after_vad = duration
+
+        # What the model decoded in, as opposed to what it was asked for. The
+        # provider hands this to memo_ai/prose.py, which gates one rule on it, so a
+        # stub without it turns every test in this file into an AttributeError.
+        self.language = language
 
 
 class StubModel:
@@ -132,7 +138,10 @@ def provider(model=None, language=None, detector=None, **kwargs) -> LocalWhisper
 def test_it_transcribes_and_reports_the_model_that_did_it():
     result = provider(StubModel(texts=("one ", "two"))).transcribe(AUDIO)
 
-    assert result.text == "one two"
+    # Shaped, not the raw join: the provider hands its decode to
+    # memo_ai/prose.py before returning it. tests/test_prose.py owns the rules;
+    # what this pins is that they are applied here at all.
+    assert result.text == "One two."
     assert result.provider == "local"
     # Not None, unlike the fake provider: a real model ran, and `memos.stt_model`
     # is the column MEMO-22 prices a run from.
@@ -165,6 +174,11 @@ def test_it_asks_for_wav_and_switches_the_voice_filter_on():
             # them -- see REPETITION_PENALTY for the six-run table.
             "temperature": TEMPERATURE,
             "repetition_penalty": REPETITION_PENALTY,
+            # The style primer. Without it, one real 89-second memo came back as
+            # 1204 characters of lowercase words with not one comma in them --
+            # PUNCTUATION_PRIMER has the four-row table and the two ways the
+            # wording of it has already gone wrong.
+            "initial_prompt": PUNCTUATION_PRIMER,
         },
     )
 
@@ -264,7 +278,7 @@ def test_a_detector_that_raises_does_not_fail_the_memo():
     model = StubModel()
     broken = StubDetector(raises=RuntimeError("detector exploded"))
 
-    assert provider(model, detector=broken).transcribe(AUDIO).text == "hello world"
+    assert provider(model, detector=broken).transcribe(AUDIO).text == "Hello world."
     assert model.calls[0][1]["language"] is None
 
 
@@ -314,7 +328,7 @@ def test_prefetch_starts_the_load_without_waiting_for_a_memo():
 
     release.set()
 
-    assert local.transcribe(AUDIO).text == "warmed"
+    assert local.transcribe(AUDIO).text == "Warmed."
     assert loads == ["large-v3-turbo"]
 
 
@@ -368,7 +382,7 @@ def test_a_failed_load_is_unavailable_and_is_retried_on_the_next_memo():
     # Not cached as broken. A load failure is as likely to be a transient fetch as
     # a permanent misconfiguration, and caching it would make the first kind
     # permanent for the life of the container.
-    assert local.transcribe(AUDIO).text == "second time"
+    assert local.transcribe(AUDIO).text == "Second time."
     assert attempts == ["base", "base"]
 
 
@@ -393,7 +407,7 @@ def test_a_slow_load_gives_up_without_abandoning_the_download(monkeypatch):
     # this memo fails fast and the next one finds the model warm.
     release.set()
     assert finished.wait(5)
-    assert local.transcribe(AUDIO).text == "arrived late"
+    assert local.transcribe(AUDIO).text == "Arrived late."
 
 
 def test_a_second_memo_during_a_slow_load_does_not_start_a_second_one(monkeypatch):
