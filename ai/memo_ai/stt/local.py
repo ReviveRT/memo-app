@@ -106,9 +106,15 @@ _UNREADABLE = (
 
 _EMPTY = "This recording is empty — there is no audio in it to transcribe."
 
+# Three causes, not two, and the third was found rather than predicted. A Chrome
+# recording truncated to its first 4 KB does not fail in memo_ai/audio.py the way a
+# corrupt file is supposed to: ffmpeg salvages 600 ms of header and lead-in from it
+# and reports success, so the file reaches here intact and silent. Told only that
+# their microphone might be too quiet, whoever uploaded it would go and check the
+# microphone.
 _NO_SPEECH = (
-    "No speech was detected in this recording. It may be silent, or too quiet "
-    "for the microphone that captured it."
+    "No speech was detected in this recording. It may be silent, too quiet for "
+    "the microphone that captured it, or cut short before anything was said."
 )
 
 _TOO_SLOW = (
