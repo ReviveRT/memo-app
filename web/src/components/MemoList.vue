@@ -23,7 +23,11 @@
  * is what gives it a case: a voice memo is inserted with a null transcript and carries
  * that line until the worker replaces it.
  */
-defineProps({
+import { computed, watch } from 'vue'
+import ProgressBar from './ProgressBar.vue'
+import { useProcessingProgress } from '../composables/useProcessingProgress'
+
+const props = defineProps({
   memos: { type: Array, required: true },
 
   /**
@@ -55,6 +59,44 @@ defineProps({
    */
   query: { type: String, default: null },
 })
+
+const { progressFor, forget } = useProcessingProgress()
+
+/**
+ * The same rule useMemos applies to the poll: anything not terminal is still working.
+ *
+ * Repeated here rather than imported, and it is worth being deliberate about. Its
+ * `TERMINAL_STATUSES` is module-private and this is a *presentational* question -- which
+ * rows draw a bar -- while that one is a *behavioural* one -- whether to keep polling.
+ * They agree today and should: a row with no bar and a page still polling for it would
+ * be the page contradicting itself. If they ever need to diverge, this is the copy that
+ * should move.
+ */
+const working = (memo) => memo.status !== 'ready' && memo.status !== 'failed'
+
+const waitingIds = computed(() => new Set(props.memos.filter(working).map((memo) => memo.id)))
+
+/**
+ * Drop the clock for anything that has finished or fallen off the page.
+ *
+ * `flush: 'post'` so this runs after the rows have rendered against the new list.
+ * Cleaning up first would delete the entry for a memo whose bar is about to be drawn one
+ * last time, and progressFor() would restart its clock at zero -- a bar visibly jumping
+ * backwards on the tick before it disappears.
+ */
+watch(waitingIds, (ids) => forget(ids), { immediate: true, flush: 'post' })
+
+/**
+ * What the row says it is doing, from the status rather than from the bar.
+ *
+ * The status is the only thing here the server actually reported, so it carries the
+ * words; the bar underneath is an estimate and carries no number to the user at all.
+ * `queued` and `processing` are genuinely different waits -- one is "no worker has taken
+ * this yet", the other is "a model is running" -- and saying so is free.
+ */
+function waitLabel(status) {
+  return status === 'processing' ? 'Transcribing…' : 'Waiting for a worker…'
+}
 
 /**
  * The API sends RFC 3339 in UTC with a literal Z -- to_char(created_at AT TIME ZONE
@@ -99,6 +141,20 @@ function formatTimestamp(iso) {
         markup is shown, not run.
       -->
       <p v-if="memo.transcript" class="memo__transcript">{{ memo.transcript }}</p>
+
+      <!--
+        A memo still being worked on gets the bar instead of "No transcript yet." — that
+        sentence is a statement about a finished row, and under a running job it reads as
+        a result rather than as a wait. A failed one with no transcript still gets it,
+        because there it *is* the result. MEMO-17 owns saying why.
+
+        The words come from `status`, which the server reported; the bar is an estimate
+        and deliberately shows no number. useProcessingProgress has why it cannot be one.
+      -->
+      <div v-else-if="working(memo)" class="memo__working">
+        <span class="memo__working-label">{{ waitLabel(memo.status) }}</span>
+        <ProgressBar :label="waitLabel(memo.status)" :value="progressFor(memo.id)" />
+      </div>
 
       <p v-else class="memo__transcript memo__transcript--empty">No transcript yet.</p>
 

@@ -1,5 +1,6 @@
 <script setup>
 import { computed } from 'vue'
+import ProgressBar from './ProgressBar.vue'
 import { useMemos } from '../composables/useMemos'
 import { useRecorder } from '../composables/useRecorder'
 
@@ -16,7 +17,7 @@ import { useRecorder } from '../composables/useRecorder'
  * buttons and the decision about which of several things to say in one line of status.
  */
 
-const { uploading, audioError, submitAudio } = useMemos()
+const { uploading, uploadProgress, audioError, submitAudio } = useMemos()
 
 const {
   recording,
@@ -125,6 +126,22 @@ function formatElapsed(ms) {
       Speak a memo — it is transcribed after you stop.
     </span>
   </section>
+
+  <!--
+    Only while the bytes are going out. Once they are gone the wait belongs to the memo,
+    and the row's own bar picks it up -- two bars for one recording would suggest two
+    things were happening.
+
+    The bar carries the label rather than a caption beside it: the button already reads
+    "Uploading…", and a screen reader hearing that plus "Sending recording, 40 percent"
+    is being told once by each.
+  -->
+  <ProgressBar
+    v-if="uploading"
+    class="recorder__progress"
+    label="Sending recording"
+    :value="uploadProgress"
+  />
 
   <p v-if="problem" class="notice notice--error" role="alert">{{ problem }}</p>
 </template>

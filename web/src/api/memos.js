@@ -91,17 +91,121 @@ export async function createMemo(text) {
  * network log. Nothing on the server reads it: the storage key's extension comes from
  * the sniffed bytes, not from this.
  *
+ * **XMLHttpRequest rather than fetch, for one reason: upload progress.** fetch has no
+ * way to report how much of a request body has gone out -- the streaming request bodies
+ * that would allow it are not supported for uploads in Safari or Firefox, and the
+ * `duplex` option they need is Chromium-only. XHR has had `upload.onprogress` for
+ * fifteen years. Every other call in this file stays on fetch; this is the one that has
+ * something to report.
+ *
+ * On localhost that report is brief to the point of being decorative -- a memo is tens
+ * of kilobytes and the bar is gone before it is read. It is kept because the same code
+ * runs when the API is not on the same machine, and because the alternative is a
+ * *silent* gap between pressing Stop and the row appearing, which is the gap this whole
+ * change exists to close.
+ *
  * @param {Blob} blob The recording, as MediaRecorder produced it. Whatever container
  *   that is, it is sent unchanged and normalized server-side -- see useRecorder.
  * @param {string} filename
+ * @param {?(fraction: number) => void} onProgress Called with 0 to 1 as the body goes
+ *   out, and with 1 once it is all sent. Never called for a request whose total size the
+ *   browser will not disclose -- see below.
  * @returns {Promise<object>}
  */
-export async function createVoiceMemo(blob, filename) {
+export async function createVoiceMemo(blob, filename, onProgress = null) {
   const form = new FormData()
 
   form.append('audio', blob, filename)
 
-  return storedMemo(await request('/api/memos', { method: 'POST', body: form }))
+  return storedMemo(await upload('/api/memos', form, onProgress))
+}
+
+/**
+ * One XHR POST, reporting how much of the body has gone out, and failing exactly the way
+ * request() does.
+ *
+ * The three failure branches below are deliberately the same three, with the same
+ * sentences: from where the user is standing a transport failure is a transport failure
+ * whether the bytes went out through fetch or through XHR, and two vocabularies for one
+ * fault would be a worse outcome than the duplication. request() has the reasoning for
+ * each; this only restates them in XHR's vocabulary.
+ *
+ * No Content-Type is set here either, for the reason createVoiceMemo gives: XHR fills it
+ * in from the FormData, boundary included, and setting it by hand omits the boundary and
+ * empties $_FILES.
+ */
+function upload(path, form, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+
+    xhr.open('POST', path)
+    xhr.responseType = 'text'
+
+    if (onProgress) {
+      xhr.upload.addEventListener('progress', (event) => {
+        // `lengthComputable` is false when the browser will not say how big the body is
+        // -- which it does for a chunked or streamed body. Reporting `loaded` alone
+        // would be a numerator with no denominator, so the caller is told nothing and
+        // renders its indeterminate state instead.
+        if (event.lengthComputable && event.total > 0) {
+          onProgress(event.loaded / event.total)
+        }
+      })
+
+      // `load` on the upload object, not on the request: it fires when the last byte is
+      // *sent*, which is the moment the wait stops being about the network and starts
+      // being about the server. Without it the bar can stall a hair short of full while
+      // the API does its work, which is exactly the "is it stuck?" reading this is
+      // supposed to prevent.
+      xhr.upload.addEventListener('load', () => onProgress(1))
+    }
+
+    // Only fires for a transport failure -- never for a 4xx or 5xx, same as fetch.
+    xhr.addEventListener('error', () =>
+      reject(new Error('Could not reach the app server. Is the stack still running?')),
+    )
+
+    xhr.addEventListener('abort', () => reject(new Error('The upload was cancelled.')))
+
+    xhr.addEventListener('load', () => {
+      const notFromTheApi = () =>
+        new Error(
+          `The API did not answer (HTTP ${xhr.status}). Check that the api container is up: docker compose ps`,
+        )
+
+      if (!JSON_CONTENT_TYPE.test(xhr.getResponseHeader('content-type') ?? '')) {
+        reject(notFromTheApi())
+
+        return
+      }
+
+      let body
+
+      try {
+        body = JSON.parse(xhr.responseText)
+      } catch {
+        reject(notFromTheApi())
+
+        return
+      }
+
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(
+          new Error(
+            typeof body?.message === 'string' && body.message !== ''
+              ? body.message
+              : `The API answered HTTP ${xhr.status}.`,
+          ),
+        )
+
+        return
+      }
+
+      resolve(body)
+    })
+
+    xhr.send(form)
+  })
 }
 
 /** The row out of a 201's envelope, or a readable error if the envelope was empty. */

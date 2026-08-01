@@ -99,6 +99,21 @@ const saving = ref(false)
 const uploading = ref(false)
 
 /**
+ * How much of the recording has gone out, 0 to 1, or null when the browser will not say.
+ *
+ * Separate from `uploading` rather than folded into it, because they answer different
+ * questions and one of them can be unanswerable. `uploading` is the re-entry guard and is
+ * never in doubt; this is a measurement that a chunked request body simply does not
+ * carry, and null is how the bar is told to show motion without a number rather than to
+ * show zero. See api/memos.js, which only calls back on a computable length.
+ *
+ * Not reset when the upload finishes. `uploading` going false is what takes the bar off
+ * the screen, and blanking this as well would make it visibly empty for the frame in
+ * between.
+ */
+const uploadProgress = ref(null)
+
+/**
  * Two error refs, not one. A failed refresh must not blank the message explaining why
  * the memo the user just typed was rejected, and a rejected memo must not masquerade as
  * a broken list.
@@ -503,8 +518,12 @@ function submit(text) {
  * @returns {Promise<boolean>}
  */
 function submitAudio(blob, filename) {
+  // Reset before the request rather than after it, so a second recording never shows
+  // the first one's finished bar for the instant before its own first progress event.
+  uploadProgress.value = null
+
   return store(
-    () => createVoiceMemo(blob, filename),
+    () => createVoiceMemo(blob, filename, (fraction) => (uploadProgress.value = fraction)),
     uploading,
     audioError,
     'Could not upload the recording',
@@ -565,6 +584,7 @@ export function useMemos() {
     busy,
     saving,
     uploading,
+    uploadProgress,
     loadError,
     saveError,
     audioError,
