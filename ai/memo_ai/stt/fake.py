@@ -14,13 +14,13 @@ from memo_ai.stt.base import Transcript
 #
 # This comment also gave MEMO-09's clean-checkout gate as a second reason to keep it
 # constant, on the grounds that the gate reads it off the screen. Running that gate
-# showed it cannot, for two independent reasons: the gate submits a *text* memo, which
-# carries its own transcript and so returns from transcribe_if_owed before any provider
-# is called (memo_ai/pipeline.py), and STT_PROVIDER defaults to `local` regardless,
-# which resolves to UnimplementedStt -- so FakeStt is never constructed on that path at
-# all. The worker logged `stt_provider=local` and `transcript already present`, and no
-# canned string reached the database. Nothing puts this on a screen until MEMO-11 adds
-# the upload endpoint and a voice memo becomes possible.
+# showed it cannot: the gate submits a *text* memo, which carries its own transcript
+# and so returns from owed_audio before any provider is called (memo_ai/pipeline.py),
+# and STT_PROVIDER defaults to `local` regardless -- so FakeStt is never constructed on
+# that path at all. The worker logged `transcript already present`, and no canned
+# string reached the database. What does put it on a screen is MEMO-11's upload
+# endpoint plus an explicit `STT_PROVIDER=fake`, which is a thing a reader is told to
+# try in the README.
 CANNED_TRANSCRIPT = "Canned transcript from the fake speech-to-text provider. No audio was read."
 
 

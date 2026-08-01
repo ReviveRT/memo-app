@@ -344,3 +344,89 @@ button:disabled {
   border: 1px solid var(--border);
   font-size: 0.8rem;
 }
+
+/*
+ * The two progress bars: the upload under the Record button, and one per memo that is
+ * still being worked on.
+ *
+ * One rule set for both, because they are the same object saying the same thing about
+ * two different waits. What differs is only where they sit, which is the two modifier
+ * classes at the bottom.
+ */
+.progress {
+  overflow: hidden;
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+
+  /* colour-mix rather than a new custom property: the track is the accent at low
+     opacity, so it stays right in both schemes without a second value to keep in step. */
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.progress__fill {
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+
+  /* Eased, because the values arrive in steps -- 250ms for the processing estimate and
+     whenever the network feels like it for an upload -- and an un-eased bar reads as
+     jerky rather than as progressing. Width rather than transform, deliberately: this is
+     4px tall and repaints at a size where the compositor's help is not worth the
+     scaleX() blur on the leading edge. */
+  transition: width 240ms ease-out;
+}
+
+/*
+ * No measurement to show, so the bar shows motion instead: a short fill sliding across
+ * the track. This is what an upload whose total size the browser will not disclose gets
+ * -- see api/memos.js -- rather than a bar sitting at zero.
+ */
+.progress--indeterminate .progress__fill {
+  width: 35%;
+  animation: progress-slide 1.1s ease-in-out infinite;
+}
+
+@keyframes progress-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(386%);
+  }
+}
+
+/*
+ * Reduced motion takes the animation away and leaves something visible in its place,
+ * which is the part that is easy to get wrong: `animation: none` alone would leave a
+ * static 35% bar that looks like a stalled upload. A dimmed full-width track reads as
+ * "busy" without moving.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .progress__fill {
+    transition: none;
+  }
+
+  .progress--indeterminate .progress__fill {
+    width: 100%;
+    animation: none;
+    opacity: 0.5;
+  }
+}
+
+.recorder__progress {
+  margin-top: 0.75rem;
+}
+
+.memo__working {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0.5rem 0 0;
+}
+
+.memo__working-label {
+  color: var(--muted);
+  font-size: 0.9rem;
+}

@@ -31,12 +31,48 @@ from pathlib import Path
 
 # Mirrors docker-compose.yml. `local` rather than `fake`, deliberately: the
 # committed default must mean "real transcription" everywhere, so that a
-# misconfigured deployment cannot silently serve canned text. `local` is not
-# implemented until MEMO-14 -- see memo_ai/stt/unimplemented.py for what it does
-# in the meantime, and why that is a per-memo failure rather than a boot failure.
+# misconfigured deployment cannot silently serve canned text. As of MEMO-14 it
+# does -- memo_ai/stt/local.py is faster-whisper, and it needs no key, no account
+# and no network once the weights are cached.
 DEFAULT_STT_PROVIDER = "local"
+
+# Equal to the provider above, which memo_ai/stt/__init__.py collapses to a single
+# provider rather than a chain that would call the same one twice on every
+# failure. They only differ if somebody sets one of them.
 DEFAULT_STT_FALLBACK = "local"
-DEFAULT_STT_MODEL = "base"
+
+# Whisper size for the local provider. Not validated here, and that is the same
+# rule the provider name does not follow: this one's valid set belongs to
+# faster-whisper and changes with it, so checking it would mean importing the
+# library into config parsing -- a second of startup, on every boot, to catch a
+# typo that memo_ai/stt/local.py reports on the first voice memo with the
+# library's own list in the log.
+#
+# `large-v3-turbo` rather than `base`, and it was `base` until a real person
+# recorded into the real app. "I would like to place an order", spoken in an
+# Indian accent, came back from `base` as "I would like to blaze a door there".
+# `small` got it to "blaze an order" and `medium` got it right; only turbo also
+# fixed the second recording in the same session. The README has the table.
+#
+# It is not the slow choice, which is the part worth knowing: turbo is a
+# large-v3 encoder with a four-layer decoder, so it runs at 0.64x realtime here
+# against `medium`'s 2.14x -- faster than `small`, and three times faster than
+# the model it matches. What it costs is 1.6 GB on disk and about 1.1 GB
+# resident per replica.
+DEFAULT_STT_MODEL = "large-v3-turbo"
+
+# Empty, meaning let whisper detect it per recording. Naming a language is worth
+# roughly 30 percent of the job (9.3s against 6.4s on a three-second clip, five
+# runs each) because detection is a whole extra encoder pass, and it removes a
+# real failure: detection runs on one window and is not reliable on short or
+# accented audio. Measured here -- three seconds of accented English came back
+# `en` at 0.39 confidence, and one of the committed English fixtures is detected
+# as Russian at 0.89. A wrong language token does not degrade a transcript, it
+# ruins it.
+#
+# Still empty by default, because the app has no idea what its user speaks and a
+# wrong pin is worse than a slow detect. Set it when you know.
+DEFAULT_STT_LANGUAGE = None
 DEFAULT_AUDIO_DIR = "/data/audio"
 
 # Ten minutes, mirroring docker-compose.yml and .env.example. Enforced in the
@@ -87,6 +123,12 @@ class Settings:
     stt_provider: str
     stt_fallback: str
     stt_model: str
+
+    # None means "detect it", which is a value rather than a missing setting --
+    # hence _optional below instead of _string, whose whole job is to turn an
+    # empty variable back into its default.
+    stt_language: str | None
+
     max_audio_seconds: float
     poll_seconds: float
     log_level: str
@@ -110,6 +152,7 @@ class Settings:
             stt_provider=_string(source, "STT_PROVIDER", DEFAULT_STT_PROVIDER),
             stt_fallback=_string(source, "STT_FALLBACK", DEFAULT_STT_FALLBACK),
             stt_model=_string(source, "STT_MODEL", DEFAULT_STT_MODEL),
+            stt_language=_optional(source, "STT_LANGUAGE", DEFAULT_STT_LANGUAGE),
             # Float rather than int, and refused at zero for the same reason the
             # poll interval is: `MAX_AUDIO_SECONDS=0` is not a strict cap, it is a
             # configuration under which every voice memo fails and no text says
@@ -126,6 +169,22 @@ def _string(env: Mapping[str, str], key: str, default: str) -> str:
     value = env.get(key)
 
     return value if value else default
+
+
+def _optional(env: Mapping[str, str], key: str, default: str | None) -> str | None:
+    """
+    Like ``_string``, for a setting whose absence is itself the instruction.
+
+    The two differ only in what they do with a default of ``None``, and keeping
+    them separate is what stops rule 1 at the top of this file from quietly
+    becoming rule 1-and-a-half: an empty variable is still an absence here, it is
+    just that absence resolves to "no language" rather than to a fallback value.
+    Merging this into ``_string`` would mean that function returning ``str |
+    None``, and every existing caller having to prove it never can.
+    """
+    value = env.get(key)
+
+    return value.strip() if value and value.strip() else default
 
 
 def _required(env: Mapping[str, str], key: str) -> str:

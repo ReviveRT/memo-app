@@ -2,10 +2,10 @@
 The transcription contract. No implementation and no imports beyond the standard
 library, so that adding a provider means reading one short file.
 
-MEMO-14 owns the real one (``local``, faster-whisper) and the error classification
-that goes with it -- per-call timeout, whole-job deadline, retryable versus
-terminal. This file deliberately stops short of that: MEMO-08 needs the seam to
-exist and be exercised by something, not to be finished.
+Two implementations satisfy it as of MEMO-14 -- ``local`` (faster-whisper) and
+``fake`` -- which is what keeps this file a contract rather than a description of
+its only caller. The error classification below is the half that took a real
+provider to settle, and memo_ai/stt/chain.py is the code that depends on it.
 """
 
 from dataclasses import dataclass
@@ -31,9 +31,11 @@ class SttUnavailable(SttError):
     """
     The provider cannot run here at all, as opposed to failing on this audio.
 
-    Separate from ``SttError`` because MEMO-14's fallback chain has to tell the two
-    apart: "this provider is unusable, try the fallback" is a different decision
-    from "this file is corrupt, and the fallback will not do any better".
+    Separate from ``SttError`` because the fallback chain tells the two apart:
+    "this provider is unusable, try the fallback" is a different decision from
+    "this file is corrupt, and the fallback will not do any better". memo_ai/stt/
+    chain.py is the one reader of that distinction, and memo_ai/stt/local.py is
+    where a real provider has to choose between them on every failure it has.
     """
 
 
@@ -43,10 +45,11 @@ class Transcript:
     What a provider returns, and it is not just the text.
 
     ``provider`` and ``model`` are carried on the result rather than read back off
-    the configuration when the row is written, because with MEMO-14's fallback in
+    the configuration when the row is written, because with the fallback chain in
     place those two answers diverge: ``STT_PROVIDER`` says what was *asked for* and
     this says what actually produced the words. ``memos.stt_provider`` wants the
-    second one.
+    second one. ``STT_PROVIDER=openai`` on the shipped defaults is that divergence
+    in practice -- the memo transcribes, and the row says `local`.
 
     No ``duration_ms``. It belongs to the row and MEMO-16 commits it alongside the
     transcript, but it comes from ffprobe (MEMO-13) rather than from a provider --
@@ -75,9 +78,10 @@ class SttProvider(Protocol):
         """
         Turn one audio file into a transcript, or raise ``SttError``.
 
-        ``audio`` is an absolute path inside the container, already joined to
-        ``AUDIO_DIR`` and checked for traversal by memo_ai/pipeline.py. A provider
-        does not have to trust it exists -- MEMO-14's local provider is expected to
-        fail cleanly on a missing or zero-length file rather than hang.
+        ``audio`` is the *normalized* copy, in a temporary directory that lives
+        only as long as the job -- not the upload on the shared volume, whose path
+        memo_ai/pipeline.py joins and checks for traversal. A provider does not
+        have to trust it exists or is readable: the local one classifies a missing
+        or undecodable file rather than hanging on it.
         """
         ...

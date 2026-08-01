@@ -108,8 +108,9 @@ which is 77 percent of OpenAI's 25 MB request limit. The app uploaded that same
 memo in about 3.7 MB, so normalizing to WAV would mean carrying roughly five times
 what the user actually recorded, and most of the request budget, for a format
 nothing downstream asked for. Opus is a fraction of either. WAV is kept as an
-option for a provider that decodes in-process, which is what MEMO-14's local
-whisper will want.
+option for a provider that decodes in-process, and the `local` one asks for it —
+it reads the file itself, so a codec in between is two conversions for bytes that
+never leave the container.
 
 One consequence worth knowing before you go looking for a bug: an Opus stream
 always reports `48000` as its sample rate, whatever it was encoded from — the
@@ -163,10 +164,11 @@ reference and contains no real credentials.
 | `POSTGRES_PORT` | `5432` | Host port for Postgres. Change it if something else on your machine owns 5432 |
 | `API_PORT` | `8080` | Host port for the API |
 | `WEB_PORT` | `5173` | Host port for the frontend |
-| `STT_PROVIDER` | `local` | Primary transcription provider: `openai` \| `local` \| `fake`. Only `fake` is implemented so far — see below |
-| `STT_FALLBACK` | `local` | Provider used when the primary errors or its key is absent |
-| `STT_MODEL` | `base` | Model for the chosen provider — the main cost lever on the hosted path |
-| `OPENAI_API_KEY` | _(empty)_ | Optional. Enables hosted transcription |
+| `STT_PROVIDER` | `local` | Transcription provider: `local` \| `fake` \| `openai`. `openai` is recognised but not built — see below |
+| `STT_FALLBACK` | `local` | Provider used when the primary cannot run at all. Not used when a recording simply produced no words |
+| `STT_MODEL` | `large-v3-turbo` | Whisper size for the `local` provider. The accuracy lever — see the table below before changing it |
+| `STT_LANGUAGE` | _(empty)_ | ISO code of your recordings (`en`, `ru`, …). Empty detects it per recording. Setting it is ~30% faster and safer on short or accented audio |
+| `OPENAI_API_KEY` | _(empty)_ | Read by nothing today. Passed through for whoever writes the hosted adapter |
 | `ANTHROPIC_API_KEY` | _(empty)_ | Optional. Enables Claude enrichment |
 | `ENRICH_MODEL` | `claude-opus-5` | Claude model for title/summary/tags/category |
 | `MAX_AUDIO_BYTES` | `12582912` | Upload byte cap for the API edge (12 MiB). Anything larger is a 413. Raising it above `upload_max_filesize` (16 MiB, in `api/conf.d/uploads.ini`) silently breaks uploads instead of widening them — `/api/health` reports both numbers and flags the mismatch |
@@ -174,35 +176,192 @@ reference and contains no real credentials.
 | `WORKER_POLL_SECONDS` | `1.0` | How long an `ai-worker` replica waits after finding the queue empty. Bounds how long a new memo sits in `queued`, not how fast the queue drains |
 | `AUDIO_DIR` | `/data/audio` | Audio path inside the containers, on the shared `audio` volume. Changing it needs a rebuild with a matching `--build-arg AUDIO_DIR` — see the note in `.env.example` |
 
-### Transcription today
+### Transcription
 
-Only `STT_PROVIDER=fake` is implemented so far (MEMO-08); `local` and `openai`
-arrive with MEMO-14. The default of `local` is still safe to leave alone — the
-worker starts normally on it and text memos are unaffected, because a typed memo
-carries its own transcript and never reaches a provider.
+Recordings are transcribed **on your machine**, by
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper) running inside the
+`ai-worker` container. There is no account to create, no key to paste and no
+per-minute bill; the only thing it spends is CPU. The weights are MIT-licensed and
+so is everything that runs them.
 
-A **voice** memo is a different matter now that MEMO-10 can create one. Recording
-and upload work on the default configuration, and the memo is stored — but the
-worker has no provider to transcribe it with, so it reaches `status=failed` with
-a `last_error` saying so rather than gaining a transcript. To watch the whole
-queue run end to end before MEMO-14 lands, start the stack with the fake
-provider, which returns a fixed sentence instantly and never opens the file:
+The one moment it needs the internet is **the first run after a clean build**,
+which downloads 1.6 GB of model into the `whisper-cache` volume. The worker starts
+that download the moment it boots rather than waiting for your first recording, so
+in practice it is finished before you have opened the browser and pressed Record.
+If you beat it, that memo fails with _"the local transcription model is still
+being downloaded"_ — record another a minute later. Everything after that is
+offline, and stays offline across restarts because the cache is a named volume.
+
+The language is detected per recording rather than configured, so one stack takes
+memos in several languages; the Russian test recording is identified as Russian
+with nothing told to it. Set `STT_LANGUAGE=en` if you only ever speak one — it is
+about 30% faster and removes a misdetection risk that is real on short clips.
+
+### Choosing a model
+
+`STT_MODEL` is the accuracy lever and it matters more than it looks. Measured on a
+real recording of _"I would like to place an order"_, spoken in an Indian accent:
+
+| `STT_MODEL` | Disk | Transcribed it as |
+| --- | --- | --- |
+| `base` | 142 MB | "I would like to **blaze a door there**" |
+| `small` | 464 MB | "I would like to **blaze an order**" |
+| `medium` | 1.5 GB | correct |
+| **`large-v3-turbo`** _(default)_ | 1.6 GB | correct |
+
+turbo is not the slow choice despite being the largest. It pairs a `large-v3`
+encoder with a four-layer decoder, so it beats `small` on speed and is three times
+faster than the `medium` it out-transcribes.
+
+### Speed
+
+A memo of a few seconds transcribes in a few seconds. Anything over two minutes of
+audio switches to **batched** decoding — the recording is cut at silence and the
+encoder runs several of those windows at once instead of walking them in series —
+which is worth four to five times on long audio. Measured on an idle machine with
+the shipped model:
+
+| Recording | In series | Batched | What runs |
+| --- | --- | --- | --- |
+| 3 seconds | 8.0 s | 8.4 s | series |
+| 13 seconds | 8.7 s | 9.1 s | series |
+| 2 minutes | 143 s (0.97× realtime) | **27.5 s (0.23× realtime)** | batched |
+| 10 minutes _(the cap)_ | ~10 min | **~2 min** | batched |
+
+Short memos get their speed somewhere else, and it is the larger factor of the
+two. Working out what language a recording is in costs a **whole extra encoder
+pass** over the first 30-second window — on a model whose encoder is the entire
+bill for a short memo, that simply doubles the job. So the question is put to
+`tiny` instead, which answers in 0.21 s against turbo's 4.44 s and, on every real
+recording tested, reached the same verdict. Measured end to end on real
+recordings, one at a time:
+
+| Recording | Detecting on the big model | **Detecting on `tiny`** |
+| --- | --- | --- |
+| 3 seconds | 9.5 s | **5.1 s** |
+| 13 seconds | 9.0 s | **5.2 s** |
+
+Nothing is given up for it: the language is still detected per recording, so a
+stack nobody configured still transcribes Russian as Russian. If `tiny` is unsure
+the guess is thrown away and the big model works it out itself, paying the old
+cost on that memo alone.
+
+Batching is not used below that threshold because it does not help and it does
+hurt. Short memos are a single window, so there is nothing to run in parallel —
+and because each window is decoded independently, whisper loses the running
+context that keeps its formatting consistent. The same clips come back
+measurably worse, reproducibly:
+
+```
+"...need this to be write down at 12 p.m."  →  "...to be right down at..."
+"1, 2, 3, 4, 5, 6, 7, 8, 9, 10"             →  "one two three four five..."
+```
+
+Numerals and punctuation are worth keeping in a column that gets full-text
+searched. Past two minutes the arithmetic inverts — nobody trades eight minutes of
+waiting for a comma — so the threshold is where it is.
+
+**`STT_LANGUAGE=en`** is still worth setting if you only ever dictate in one
+language, but it is now a small win rather than a large one — it skips `tiny`'s
+0.2 s and, more usefully, removes any chance of a wrong guess. Language detection
+is unreliable on short or accented audio whatever model does it.
+
+Raising CTranslate2's thread count is *not* worth it: it was tried, and bought 10%
+on a long memo while making short memos slower and costing 890 MB per replica.
+
+The floor on a short memo is one pass of the large-v3 encoder, and whisper pads
+every input to 30 seconds before running it — so three seconds of audio costs what
+thirty would. That is the architecture, not a setting. The only lever left below
+~5 s is a smaller model, and the table above says what that costs.
+
+### What it costs to run
+
+Memory, mostly, and the two decisions compound: turbo is 1.1 GB resident, and
+batching takes the peak to **2.4 GB per replica**. With `replicas: 2` that is
+about 4.8 GB before anything else in the stack, which is most of a default Docker
+Desktop VM. If that is too tight, `STT_MODEL=base` or one worker replica are the
+two levers, in that order.
+
+### Repeated words
+
+Say the same word ten times and whisper will happily write it two hundred times.
+It is the best-known failure mode of the model family: the decoder gets stuck
+re-emitting a token and runs to its own ceiling, which also makes the memo slow,
+because every one of those words has to be generated. A real 4.3-second recording
+of "Rock" said ten times came back as **223** of them, taking 21 seconds.
+
+Two settings fix it together and neither works alone — `temperature=0` and a
+`repetition_penalty` of 1.1. The penalty by itself is erratic rather than helpful,
+because when whisper judges its own output degenerate it retries at a higher
+temperature, and that means sampling. Six runs of the same audio:
+
+| | "Rock" count, six runs |
+| --- | --- |
+| default | 223, 223, 223, 223, 223, 223 |
+| penalty only | 0, 0, 1, 6, 9, 223 |
+| **both** | **11, 11, 11, 11, 11, 11** |
+
+The same recording is now 11 words in 10 seconds rather than 223 in 21. Dropping
+the temperature ladder also makes every transcript **deterministic** — the same
+audio gives the same text every time, which it did not before.
+
+Things that did **not** help, tried on the same recording so you need not: a
+domain `initial_prompt`, `beam_size=10`, greedy decoding, loudness-normalizing the
+audio, pinning the language, and switching between the WAV and Opus intermediate
+formats. Model capacity was the lever.
+
+One thing that did, and it is not a knob you have to turn. The voice-activity
+filter that keeps whisper from inventing words over silence ships with 400 ms of
+padding around each speech region, and that was enough to swallow the opening
+consonant of "place" — turbo returned "blaze an order" with it and "place an
+order" without it. The padding is 1000 ms here, checked against the
+filter-disabled baseline on five real recordings, which keeps the transcript
+honest without giving up silence detection. Silence still comes back as _"No
+speech was detected"_ rather than as whisper's habitual "Thank you."
+
+Two other providers exist behind the same interface:
+
+| `STT_PROVIDER` | What happens |
+| --- | --- |
+| `local` _(default)_ | faster-whisper, as above |
+| `fake` | A fixed canned sentence, instantly. Useful for watching the queue work without waiting on a model |
+| `openai` | Recognised, deliberately **not built**. See below |
 
 ```bash
 STT_PROVIDER=fake docker compose up
 ```
 
-### Using the hosted providers
+`STT_FALLBACK` names the provider to use when the primary cannot run *at all* —
+not built, model missing, out of memory. It does **not** retry a recording that
+simply produced no words, because both providers are handed the same normalized
+audio and the second would reach the same answer more slowly. With the shipped
+defaults the two are equal and there is no chain at all.
 
-Both API keys are optional and neither is needed for the app to work end to end.
+### Why there is no hosted provider
 
-- **No `OPENAI_API_KEY`** — transcription runs locally on faster-whisper. Slower
-  on first use, no network, no cost.
-- **No `ANTHROPIC_API_KEY`** — memos still transcribe, store and search. They get
-  a fallback title (first 60 characters of the transcript) and `enrichment_error`
-  is recorded on the row.
+`openai` is a name the configuration accepts and nothing implements, and that is a
+decision rather than an unfinished edge. Writing an adapter against an API this
+project has never called would mean shipping a code path nobody has run, in the
+one place where "it looks right" and "it works" are hardest to tell apart. What
+proves the seam instead is that two providers really do go through it — `local`
+and `fake` — with different formats, different failure modes and different costs.
 
-To use either, paste your own key into `.env`. _TODO (MEMO-26): what measurably
+Setting it is not a dead end: `openai` reports itself unavailable, the worker logs
+that it was skipped, and `STT_FALLBACK` transcribes the memo. The row records the
+provider that actually ran, so `memos.stt_provider` never claims a request was
+made that was not.
+
+Pricing it needs no invoice, either. Hosted transcription bills per minute of
+audio, so the levers are the model and `MAX_AUDIO_SECONDS` — not the sample rate
+— and MEMO-22 keeps the rate table that turns "10,000 memos" into a number.
+
+### Using the Anthropic key
+
+`ANTHROPIC_API_KEY` is optional and nothing here needs it. Without it, memos still
+transcribe, store and search; they get a fallback title (first 60 characters of
+the transcript) and `enrichment_error` is recorded on the row.
+
+To use it, paste your own key into `.env`. _TODO (MEMO-26): what measurably
 changes when you do._
 
 ## Repository layout
@@ -257,6 +416,20 @@ a bare host without it, those tests skip and the rest of the suite still passes.
 recordings in `ai/tests/fixtures/`, since no synthesized file reproduces the
 missing-duration defect. It skips and names what is missing until they are there —
 `ai/tests/fixtures/README.md` has the capture instructions.
+
+`tests/test_local_whisper.py` runs the real model against those same recordings.
+It skips unless the weights are already in the HuggingFace cache, and it will not
+download them itself — a test run that quietly pulled 145 MB would be a worse
+surprise than a skip. Mount the same cache the stack uses to make it run:
+
+```bash
+docker compose run --rm --no-deps --user 0:0 -v memo-app_whisper-cache:/cache --entrypoint sh ai-worker -c 'pip install -q -r requirements-dev.txt && python -m pytest'
+```
+
+Everything else about the local provider is covered by `tests/test_local_stt.py`,
+which stubs the model out: what it checks is the classification — which failures
+send the chain to the fallback and which are terminal — and none of that needs
+inference.
 
 _TODO (MEMO-26): running the api tests, running a service outside Docker, applying
 a new migration._

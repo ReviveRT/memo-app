@@ -150,3 +150,27 @@ def test_the_default_provider_is_one_the_registry_knows():
     # .env.example and the README go on recommending it.
     assert DEFAULT_STT_PROVIDER in stt.PROVIDER_NAMES
     assert DEFAULT_STT_FALLBACK in stt.PROVIDER_NAMES
+
+
+def test_an_absent_language_means_detect_rather_than_a_default_value():
+    # STT_LANGUAGE is the one variable here whose empty value is the *setting*
+    # rather than a missing one, so it needs its own parser -- `_string` would
+    # substitute a default and there is no sensible default language to
+    # substitute. All three shapes of absence resolve the same way.
+    for env in (MINIMAL, MINIMAL | {"STT_LANGUAGE": ""}, MINIMAL | {"STT_LANGUAGE": "   "}):
+        assert Settings.from_env(env).stt_language is None
+
+
+def test_a_named_language_is_taken_and_trimmed():
+    # Trimmed because this arrives from a hand-edited .env, and faster-whisper
+    # matches the code exactly -- ` en` would be rejected deep inside the library
+    # on the first voice memo rather than here.
+    assert Settings.from_env(MINIMAL | {"STT_LANGUAGE": " en "}).stt_language == "en"
+
+
+def test_the_default_model_is_carried_verbatim():
+    # Not validated at parse time, on purpose: the valid set belongs to
+    # faster-whisper and importing it into config parsing would cost a second of
+    # startup on every boot. config.py says so at the constant.
+    assert Settings.from_env(MINIMAL).stt_model == DEFAULT_STT_MODEL
+    assert Settings.from_env(MINIMAL | {"STT_MODEL": "tiny"}).stt_model == "tiny"

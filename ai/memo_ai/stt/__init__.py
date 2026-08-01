@@ -6,66 +6,101 @@ before this one: the ``STT_PROVIDER`` comment in .env.example, the variable tabl
 in README.md, and the ``STT_PROVIDER``/``STT_FALLBACK`` defaults in
 docker-compose.yml. A name that is documented there and unknown here would be
 rejected at boot with "unknown provider" while the repo's own documentation
-recommends it -- which is why `local` and `openai` are registered as
+recommends it -- which is why `openai` is registered as
 :class:`~memo_ai.stt.unimplemented.UnimplementedStt` rather than left out.
+
+Two of the three names are real as of MEMO-14, which is the point of the seam
+rather than a milestone: `local` and `fake` are both implemented, both tested and
+both exercised by the same pipeline, so the interface is proven by use instead of
+asserted by having only one shape pass through it. `openai` is the one left
+undone, on purpose -- see unimplemented.py.
 """
 
 from memo_ai.config import ConfigError, Settings
 from memo_ai.stt.base import SttError, SttProvider, SttUnavailable, Transcript
+from memo_ai.stt.chain import FallbackStt
 from memo_ai.stt.fake import FakeStt
+from memo_ai.stt.local import LocalWhisperStt
 from memo_ai.stt.unimplemented import UnimplementedStt
 
 __all__ = [
     "PROVIDER_NAMES",
+    "FallbackStt",
     "SttError",
     "SttProvider",
     "SttUnavailable",
     "Transcript",
     "require_known",
     "resolve",
+    "resolve_chain",
 ]
 
-# Which task owes each name an implementation. Keyed rather than listed so that
-# the message a user sees names the task, and so that deleting an entry from here
-# is what turns a name from "not yet" into "not a thing".
+# Which names are recognised without being built, and the clause that explains
+# each. Keyed rather than listed so the message a user sees says why the name
+# exists at all, and so that deleting an entry from here is what turns a name from
+# "declined" into "not a thing".
+#
+# Short, because it is a clause in a sentence that can reach `memos.last_error`
+# and from there the browser. The full reasoning belongs in the README, where
+# somebody choosing a provider will read it; a failed memo wants the way out.
 _UNIMPLEMENTED = {
-    "local": "MEMO-14",
-    "openai": "MEMO-14, optional",
+    "openai": "the hosted adapter was deliberately left unwritten",
 }
 
-PROVIDER_NAMES = frozenset({FakeStt.name, *_UNIMPLEMENTED})
+PROVIDER_NAMES = frozenset({FakeStt.name, LocalWhisperStt.name, *_UNIMPLEMENTED})
 
 
 def resolve(name: str, settings: Settings) -> SttProvider:
     """
     Build the provider for ``name``, or refuse to start.
 
-    ``settings`` is unused by every provider that exists today -- the fake reads no
-    configuration and the unimplemented ones read none either. It is in the
-    signature anyway because MEMO-14's local provider needs ``stt_model``, and the
-    alternative is that adding it changes every call site and every test double at
-    the same time as introducing the thing being tested.
+    Nothing here is expensive. :class:`LocalWhisperStt` loads no model until the
+    first voice memo, which is what lets the committed default resolve at boot on
+    a machine that has never downloaded a weight -- see that class for why a boot
+    failure is the one outcome the default configuration may not have.
     """
     if name == FakeStt.name:
         return FakeStt()
 
+    if name == LocalWhisperStt.name:
+        return LocalWhisperStt(settings.stt_model, settings.stt_language)
+
     if name in _UNIMPLEMENTED:
-        return UnimplementedStt(name, owner=_UNIMPLEMENTED[name])
+        return UnimplementedStt(name, because=_UNIMPLEMENTED[name])
 
     raise _unknown("STT_PROVIDER", name)
 
 
-def require_known(variable: str, name: str) -> None:
+def resolve_chain(settings: Settings) -> SttProvider:
     """
-    Validate a provider name without building it.
+    The configured provider, wrapped in its fallback if the two differ.
 
-    Exists for ``STT_FALLBACK``, which MEMO-08 does not use: the fallback *chain*
-    is MEMO-14's, along with the classification that decides when to walk it. What
-    MEMO-08 can do cheaply is refuse to start on a typo in it, so that
-    ``STT_FALLBACK=fak`` is caught on the boot after the edit rather than months
-    later, on the one code path that only runs when something else has already
-    gone wrong.
+    Collapsing the equal case matters rather than being tidy, because equal is the
+    *default*: docker-compose.yml ships ``STT_PROVIDER=local`` and
+    ``STT_FALLBACK=local``. A chain built from one provider twice would call it
+    again on every ``SttUnavailable`` -- so a model that failed to load would fail
+    to load twice per memo, and each attempt would wait out its own
+    ``MODEL_LOAD_TIMEOUT_SECONDS``, doubling the time a stuck download holds a
+    replica in exchange for nothing.
+
+    ``require_known`` still runs on the fallback even in the collapsed case, so
+    ``STT_FALLBACK=fak`` is a refusal to boot rather than a surprise on the one
+    code path that only runs when something else has already gone wrong. It is
+    also what puts the *right* variable in the message: reaching ``resolve`` with
+    a fallback name would report the typo against ``STT_PROVIDER``, and sending
+    someone to check the wrong line of their .env is worse than saying nothing.
     """
+    primary = resolve(settings.stt_provider, settings)
+    require_known("STT_FALLBACK", settings.stt_fallback)
+
+    if settings.stt_fallback == settings.stt_provider:
+        return primary
+
+    return FallbackStt(primary, resolve(settings.stt_fallback, settings))
+
+
+def require_known(variable: str, name: str) -> None:
+    """Validate a provider name without building it."""
     if name not in PROVIDER_NAMES:
         raise _unknown(variable, name)
 

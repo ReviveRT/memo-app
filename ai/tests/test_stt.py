@@ -5,8 +5,14 @@ from pathlib import Path
 import pytest
 
 from memo_ai import stt
-from memo_ai.config import ConfigError, Settings
+from memo_ai.config import (
+    DEFAULT_STT_LANGUAGE,
+    DEFAULT_STT_MODEL,
+    ConfigError,
+    Settings,
+)
 from memo_ai.stt.fake import CANNED_TRANSCRIPT, FakeStt
+from memo_ai.stt.local import LocalWhisperStt
 from memo_ai.stt.unimplemented import UnimplementedStt
 
 SETTINGS = Settings.from_env({"DATABASE_URL": "postgresql://memo:memo@db:5432/memo"})
@@ -40,34 +46,63 @@ def test_fake_never_touches_the_filesystem():
     assert result.text == CANNED_TRANSCRIPT
 
 
-@pytest.mark.parametrize("name", ["local", "openai"])
-def test_a_declared_but_unimplemented_provider_resolves_and_fails_only_on_use(name):
-    # The split that keeps `docker compose up` converging on a clean checkout:
-    # `local` is the committed default in docker-compose.yml, .env.example and the
-    # README, so resolving it must not be a boot failure. It is a per-memo failure
-    # instead, and today it is unreachable -- only a memo with `transcript IS NULL`
-    # gets here, and only MEMO-11's upload endpoint creates one.
-    provider = stt.resolve(name, SETTINGS)
+def test_local_resolves_to_the_real_provider_and_carries_its_configuration():
+    # The two things `settings` has been in resolve's signature for since MEMO-08.
+    provider = stt.resolve(
+        "local",
+        Settings.from_env(
+            {
+                "DATABASE_URL": "postgresql://memo:memo@db:5432/memo",
+                "STT_MODEL": "small",
+                "STT_LANGUAGE": "en",
+            }
+        ),
+    )
+
+    assert isinstance(provider, LocalWhisperStt)
+    assert (provider.model_size, provider.language) == ("small", "en")
+
+
+def test_an_unconfigured_local_provider_takes_the_committed_defaults():
+    # Against the constants rather than against literals, so that changing a
+    # default is one edit in memo_ai/config.py and not a test that has to be
+    # chased. `.env.example`, docker-compose.yml and the README still have to be
+    # kept in step by hand -- that is what the mirroring note in config.py is for.
+    provider = stt.resolve("local", SETTINGS)
+
+    assert provider.model_size == DEFAULT_STT_MODEL
+    # None, not "en". A stack nobody configured must still transcribe whatever
+    # language it is handed -- see tests/test_local_whisper.py for the fixture
+    # that proves it does.
+    assert provider.language is DEFAULT_STT_LANGUAGE is None
+
+
+def test_a_declared_but_unbuilt_provider_resolves_and_fails_only_on_use():
+    # The split that keeps `docker compose up` converging: a name in the README's
+    # variable table must not be able to stop the worker starting. It is a
+    # per-memo failure instead, and SttUnavailable means the chain routes around
+    # it -- see tests/test_chain.py.
+    provider = stt.resolve("openai", SETTINGS)
 
     assert isinstance(provider, UnimplementedStt)
-    assert provider.name == name
+    assert provider.name == "openai"
 
     with pytest.raises(stt.SttUnavailable) as raised:
         provider.transcribe(Path("/data/audio/memo.webm"))
 
     # The message is what lands in `memos.last_error` and reaches the browser, so
     # it has to name the way out rather than just the problem.
-    assert "STT_PROVIDER=fake" in str(raised.value)
+    assert "STT_PROVIDER=local" in str(raised.value)
 
 
-def test_an_unimplemented_provider_is_not_silently_swapped_for_the_fake():
+def test_an_unbuilt_provider_is_not_silently_swapped_for_the_fake():
     # The worst available behaviour, stated as a test: substituting canned text for
-    # a configuration that asked for real transcription would pass MEMO-08's
-    # acceptance and lie in production.
-    assert stt.resolve("local", SETTINGS).name == "local"
+    # a configuration that asked for real transcription would pass every acceptance
+    # criterion and lie in production.
+    assert stt.resolve("openai", SETTINGS).name == "openai"
 
     with pytest.raises(stt.SttUnavailable):
-        stt.resolve("local", SETTINGS).transcribe(Path("/x.webm"))
+        stt.resolve("openai", SETTINGS).transcribe(Path("/x.webm"))
 
 
 def test_an_unknown_provider_refuses_to_start_and_lists_the_valid_names():

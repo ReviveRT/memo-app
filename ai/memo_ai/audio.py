@@ -127,11 +127,19 @@ class AudioFormat:
 # exists below rather than being deleted.
 OPUS = AudioFormat("opus", ".opus", ("-c:a", "libopus", "-b:a", "24k"))
 
-# For a provider that decodes in-process and wants no codec in the way -- which is
-# MEMO-14's faster-whisper, and nothing today. Registered now because the *choice*
-# is what this module is exporting, and a seam with one option is not a seam.
+# For a provider that decodes in-process and wants no codec in the way. That is
+# `local` as of MEMO-14, which asks for this by setting `audio_format` and is the
+# reason the choice exists rather than a hypothetical second caller.
 #
-# Not the default, for the size reason above: a provider gets WAV by asking.
+# Not the default, for the size reason above: a provider gets WAV by asking. The
+# two are near enough interchangeable to the local model -- both were run through
+# it on the browser fixtures and produced the same words, differing only by a
+# trailing full stop -- so this is a saving of two codec passes on a file that
+# never leaves the container, not a correctness need.
+#
+# The 19.20 MB figure above is this format at 600 seconds, and it was confirmed a
+# second time here rather than left as arithmetic: the 600-second WAV built for
+# MEMO-14's throughput measurement came out 19,200,078 bytes.
 WAV = AudioFormat("wav", ".wav", ("-c:a", "pcm_s16le"))
 
 DEFAULT_FORMAT = OPUS
