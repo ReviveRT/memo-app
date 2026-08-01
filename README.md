@@ -39,13 +39,18 @@ send it. Nothing enforces a duration at the moment; the `MAX_AUDIO_SECONDS` cap
 below is applied in the worker and arrives with MEMO-13.
 
 What _is_ enforced is size: a recording over `MAX_AUDIO_BYTES` (12 MiB) is refused
-with a 413 naming the limit, and nothing is stored. How much audio that is depends on
-the browser's encoder, and the only figure on record — 600 seconds of Chrome-style
-WebM/Opus measured at 12.3 MB — puts it at **just over 10 minutes**. That is the same
-length as the `MAX_AUDIO_SECONDS` cap rather than comfortably above it: about 2 percent
-of headroom, so a full-length memo is close enough to the byte cap that MEMO-13 should
-decide whether to raise one of the two. MEMO-13 is also where real recordings from all
-three browsers get measured, which is what settles the number. It names the size too when there is one to name;
+with a 413 naming the limit, and nothing is stored. The recorder asks for 48 kbps, so
+that is about **34 minutes** — comfortably past the 10-minute duration cap, which is
+the limit meant to stop a long memo, and which says so in words about length rather
+than megabytes.
+
+Left to the browser's own default it would not be. Measured through the app in
+Chromium: the default is 128 kbps, 153 kbps once the WebM container is counted, which
+puts a ten-minute memo at 11.5 MB against a 12.6 MB cap — 9 percent of margin. Opus is
+variable-bitrate, so whether such a memo was refused for length or for size would come
+down to how much of it was silence. Asking for 48 kbps separates the two caps, and it
+costs nothing downstream: transcription resamples to 16 kHz regardless, so everything
+above that is discarded either way. It names the size too when there is one to name;
 a file large enough for PHP to have dropped the bytes before the app saw it can
 only be told that it was too large. Size stands in for duration at this point in
 the pipeline because a WebM stream from `MediaRecorder` carries no duration to
