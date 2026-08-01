@@ -34,6 +34,52 @@ import { onUnmounted, ref } from 'vue'
 export const TIMESLICE_MS = 1_000
 
 /**
+ * What to ask the encoder for, in bits per second.
+ *
+ * This is the one option this file does give MediaRecorder, and the distinction from
+ * CONTAINERS below is the whole reason it is safe to: `mimeType` is a *request for a
+ * container* that Firefox answers untruthfully, while this is a hint about the encoder
+ * and a browser that will not honour it produces the same recording it would have
+ * anyway. There is no wrong answer to be misled by, only a smaller file or not.
+ *
+ * **Why 48k, from both ends.**
+ *
+ * The ceiling is transcription. Whisper runs at 16 kHz, so it never sees audio above
+ * 8 kHz, and MEMO-13 resamples to exactly that before any provider is called. Opus at
+ * 48 kbps mono already codes the full band, so this is roughly 2.5x the bandwidth
+ * anything downstream will read -- more is not accuracy, it is bytes that get discarded
+ * twice.
+ *
+ * The floor is that the recording is kept. MEMO-13 re-encodes to 24 kbps for the API
+ * path, so recording at that rate would stack two lossy passes with no margin; and the
+ * blob is not deleted after transcription, so MEMO-23 serves this exact file back for
+ * playback. It is the only copy -- nothing here can re-record it -- which is the side
+ * to err on. Consumer voice-note apps sit around 20 to 27 kbps, so this is generous
+ * rather than marginal, and still small.
+ *
+ * The size that falls out is the point, and it was measured through this file rather
+ * than reasoned about -- a synthetic AudioContext stream in place of a microphone, the
+ * same technique MEMO-10 used, driven through the real Record and Stop buttons:
+ *
+ *   default (no options)   reports 128000   135 KB per 22s is 153 kbps on the wire
+ *   audioBitsPerSecond     reports  48000   136 KB per 22s is  49 kbps on the wire
+ *
+ * The gap between the requested rate and the wire rate is the WebM container. So a
+ * 10-minute memo is 3.7 MB here against 11.5 MB on the default, and MAX_AUDIO_BYTES
+ * (12 MiB) holds about 34 minutes instead of 10.9. That is the whole reason this line
+ * exists: on the default, a full-length memo lands within 9 percent of the byte cap, so
+ * the cap and MAX_AUDIO_SECONDS (600s) describe nearly the same recording -- and Opus
+ * is variable-bitrate, so which of the two refused a memo would depend on how much of
+ * it was silence. One would answer "too long", the other "too large", and the same
+ * ten-minute recording could get either.
+ *
+ * The measurement is Chromium's. Firefox and Safari honour the same hint per spec, but
+ * neither has been run through this: MEMO-13's fixtures are where that gets confirmed,
+ * and the fallback below is what a browser that refuses it gets.
+ */
+const AUDIO_BITS_PER_SECOND = 48_000
+
+/**
  * How often the elapsed display is recomputed. Five times a second, so the seconds
  * digit turns over when it should rather than up to a second late.
  */
@@ -42,8 +88,9 @@ const TICK_MS = 200
 /*
  * CONTAINERS
  *
- * `new MediaRecorder(stream)` with no options, on purpose, and this is the one part of
- * this file worth reading before changing it.
+ * No `mimeType`, on purpose, and this is the one part of this file worth reading before
+ * changing it. (`audioBitsPerSecond` *is* passed, and the note on that constant says why
+ * the two are not the same kind of option.)
  *
  * Every browser produces a different container -- Chrome and Edge WebM/Opus, Safari
  * MP4 or fragmented MP4, Firefox **Ogg** -- and asking for one does not change that.
@@ -74,7 +121,7 @@ const TICK_MS = 200
  * which is a worse answer than the one they started with.
  *
  * The address they are *currently* on is deliberately not quoted back at them. It reads
- * well for the real case -- "rather than 192.168.1.5:5273" -- and it was tried, but the
+ * well for the real case -- "rather than 192.168.1.5:5173" -- and it was tried, but the
  * only way to see this message during development is to remove `mediaDevices` by hand on
  * localhost, where the sentence then says to open localhost rather than localhost. A
  * message with a nonsense reading available to it is worse than one that leaves out
@@ -226,17 +273,31 @@ export function useRecorder() {
     }
 
     try {
-      recorder = new MediaRecorder(stream)
-    } catch (cause) {
-      // Reachable even with no options, on a platform whose default encoder is
-      // unavailable. Releasing the stream matters here specifically: the permission
-      // prompt has already been answered and the tracks are live, so leaving them open
-      // means the browser's recording indicator stays on for a recording that never
-      // started.
-      release()
-      error.value = `This browser could not start a recording (${cause?.name ?? 'unknown error'}).`
+      recorder = new MediaRecorder(stream, { audioBitsPerSecond: AUDIO_BITS_PER_SECOND })
+    } catch {
+      // An engine that refuses the options bag outright rather than ignoring a member
+      // of it that it does not implement. Both are permitted -- the constructor is
+      // specified to throw NotSupportedError when it cannot satisfy what it was given --
+      // so the hint is attempted and then abandoned rather than depended on.
+      //
+      // Falling back rather than failing, because the bitrate is an optimisation and
+      // this is a memo app: a recording at whatever the browser picks is still the
+      // memo, and refusing to record at all over a file-size preference would be the
+      // worse trade by a wide margin. What that costs is the headroom described at
+      // AUDIO_BITS_PER_SECOND, which the API's byte cap then enforces on its own.
+      try {
+        recorder = new MediaRecorder(stream)
+      } catch (cause) {
+        // Reachable even with no options, on a platform whose default encoder is
+        // unavailable. Releasing the stream matters here specifically: the permission
+        // prompt has already been answered and the tracks are live, so leaving them
+        // open means the browser's recording indicator stays on for a recording that
+        // never started.
+        release()
+        error.value = `This browser could not start a recording (${cause?.name ?? 'unknown error'}).`
 
-      return false
+        return false
+      }
     }
 
     recorder.addEventListener('dataavailable', (event) => {

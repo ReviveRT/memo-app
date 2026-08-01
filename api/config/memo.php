@@ -50,11 +50,10 @@ return [
     //
     // Two codecs, not one, for MEMO-13 to normalize -- Safari is AAC.
     //
-    // Read by HealthService and by nothing else yet. MEMO-10 opened the upload
-    // path and MEMO-11 is what makes this number apply to it, so the cap in force
-    // today is upload_max_filesize from conf.d/uploads.ini rather than this. Kept
-    // configured rather than removed and re-added, because the healthcheck's whole
-    // job is to compare the two and say when they disagree.
+    // Enforced by StoreMemoRequest, which answers 413 rather than 422 for anything
+    // over it, and reported by HealthService next to the two PHP limits that have to
+    // stay above it. Those three numbers agreeing is the whole of whether an upload
+    // of exactly this size can physically reach a handler.
     //
     // Raising this above upload_max_filesize in conf.d/uploads.ini silently
     // re-breaks uploads; GET /api/health reports both numbers side by side and

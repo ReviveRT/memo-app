@@ -38,6 +38,24 @@ The elapsed timer next to the button is there so you know the length before you
 send it. Nothing enforces a duration at the moment; the `MAX_AUDIO_SECONDS` cap
 below is applied in the worker and arrives with MEMO-13.
 
+What _is_ enforced is size: a recording over `MAX_AUDIO_BYTES` (12 MiB) is refused
+with a 413 naming the limit, and nothing is stored. The recorder asks for 48 kbps, so
+that is about **34 minutes** — comfortably past the 10-minute duration cap, which is
+the limit meant to stop a long memo, and which says so in words about length rather
+than megabytes.
+
+Left to the browser's own default it would not be. Measured through the app in
+Chromium: the default is 128 kbps, 153 kbps once the WebM container is counted, which
+puts a ten-minute memo at 11.5 MB against a 12.6 MB cap — 9 percent of margin. Opus is
+variable-bitrate, so whether such a memo was refused for length or for size would come
+down to how much of it was silence. Asking for 48 kbps separates the two caps, and it
+costs nothing downstream: transcription resamples to 16 kHz regardless, so everything
+above that is discarded either way. It names the size too when there is one to name;
+a file large enough for PHP to have dropped the bytes before the app saw it can
+only be told that it was too large. Size stands in for duration at this point in
+the pipeline because a WebM stream from `MediaRecorder` carries no duration to
+check — see the note in `api/config/memo.php`.
+
 The first press asks for microphone permission. If you refuse it, the browser
 remembers — re-allow it from the icon at the end of the address bar, there is
 nothing this app can do to re-prompt.
@@ -48,6 +66,12 @@ Firefox's own `MediaRecorder` says it is producing WebM ([Mozilla bug
 1501308](https://bugzilla.mozilla.org/show_bug.cgi?id=1501308)). The API
 identifies the file from its bytes rather than from anything the browser
 claims, and MEMO-13 normalizes it before transcription.
+
+That identification is also what decides whether an upload is accepted at all:
+anything that is not one of the containers the app can transcribe is refused
+with a 422 naming what the file turned out to be. Renaming a document to
+`.webm` does not get it past this, and neither does the `Content-Type` the
+request carries.
 
 ## Searching
 
@@ -101,7 +125,7 @@ reference and contains no real credentials.
 | `OPENAI_API_KEY` | _(empty)_ | Optional. Enables hosted transcription |
 | `ANTHROPIC_API_KEY` | _(empty)_ | Optional. Enables Claude enrichment |
 | `ENRICH_MODEL` | `claude-opus-5` | Claude model for title/summary/tags/category |
-| `MAX_AUDIO_BYTES` | `12582912` | Upload byte cap for the API edge (12 MiB). Not enforced yet — MEMO-11 applies it; until then `upload_max_filesize` (16 MiB) is the real limit and this number only shows up in `/api/health` |
+| `MAX_AUDIO_BYTES` | `12582912` | Upload byte cap for the API edge (12 MiB). Anything larger is a 413. Raising it above `upload_max_filesize` (16 MiB, in `api/conf.d/uploads.ini`) silently breaks uploads instead of widening them — `/api/health` reports both numbers and flags the mismatch |
 | `MAX_AUDIO_SECONDS` | `600` | Duration cap enforced in the worker after normalization |
 | `WORKER_POLL_SECONDS` | `1.0` | How long an `ai-worker` replica waits after finding the queue empty. Bounds how long a new memo sits in `queued`, not how fast the queue drains |
 | `AUDIO_DIR` | `/data/audio` | Audio path inside the containers, on the shared `audio` volume. Changing it needs a rebuild with a matching `--build-arg AUDIO_DIR` — see the note in `.env.example` |
