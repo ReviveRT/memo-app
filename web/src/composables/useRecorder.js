@@ -74,7 +74,7 @@ const TICK_MS = 200
  * which is a worse answer than the one they started with.
  *
  * The address they are *currently* on is deliberately not quoted back at them. It reads
- * well for the real case -- "rather than 192.168.1.5:5273" -- and it was tried, but the
+ * well for the real case -- "rather than 192.168.1.5:5173" -- and it was tried, but the
  * only way to see this message during development is to remove `mediaDevices` by hand on
  * localhost, where the sentence then says to open localhost rather than localhost. A
  * message with a nonsense reading available to it is worse than one that leaves out
