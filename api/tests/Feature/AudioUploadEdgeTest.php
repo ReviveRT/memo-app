@@ -128,6 +128,28 @@ final class AudioUploadEdgeTest extends TestCase
         $this->assertCount(1, $this->storage->written, 'The refused recording must not have been written.');
     }
 
+    public function test_a_cap_smaller_than_a_megabyte_is_not_reported_as_zero(): void
+    {
+        // Found by lowering MAX_AUDIO_BYTES to try the rejection out in a browser: the
+        // banner read "That recording is 0.1 MB. The limit is 0.0 MB", which tells the
+        // reader their limit is nothing at all. Every cap under about 51 KB rounded to
+        // zero, because the message only knew how to write megabytes to one decimal.
+        //
+        // The same underlying mistake as the collision below -- one fixed format
+        // describing a value that is configurable across four orders of magnitude -- so
+        // both are pinned together, and neither of them was reachable at the 12 MiB
+        // default that every other test here uses.
+        config(['memo.max_audio_bytes' => 50_000]);
+
+        $message = (string) $this->post('/api/memos', [
+            StoreMemoRequest::AUDIO_FIELD => $this->recording(100_000),
+        ])->assertStatus(413)->json('message');
+
+        $this->assertStringContainsString('49 KB', $message);
+        $this->assertStringContainsString('98 KB', $message);
+        $this->assertStringNotContainsString('0.0 MB', $message);
+    }
+
     public function test_a_recording_barely_over_the_cap_is_not_told_it_is_exactly_the_limit(): void
     {
         // MAX_AUDIO_BYTES + 1 renders both sides of the message identically at one

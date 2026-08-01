@@ -253,36 +253,56 @@ final class StoreMemoRequest extends FormRequest
      * Shared with bootstrap/app.php, which renders the framework's own 413 through it so
      * that both spellings of "too large" answer in the same words.
      *
-     * Both numbers are computed the same way -- binary megabytes, the unit the cap is
-     * written in -- so the comparison in the sentence is internally consistent even
-     * though "MB" is read as 10^6 in some places and 2^20 in others.
+     * Both sides are formatted the same way, so the comparison in the sentence is
+     * internally consistent whatever unit it lands in.
      *
      * Three sentences rather than one with a number substituted into it, and the middle
      * one is the reason. A recording a few bytes over the cap renders both sides
      * identically: "That recording is 12.0 MB. The limit is 12.0 MB" reads as a
      * contradiction rather than as a rejection, and it was answered by a live upload of
-     * exactly MAX_AUDIO_BYTES + 1. No fixed precision fixes it -- one byte over always
-     * rounds to the same string as the cap -- so when the two numbers would agree, the
-     * size is dropped and the sentence says what it can say honestly instead.
+     * exactly MAX_AUDIO_BYTES + 1. No precision fixes that -- one byte over always
+     * rounds to the same string as the cap -- so when the two would agree, the size is
+     * dropped and the sentence says what it can say honestly instead.
      */
     public static function tooLargeMessage(int $limitBytes, ?int $bytes = null): string
     {
-        $limit = self::megabytes($limitBytes);
+        $limit = self::size($limitBytes);
 
         // Full stops rather than a dash before the instruction, because this sentence is
         // rarely read on its own: useMemos prefixes it with "Could not upload the
         // recording — " before rendering it, and a second em-dash inside makes the banner
         // read as one clause that never ends.
         return match (true) {
-            $bytes === null => "That recording is too large. The limit is {$limit} MB. Record a shorter memo.",
-            self::megabytes($bytes) === $limit => "That recording is just over the {$limit} MB limit. Record a shorter memo.",
-            default => 'That recording is '.self::megabytes($bytes)." MB. The limit is {$limit} MB. Record a shorter memo.",
+            $bytes === null => "That recording is too large. The limit is {$limit}. Record a shorter memo.",
+            self::size($bytes) === $limit => "That recording is just over the {$limit} limit. Record a shorter memo.",
+            default => 'That recording is '.self::size($bytes).". The limit is {$limit}. Record a shorter memo.",
         };
     }
 
-    private static function megabytes(int $bytes): string
+    /**
+     * A byte count as something a person reads, in the largest unit that leaves a
+     * non-zero number in front of it.
+     *
+     * Megabytes alone is what this was, and it produced "The limit is 0.0 MB" the first
+     * time MAX_AUDIO_BYTES was lowered to try the rejection out -- a cap of 50,000 bytes
+     * is a twentieth of a megabyte, and one decimal has nowhere to put that. Every cap
+     * under about 51 KB reads as zero, which tells the reader their limit is nothing at
+     * all. Sibling of the collision above and the same underlying mistake: a single fixed
+     * format cannot describe a value that is configurable across four orders of
+     * magnitude.
+     *
+     * Binary units under decimal names, which is the ordinary reading of "MB" for a file
+     * and matches how the cap is written (12 MiB = 12,582,912). The README says MiB
+     * because it is talking to somebody editing the number; this is talking to somebody
+     * who recorded something too long.
+     */
+    private static function size(int $bytes): string
     {
-        return number_format($bytes / 1024 / 1024, 1);
+        return match (true) {
+            $bytes < 1024 => $bytes.' bytes',
+            $bytes < 1024 * 1024 => number_format($bytes / 1024).' KB',
+            default => number_format($bytes / 1024 / 1024, 1).' MB',
+        };
     }
 
     /**
