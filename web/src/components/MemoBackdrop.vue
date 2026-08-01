@@ -1,5 +1,6 @@
 <script setup>
 import { onMounted, onUnmounted, useTemplateRef } from 'vue'
+import { CLOUD_ANCHOR_ID } from '../cloudAnchor'
 import { useVoiceEnergy } from '../composables/useVoiceEnergy'
 
 /*
@@ -38,25 +39,46 @@ import { useVoiceEnergy } from '../composables/useVoiceEnergy'
  * small offscreen instead. See BLUR_CSS_PX, which has the measurements.
  */
 
-/**
- * The id the bloom is centred on: the Record button, in MemoRecorder.
+/*
+ * The element the bloom is centred on is named by CLOUD_ANCHOR_ID, and which element that
+ * is depends on the route: the Record button on the memos screen, the hero on the landing
+ * page. That module has the rule about there being exactly one of them at a time.
  *
- * Anchored to the control rather than to a fraction of the viewport so that the
- * light reads as coming off the button somebody is about to press, and so it
- * survives a reflow -- on a narrow window the column and the button move, and a
- * hardcoded 30% would not follow them.
+ * Anchored to an element rather than to a fraction of the viewport so that the light reads
+ * as coming off the thing it belongs to, and so it survives a reflow -- on a narrow window
+ * the column and the button move, and a hardcoded 30% would not follow them.
  *
- * Two things fall out of the button's position that are worth knowing before
- * moving it. It sits at the left edge of a 44rem centred column, so on a wide
- * window the hot core lands in the left gutter, where no memo card can cover it
- * -- centred instead, the best part of the picture ends up hidden behind the
- * composer. And it is near the top of the page, so the bloom is cropped by the
- * top edge, which is deliberate: it reads as light spilling in from off-screen.
+ * Two things fall out of the Record button's position that are worth knowing before moving
+ * it. It sits at the left edge of a centred column, so on a wide window the hot core lands
+ * in the left gutter, where no memo card can cover it -- centred instead, the best part of
+ * the picture ends up hidden behind the composer. And it is near the top of the page, so
+ * the bloom is cropped by the top edge, which is deliberate: it reads as light spilling in
+ * from off-screen. The landing hero wants the opposite of both, which is why it puts its
+ * anchor in the middle of the screen.
  */
-const ANCHOR_ID = 'recorder-cloud-anchor'
 
-/** Where to put the bloom when the button is not on the page. Matches its usual spot. */
+/** Where to put the bloom when no anchor is on the page. Matches the Record button's spot. */
 const ANCHOR_FALLBACK = { x: 0.3, y: 0.14 }
+
+/**
+ * How fast the bloom slides to a new anchor, as a fraction of the remaining distance per
+ * second.
+ *
+ * It exists because the anchor now moves between *screens* rather than only within one. A
+ * reflow shifts it by a few pixels and a jump is invisible; pressing Get Started moves it
+ * from the middle of the viewport to a button near the top left, and an instant jump there
+ * reads as the background glitching at the exact moment the user is looking at it.
+ *
+ * Exponential rather than a fixed duration, for the reason the phases are integrated rather
+ * than computed from a clock (see below): the target can change again mid-flight -- a
+ * second navigation, a reflow -- and this simply retargets, where an interpolation with a
+ * start point and a duration would have to be restarted and would visibly stutter.
+ *
+ * 6 is about a quarter of a second to cover most of the distance, which is slow enough to
+ * read as movement and fast enough that the light has settled by the time the new screen
+ * has been taken in.
+ */
+const ANCHOR_EASE = 6
 
 /*
  * The field's shape and motion, shared by both colour schemes.
@@ -246,8 +268,17 @@ let height = 0
 /** The smaller viewport dimension, in backing-store pixels. Every radius is a fraction of it. */
 let extent = 0
 
-/** The anchor in viewport fractions, re-measured rather than read every frame. */
+/** Where the bloom is heading, in viewport fractions. Re-measured rather than read per frame. */
 let anchor = { ...ANCHOR_FALLBACK }
+
+/**
+ * Where it is now. Chases `anchor` at ANCHOR_EASE, and is what draw() actually uses.
+ *
+ * Null until the first measurement, which is how the first frame snaps rather than glides:
+ * with no previous position there is nothing to glide *from*, and easing out of the fallback
+ * would make every page load start with the light sliding across the screen.
+ */
+let drawnAnchor = null
 
 /*
  * Phase, not time. Every oscillation below is integrated -- `phase += 2*pi*f*dt`
@@ -330,7 +361,7 @@ function resize() {
  * follow something that moves twice a minute is the wrong trade.
  */
 function measureAnchor() {
-  const el = document.getElementById(ANCHOR_ID)
+  const el = document.getElementById(CLOUD_ANCHOR_ID)
 
   if (!el) {
     anchor = { ...ANCHOR_FALLBACK }
@@ -347,12 +378,39 @@ function measureAnchor() {
   // and weak, so the parallax offset the canvas takes is not visible in it -- and
   // what it protects is the header and the hint, which have scrolled off by the
   // time the offset is large.
+  //
+  // It goes straight to the target rather than easing with the canvas, so for the
+  // quarter-second of a route change it sits where the bloom is arriving rather than
+  // where it is. That is the right way round: its whole job is to keep the *new*
+  // screen's text legible, and it should be in place before the light gets there.
+  // Invisible in practice -- it is a wash of the page colour at half opacity.
   scrimEl.value?.style.setProperty('--cloud-x', (anchor.x * 100).toFixed(2) + '%')
   scrimEl.value?.style.setProperty('--cloud-y', (anchor.y * 100).toFixed(2) + '%')
 }
 
 function advance(dt, rate) {
   const driftMultiplier = 1 + rate * DRIFT_PER_RATE
+
+  /*
+   * The anchor chase, integrated like everything else here.
+   *
+   * `1 - exp(-k*dt)` rather than a fixed step per frame, which is the same
+   * frame-rate-independence the phases get: a plain `+= (target - current) * 0.1` moves
+   * ten percent *per frame*, so the glide would be twice as fast on a 120 Hz display and
+   * would slow to a crawl behind a busy tab.
+   *
+   * Snapped on the first frame, because there is no previous position to travel from --
+   * easing out of ANCHOR_FALLBACK would make every page load open with the light sliding
+   * in from the top left.
+   */
+  if (drawnAnchor === null) {
+    drawnAnchor = { ...anchor }
+  } else {
+    const chase = 1 - Math.exp(-ANCHOR_EASE * dt)
+
+    drawnAnchor.x += (anchor.x - drawnAnchor.x) * chase
+    drawnAnchor.y += (anchor.y - drawnAnchor.y) * chase
+  }
 
   breathe += 2 * Math.PI * (IDLE_HZ + rate * RATE_HZ) * dt
 
@@ -380,9 +438,15 @@ function draw(reading) {
   offCtx.clearRect(0, 0, width, height)
   offCtx.globalCompositeOperation = light ? 'source-over' : 'lighter'
 
+  // `drawnAnchor` when there is one, the target otherwise. The fallback is what the
+  // reduced-motion path uses: it draws a single frame without ever calling advance(), so
+  // nothing has eased and the bloom belongs exactly where the anchor is. That is also the
+  // correct behaviour there -- a glide is motion, and motion is the thing being declined.
+  const at = drawnAnchor ?? anchor
+
   const shift = Math.min(window.scrollY * PARALLAX, PARALLAX_MAX_PX) * RESOLUTION
-  const cx = width * anchor.x
-  const cy = height * anchor.y - shift
+  const cx = width * at.x
+  const cy = height * at.y - shift
 
   const swell =
     1 +

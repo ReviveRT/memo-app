@@ -1,104 +1,38 @@
 <script setup>
-import { onMounted } from 'vue'
 import MemoBackdrop from './components/MemoBackdrop.vue'
-import MemoComposer from './components/MemoComposer.vue'
-import MemoList from './components/MemoList.vue'
-import MemoRecorder from './components/MemoRecorder.vue'
-import MemoSearch from './components/MemoSearch.vue'
-import { useMemos } from './composables/useMemos'
-import { usePolling } from './composables/usePolling'
-
-const { memos, pending, loading, busy, loadError, displayedFilter, load } = useMemos()
 
 /*
- * The one place the list and the timer are joined, and the only file that knows both
- * exist. `pending` is the stop condition and lives with the statuses it reads;
- * everything about when to fire lives in usePolling.
+ * The shell: the backdrop, and whichever view the route names.
+ *
+ * Everything that used to be in here -- the header, the recorder, the composer, the search
+ * box and the list -- moved into views/MemosView.vue, because it is now one of two screens
+ * rather than the app. What is left is the one thing that has to outlive a navigation.
+ *
+ * That thing is the backdrop, and keeping it here rather than in each view is the whole
+ * reason this file is not simply a <RouterView>. It owns a canvas, a requestAnimationFrame
+ * loop and an AnalyserNode; mounted per view it would tear all of that down and rebuild it
+ * on every navigation, so the bloom would blink out and restart from random phases in the
+ * middle of pressing Get Started. Mounted here it survives, and the only thing that changes
+ * across the transition is where it is centred -- which it re-measures on its own, because
+ * the element carrying the anchor id belongs to the view. See cloudAnchor.js.
  */
-const { hinting } = usePolling(pending, () => load({ background: true }))
-
-onMounted(() => load())
 </script>
 
 <template>
   <!--
-    Outside <main> and before it, which is both of the things it needs to be: it is
-    decoration rather than content, so it does not belong inside the landmark, and
-    the layers are fixed with a negative z-index so document order does not decide
-    what covers what. It draws nothing this app depends on -- see MemoBackdrop.
+    Outside the view and before it, which is both of the things it needs to be: it is
+    decoration rather than content, so it does not belong inside any landmark, and the
+    layers are fixed with a negative z-index so document order does not decide what
+    covers what. It draws nothing this app depends on -- see MemoBackdrop.
   -->
   <MemoBackdrop />
 
-  <main class="app">
-    <header class="app__header">
-      <h1>Memos</h1>
-
-      <!--
-        Kept, now that the poll exists, because the poll deliberately stops: once every
-        memo is `ready` or `failed` nothing on this screen is waiting for anything, and
-        a timer left running against a finished list is a request every 5 seconds
-        answering the same thing forever. A memo written from somewhere else -- a second
-        tab, curl -- is then invisible until something asks, and this is what asks. It
-        is also the way back when the tab was hidden long enough to be uninteresting.
-      -->
-      <button type="button" :disabled="loading" @click="load()">
-        {{ loading ? 'Refreshing…' : 'Refresh' }}
-      </button>
-    </header>
-
-    <!--
-      Above the composer, which is the order the README describes the app in: record a
-      memo, or type one. Both write to the same list through the same route, so the
-      order here is about which is offered first and nothing else.
-    -->
-    <MemoRecorder />
-
-    <MemoComposer />
-
-    <!--
-      Below the composer, not above it. Writing a memo is what this page is for and the
-      filter is how you find one again, so the order matches: the thing you always do,
-      then the thing you sometimes do. It also keeps the search box next to the list it
-      filters rather than separated from it by a textarea.
-    -->
-    <MemoSearch />
-
-    <!--
-      The list's own error, kept above the list rather than replacing it: a failed
-      refresh leaves the rows that did load on screen, and blanking them would look
-      like the memos were gone.
-    -->
-    <p v-if="loadError" class="notice notice--error" role="alert">{{ loadError }}</p>
-
-    <!--
-      Non-blocking: nothing is disabled behind it, and role="status" is polite rather
-      than assertive, so it cannot interrupt a screen reader mid-sentence the way the
-      error banner's role="alert" is entitled to. The region is inserted along with its
-      text rather than sitting in the DOM empty, which is the less dependable of the two
-      arrangements for being announced at all -- it is what the banner above already
-      does, and buying it back would mean a permanently empty box above the list.
-
-      The wording aims at MEMO-10's voice path, which is the case that legitimately takes
-      this long. A text memo reaches 45 seconds only when nothing picked it up -- both
-      ai-worker replicas stopped, or one that died mid-job -- and usePolling.js is where
-      the reason it keeps polling rather than giving up is written down.
-    -->
-    <p v-if="hinting" class="notice" role="status">
-      Still transcribing — a long recording can take a while.
-    </p>
-
-    <!--
-      `busy`, not `loading`. This component's job is to say why the list is empty, and a
-      filter change that is still inside its debounce has not started a request yet -- so
-      on `loading` it would answer that question from the previous filter's result. The
-      button above stays on `loading`, which MEMO-18 narrowed to "a load somebody asked
-      for", and a poll tick still leaves both alone.
-    -->
-    <MemoList
-      :memos="memos"
-      :loading="busy"
-      :failed="Boolean(loadError)"
-      :query="displayedFilter"
-    />
-  </main>
+  <!--
+    No <transition> around this. A cross-fade between the landing page and the app is the
+    obvious flourish and it fights the one effect this design is built around: the bloom is
+    a fixed layer that stays put across the navigation, so fading the content over it reads
+    as the page dissolving in front of a light that did not move. The cloud gliding to its
+    new anchor is the transition.
+  -->
+  <RouterView />
 </template>

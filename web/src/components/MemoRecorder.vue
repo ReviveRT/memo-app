@@ -1,6 +1,7 @@
 <script setup>
 import { computed } from 'vue'
 import ProgressBar from './ProgressBar.vue'
+import { CLOUD_ANCHOR_ID } from '../cloudAnchor'
 import { useMemos } from '../composables/useMemos'
 import { useRecorder } from '../composables/useRecorder'
 
@@ -103,10 +104,14 @@ function formatElapsed(ms) {
       the id stays unique -- and the backdrop re-measures when this row changes
       shape. Moving it to the section would put the bloom under the hint text
       instead, which is the one place here that has to stay readable.
+
+      Bound from cloudAnchor.js rather than written out, because the landing page
+      claims the same id when this screen is not mounted. One string, three
+      consumers; that module has the rule that only one element may carry it.
     -->
     <button
       v-if="!recording"
-      id="recorder-cloud-anchor"
+      :id="CLOUD_ANCHOR_ID"
       type="button"
       :disabled="uploading"
       @click="start()"
@@ -115,7 +120,7 @@ function formatElapsed(ms) {
     </button>
 
     <template v-else>
-      <button id="recorder-cloud-anchor" type="button" @click="onStop">Stop</button>
+      <button :id="CLOUD_ANCHOR_ID" type="button" @click="onStop">Stop</button>
 
       <!--
         Throwing the recording away is a separate button rather than a confirmation on
