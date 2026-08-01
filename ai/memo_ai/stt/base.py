@@ -64,6 +64,19 @@ class Transcript:
     # and not the same as "the default model". See fake.py.
     model: str | None = None
 
+    # What this transcription cost, in millionths of a dollar, or None for "nobody
+    # was billed". Both real providers answer None -- `local` runs in this
+    # container and `fake` runs nowhere -- and that is the honest value rather than
+    # a placeholder: zero would claim a measurement, and `memos.cost_micro_usd` is
+    # summed by MEMO-22 into a figure a person is expected to trust.
+    #
+    # On the result rather than derived from a rate table at write time, for the
+    # reason `provider` is: with a fallback chain in place, the row that was billed
+    # is not necessarily the provider that was configured. A hosted adapter fills
+    # this in from its own response; the column takes it with COALESCE, so a
+    # provider that has nothing to say leaves whatever an earlier attempt recorded.
+    cost_micro_usd: int | None = None
+
 
 class SttProvider(Protocol):
     """
