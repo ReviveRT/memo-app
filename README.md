@@ -89,14 +89,18 @@ changes the bill by exactly zero. It is there for two other reasons:
 
 - **One decode path.** Chrome WebM, Firefox Ogg and Safari MP4 stop being three
   problems after this step.
-- **A duration you can trust.** This is the load-bearing one. `MediaRecorder`
-  streams its container to a sink it cannot seek back into, so it never returns
-  to fill in the duration — a Chrome recording arrives with no Duration element
-  and `ffprobe` answers `N/A`, not a number. The duration only exists once ffmpeg
-  has rewritten the file to a real path. That is why `MAX_AUDIO_SECONDS` is
-  enforced in the worker and cannot be enforced at the API edge, and why a memo
-  over the cap fails after being stored rather than being refused with a 413 like
-  an oversized one.
+- **A duration you can trust.** This is the load-bearing one. Chrome streams its
+  WebM to a sink it cannot seek back into, so it never returns to fill in the
+  duration — the file arrives with no Duration element and `ffprobe` answers
+  `N/A`, not a number. Measured across the three browsers, Chrome is the only one
+  that does this: Firefox's Ogg and Safari's MP4 both carry a duration. That does
+  not help, because nothing upstream knows which browser sent a given file — and
+  Safari's number is 39 ms longer than its own audio, from AAC encoder delay. So
+  the source duration is either missing or slightly wrong, and the one measured
+  after normalization is neither. That is why `MAX_AUDIO_SECONDS` is enforced in
+  the worker and cannot be enforced at the API edge, and why a memo over the cap
+  fails after being stored rather than being refused with a 413 like an oversized
+  one.
 
 The output is Opus at 24 kbps, not WAV, and that matters more than it sounds.
 16 kHz mono WAV of a ten-minute memo — the longest this app accepts — is 19.2 MB,

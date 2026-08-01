@@ -8,15 +8,27 @@ Firefox Ogg/Opus, Safari MP4/AAC -- and every consumer downstream would otherwis
 need to handle all three. ffmpeg handles them here, once, and everything after
 this module sees 16 kHz mono.
 
-**A duration you can trust.** MediaRecorder writes its container to a
-non-seekable sink, so it never goes back to fill in the duration: a Chrome
-recording arrives with no Duration element in the Segment Info and no Cues.
-``ffprobe`` on that file answers ``N/A``, not a number. Confirmed here rather
-than taken on trust -- the same tone encoded to a *seekable* WebM reports
-7.308000 and the identical encode written to a pipe reports ``N/A``. So the
-duration has to come from the *normalized* file, which ffmpeg wrote to a real
-path and could finish properly. That is what makes ``memos.duration_ms``
-trustworthy and what makes ``MAX_AUDIO_SECONDS`` enforceable at all.
+**A duration you can trust.** Chrome writes its WebM to a sink it cannot seek
+back into, so it never returns to fill in the duration: the file arrives with no
+Duration element in the Segment Info and no Cues, and ``ffprobe`` answers ``N/A``
+rather than a number. Reproduced here rather than taken on trust -- the same tone
+encoded to a *seekable* WebM reports 7.308000 and the identical encode written to
+a pipe reports ``N/A``.
+
+The real recordings in tests/fixtures/ then sharpened that, and it is worth
+stating because an earlier version of this comment was too strong. Only *Chrome*
+is missing a duration. Firefox's Ogg and Safari's MP4 both carry one. Two things
+keep that from being an argument for reading the source instead:
+
+  * Nothing upstream knows which browser produced a given upload, so a duration
+    read off the source is right two times in three with no way to tell which.
+  * Safari's number disagrees with Safari's audio. The container says 5.398667 s
+    where the decoded content is 5.359813 s -- 39 ms of AAC encoder delay that
+    the container duration counts and the audio does not.
+
+So across the three the source duration is either absent or slightly wrong, and
+one number measured off the normalized file is neither. That is what makes
+``memos.duration_ms`` trustworthy and ``MAX_AUDIO_SECONDS`` enforceable at all.
 
 What this does **not** do is save money, and an earlier version of this comment
 said it did. Hosted transcription is billed per minute of audio *duration*, so

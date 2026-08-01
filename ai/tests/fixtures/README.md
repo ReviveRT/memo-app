@@ -70,22 +70,43 @@ the reasoning at the rules. Safari's `.mp4` was never matched and needs none.
 asserted against and the skip names only what is still missing. The rest of the
 suite is unaffected, so a stranger cloning the repo still gets a green run.
 
-## Two questions MEMO-11 left for these files
+## Two questions MEMO-11 left for these files — now answered
 
-Both are about bitrate, and neither is answerable without real recordings from
-all three browsers. MEMO-11 measured **Chromium only**.
+Both were about bitrate, and neither was answerable without real recordings from
+all three browsers. MEMO-11 had measured **Chromium only**. Measured off these
+fixtures, dividing each file's size by the duration this pipeline recovers:
 
-1. **Do Firefox and Safari honour `audioBitsPerSecond`?** The recorder asks for
-   48 kbps (`web/src/composables/useRecorder.js`). Chromium obliges — 49 kbps on
-   the wire, against 153 kbps if left to its own default. The spec says the other
-   two should, but neither has been run. Divide a fixture's size by the duration
-   this pipeline now measures and the answer falls out.
+| | bytes | duration | effective |
+| --- | --- | --- | --- |
+| `chrome.webm` | 30,693 | 5.29 s | **46.4 kbps** |
+| `firefox.ogg` | 29,915 | 4.95 s | **48.3 kbps** |
+| `safari.mp4` | 34,691 | 5.40 s | **51.8 kbps** |
 
-2. **Should `MAX_AUDIO_BYTES` go up?** It exists to bound an upload; the duration
-   cap is what is meant to stop a long memo. At 48 kbps, 12 MiB is about 34
-   minutes, so the two caps are comfortably separated and the answer today is no.
-   That separation is what question 1 puts at risk: a browser that ignores the
-   hint and records at 153 kbps puts a ten-minute memo at 11.5 MB against a 12.6
-   MB cap, and then a memo inside the documented duration can be refused as too
-   large instead — the wrong error, on a variable-bitrate codec, so which one
-   fires depends on how much of the recording was silence.
+1. **Do Firefox and Safari honour `audioBitsPerSecond`?** Yes. All three land
+   within a few kbps of the 48 requested in
+   `web/src/composables/useRecorder.js`, against the 153 kbps Chromium produces
+   when left to its own default. No browser ignores the hint.
+
+2. **Should `MAX_AUDIO_BYTES` go up?** No, and question 1 is why. At ~48 kbps,
+   12 MiB is about 34 minutes against a 10-minute duration cap, so the two limits
+   stay comfortably separated on every browser. The failure mode MEMO-11 worried
+   about — a browser recording at 153 kbps, putting a ten-minute memo at 11.5 MB
+   against a 12.6 MB cap, so that a memo inside the documented duration gets
+   refused as too *large* — does not occur.
+
+Both figures are small samples of one recording each. They are decisive because
+the gap being tested is threefold, not marginal.
+
+## What these recordings showed that reasoning did not
+
+**The missing duration is Chrome's, not MediaRecorder's.** Chrome's WebM reports
+`format=duration` as `N/A`; Firefox's Ogg and Safari's MP4 both carry one. The
+task was built on the general claim and the general claim is too strong.
+
+It changes nothing about the design, for two reasons. Nothing upstream knows
+which browser produced a given upload, so a duration read off the source is
+trustworthy only two times in three and there is no way to tell which. And
+Safari's own number disagrees with its audio: the container says 5.398667 s while
+the decoded content is 5.359813 s, a 39 ms gap from AAC encoder delay. So the
+source duration is either absent or slightly wrong, and normalizing first is what
+makes it neither.
