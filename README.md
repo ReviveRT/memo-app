@@ -282,6 +282,29 @@ about 4.8 GB before anything else in the stack, which is most of a default Docke
 Desktop VM. If that is too tight, `STT_MODEL=base` or one worker replica are the
 two levers, in that order.
 
+### Repeated words
+
+Say the same word ten times and whisper will happily write it two hundred times.
+It is the best-known failure mode of the model family: the decoder gets stuck
+re-emitting a token and runs to its own ceiling, which also makes the memo slow,
+because every one of those words has to be generated. A real 4.3-second recording
+of "Rock" said ten times came back as **223** of them, taking 21 seconds.
+
+Two settings fix it together and neither works alone — `temperature=0` and a
+`repetition_penalty` of 1.1. The penalty by itself is erratic rather than helpful,
+because when whisper judges its own output degenerate it retries at a higher
+temperature, and that means sampling. Six runs of the same audio:
+
+| | "Rock" count, six runs |
+| --- | --- |
+| default | 223, 223, 223, 223, 223, 223 |
+| penalty only | 0, 0, 1, 6, 9, 223 |
+| **both** | **11, 11, 11, 11, 11, 11** |
+
+The same recording is now 11 words in 10 seconds rather than 223 in 21. Dropping
+the temperature ladder also makes every transcript **deterministic** — the same
+audio gives the same text every time, which it did not before.
+
 Things that did **not** help, tried on the same recording so you need not: a
 domain `initial_prompt`, `beam_size=10`, greedy decoding, loudness-normalizing the
 audio, pinning the language, and switching between the WAV and Opus intermediate

@@ -24,6 +24,8 @@ from memo_ai.stt.local import (
     BATCH_SIZE,
     DEADLINE_FLOOR_SECONDS,
     DETECT_MIN_CONFIDENCE,
+    REPETITION_PENALTY,
+    TEMPERATURE,
     VAD_SPEECH_PAD_MS,
     LocalWhisperStt,
     _deadline_seconds,
@@ -158,8 +160,25 @@ def test_it_asks_for_wav_and_switches_the_voice_filter_on():
             # measurement, and it is the difference between "place an order" and
             # "blaze an order".
             "vad_parameters": {"speech_pad_ms": VAD_SPEECH_PAD_MS},
+            # No sampling and a nudge against repeating itself. Without both,
+            # 4.3 seconds of somebody saying "Rock" ten times came back as 223 of
+            # them -- see REPETITION_PENALTY for the six-run table.
+            "temperature": TEMPERATURE,
+            "repetition_penalty": REPETITION_PENALTY,
         },
     )
+
+
+def test_decoding_is_deterministic_and_discourages_repetition():
+    # The two settings are a pair and neither works alone: a penalty under the
+    # default temperature ladder swings between losing the transcript and not
+    # helping, because the ladder samples. Pinned here so that removing either
+    # one fails rather than quietly restoring the lottery.
+    model = StubModel()
+    provider(model).transcribe(AUDIO)
+
+    assert model.calls[0][1]["temperature"] == 0.0
+    assert model.calls[0][1]["repetition_penalty"] > 1.0
 
 
 def test_a_short_memo_is_decoded_in_series(tmp_path):

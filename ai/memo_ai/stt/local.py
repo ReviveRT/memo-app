@@ -159,6 +159,40 @@ BATCH_SIZE = 8
 # series against two batched, and nobody trades eight minutes for a comma.
 BATCH_ABOVE_SECONDS = 120.0
 
+# The two settings that stop whisper inventing words it never heard.
+#
+# The failure they fix is the classic one and it is spectacular: ten seconds of
+# somebody saying "Rock" ten times came back as **223** of them, from 4.3 seconds
+# of audio. The decoder gets stuck re-emitting a token and keeps going until it
+# hits its own token ceiling -- which is also why that memo took 21 s instead of
+# 5, since every one of those words had to be generated.
+#
+# `repetition_penalty` is the direct fix, and on its own it is *worse than
+# useless*. Measured six times per setting on that recording:
+#
+#   baseline                       223 223 223 223 223 223
+#   repetition_penalty=1.1           0   0   1   6   9 223
+#   temperature=0                  223 223 223 223 223 223
+#   temperature=0 + penalty=1.1     11  11  11  11  11  11
+#
+# The middle row is the point. A penalty alone swings between losing the memo
+# entirely and not helping at all, because when whisper decides its own output
+# looks degenerate it retries at a higher temperature -- and temperature above
+# zero means *sampling*. The penalty changes which lottery ticket gets drawn
+# rather than fixing anything.
+#
+# So the fallback ladder goes too. `temperature=0.0` is one rung, no retries, no
+# sampling, and the same audio now produces the same transcript every time. What
+# that gives up is whisper's own recovery path for a bad decode -- and on the one
+# recording where it would have mattered it recovered to 223 rocks twenty times
+# out of twenty, so it was buying nothing but variance and 11 seconds.
+#
+# Checked against every other real recording: "I would like to place an order"
+# and all three browser fixtures come back byte-identical, silence still comes
+# back empty, and the one difference anywhere is "I will" contracting to "I'll".
+REPETITION_PENALTY = 1.1
+TEMPERATURE = 0.0
+
 # The model that decides what language a recording is in, when STT_LANGUAGE has
 # not already said.
 #
@@ -389,6 +423,14 @@ class LocalWhisperStt:
                 "language": self.language or _detected(engines.detector, source),
                 "vad_filter": True,
                 "vad_parameters": {"speech_pad_ms": VAD_SPEECH_PAD_MS},
+                # See REPETITION_PENALTY. Applied to both decode paths, though
+                # batching bounds a loop on its own -- independent windows cannot
+                # carry one across them. Measured on the same recording, batching
+                # alone gave 9 against the penalty's 11, and both with it gave 7;
+                # one token either side of the truth on a pathological clip is
+                # not worth two decode paths that behave differently.
+                "temperature": TEMPERATURE,
+                "repetition_penalty": REPETITION_PENALTY,
             }
             seconds = _wav_seconds(source)
             transcriber = engines.transcriber
