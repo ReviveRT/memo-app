@@ -1,7 +1,11 @@
 # Memo App
 
 Record a voice memo or type one. It gets transcribed, enriched with a title,
-summary and tags, and becomes full-text searchable.
+summary and tags, and becomes full-text searchable. Keep the quick ones loose,
+gather the rest into named collections, and set a reminder on anything that
+needs to come back to you.
+
+Two screens: a landing page at `/`, and the app itself at `/memos`.
 
 > **Status: skeleton.** This file is scaffolded by MEMO-01 and finished by
 > MEMO-26. Sections marked _TODO_ are not yet true — don't follow them as
@@ -137,6 +141,66 @@ a great deal, so expect the list to fill up.
 A memo that is still being transcribed has no text to match yet, so it stays in
 the list whatever the filter says, rather than vanishing in the seconds after you
 record it. The line under the box says when that is happening.
+
+### Filtering by date
+
+Next to every search box is the same set of date filters: **Any time**, **Today**,
+**Yesterday**, **Last 7 days**, and **Custom…** for a range like 19–23 July.
+
+Two things about it are worth knowing, because both are invisible when they work:
+
+- **Days are your days.** "Yesterday" is worked out in your own timezone by the
+  browser, which converts it to a pair of absolute times before asking the API.
+  The API has no timezone setting to get wrong, and there is no `tz` parameter.
+- **The end date is included.** Picking 23 July includes everything written on
+  the 23rd, up to midnight. Internally the range is half-open — `from` inclusive,
+  `to` exclusive — and the browser adds the extra day; see `useDateRange.js` and
+  `App\Support\TimeWindow` for why that beats ending at 23:59:59.
+
+The date filter is a hard bound, unlike the text filter: a memo still being
+transcribed is pinned into a filtered list, but it is **not** pinned past the
+dates or into a collection it is not in. A memo recorded today does not appear
+under "Yesterday".
+
+## Collections
+
+A collection is a named folder — "Memos for Work", "Errands". Create one under
+**Collections**, then open any memo and pick it from the **Collection** menu. A
+memo lives in one collection or in none; the ones in none are the **fast memos**
+in the strip at the top, which is what that list means.
+
+Deleting a collection **does not delete its memos**. They go back to being fast
+memos. That is the `ON DELETE SET NULL` on `memos.collection_id`, so it holds
+however the row is deleted.
+
+Searching collections reaches further than their names: it also matches the memos
+filed inside them. Searching `dentist` finds the collection holding the dentist
+memo, even if the collection is called "Errands".
+
+## Reminders
+
+Open a memo and set either an **alarm** (a date and time) or a **timer** (5
+minutes to tomorrow), with an optional note. Both are the same thing underneath —
+one absolute instant — so the two controls are two ways of choosing when.
+
+> **Reminders fire while the app is open in a tab.** There is no service worker
+> and no Web Push, so nothing reaches you with the app closed. That is a real
+> limit rather than a bug, and the card says so on screen.
+
+What happens when one comes due:
+
+| When it comes due | What you get |
+| --- | --- |
+| App open | A system notification, plus a card in the corner |
+| App closed | The cards only, all together, next time you open it |
+
+The second row is deliberate: coming back on Monday to eleven overdue reminders
+should not fire eleven system notifications at once.
+
+Permission for system notifications is asked for the first time you set a
+reminder — never on page load, because an unprompted request is suppressed by
+browsers and a denial is permanent. Refusing it does not break anything; the
+in-app cards still appear.
 
 ## Configuration
 
@@ -379,6 +443,47 @@ persistence goes through PDO with prepared statements and no ORM, and the job
 queue is the `memos` row itself, consumed by the Python worker. `APP_KEY` is
 intentionally unset — nothing here encrypts.
 
+## HTTP API
+
+Everything is under `/api`, served by the `api` container and proxied by the dev
+server so the browser sees one origin. No authentication — see Assumptions.
+
+| Method | Path | What it does |
+| --- | --- | --- |
+| `GET` | `/health` | Database round trip and upload limits; 503 when it fails |
+| `GET` | `/memos` | The list, newest first. See the parameters below |
+| `POST` | `/memos` | Create one: JSON `{text}`, or `multipart/form-data` with `audio` |
+| `PATCH` | `/memos/{memo}` | `{collection_id}` — file it, or `null` to unfile |
+| `GET` | `/collections` | The grid, with each collection's memo count and newest labels |
+| `POST` | `/collections` | `{name}` |
+| `PATCH` | `/collections/{collection}` | `{name}` — rename |
+| `DELETE` | `/collections/{collection}` | 204. Its memos survive as fast memos |
+| `GET` | `/reminders` | Every reminder still owed, for the browser's delivery loop |
+| `POST` | `/memos/{memo}/reminders` | `{remind_at, note?}` |
+| `PATCH` | `/reminders/{reminder}` | Mark it shown. No body; idempotent |
+| `DELETE` | `/reminders/{reminder}` | Remove it |
+
+`GET /memos` takes four independent filters, and any combination is valid:
+
+| Parameter | Meaning |
+| --- | --- |
+| `q` | Full-text plus substring match over title, summary, transcript and tags |
+| `from`, `to` | ISO 8601 instants. `from` inclusive, `to` **exclusive** |
+| `collection` | A collection id, or `none` for memos in no collection |
+| `limit` | Default 50, max 200. Rejected rather than clamped |
+
+`GET /collections` takes `q`, `from`, `to` and `limit` (max 100), spelled the same
+way and meaning the same things.
+
+Two response conventions worth knowing before writing a client:
+
+- **Every write about a reminder answers with the memo**, not the reminder —
+  `{"memo": {...}}` — because the memo already carries its reminders and the
+  frontend reconciles its lists by memo id. `GET /reminders` is the one exception;
+  it is a read across every memo by a caller holding none of them.
+- **Lists echo the filters they answered for** alongside the rows, so a response
+  that arrives after the search box has moved on can still be captioned correctly.
+
 ## Architecture
 
 _TODO (MEMO-26): short version here; the reasoning and trade-offs live in
@@ -391,6 +496,43 @@ NOTES.md (MEMO-27)._
 - Audio is kept on a Docker volume, not object storage.
 
 ## Development
+
+### Running the api's tests
+
+`phpunit` is not in the `api` image — it runs `composer install --no-dev`, the same
+way the `ai` image installs `requirements.txt` only — so `docker compose exec api
+php artisan test` reports that there is no such command. Install the dev
+dependencies into the checkout's `vendor/` first, then run the suite in the api
+image so it has the right `php.ini` and the `pdo_pgsql` driver:
+
+```bash
+docker run --rm -v "$PWD/api":/app -w /app composer:2 composer install --no-interaction
+```
+
+```bash
+docker compose run --rm --no-deps -v "$PWD/api/vendor":/app/vendor --entrypoint sh api -c 'php vendor/bin/phpunit'
+```
+
+**The `-v "$PWD/api/vendor":/app/vendor` is load-bearing, and leaving it off fails
+in a way that reads as the install not having worked.** The `api` service declares
+an anonymous volume over `/app/vendor` so the `./api` bind mount cannot shadow the
+tree composer installed into the image — see the comment on it in
+`docker-compose.yml`. That volume holds the image's `--no-dev` vendor, so without
+this override the container answers `Could not open input file:
+vendor/bin/phpunit` no matter what is on the host. Naming the host path explicitly
+is what puts the dev tree back on top of it.
+
+It also has to be the **api image** rather than a bare `php:8.3-cli`. Two tests fail
+there, and both are the environment and not the code: the upload-size test reads
+`post_max_size` from `conf.d/uploads.ini`, which only this image has, and the health
+test expects a `SQLSTATE` in the message, which needs `pdo_pgsql` to be installed at
+all.
+
+No database is needed. The suite runs on sqlite in memory (`phpunit.xml`), and every
+Postgres-specific statement sits behind a repository the tests substitute a fake for
+— each `tests/Support/Fake*Repository.php` records what its real counterpart was
+verified to do against a live Postgres, and why that could not be faked convincingly
+here.
 
 ### Running the worker's tests
 
