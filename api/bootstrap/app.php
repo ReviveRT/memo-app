@@ -3,9 +3,13 @@
 declare(strict_types=1);
 
 use App\Http\Middleware\ValidateJsonBody;
+use App\Http\Requests\StoreMemoRequest;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
+use Illuminate\Http\Exceptions\PostTooLargeException;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
@@ -61,6 +65,39 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->append(ValidateJsonBody::class);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
+        // The framework's own 413, reworded. ValidatePostSize sits in the global stack
+        // and throws this when CONTENT_LENGTH exceeds post_max_size -- which is the one
+        // oversized upload StoreMemoRequest never sees, because PHP discarded the body
+        // before Laravel booted. Its message is "The POST data is too large.", which is
+        // shown to somebody who pressed Record and says neither what the limit is nor
+        // that a shorter memo would work.
+        //
+        // Matched on PostTooLargeException specifically rather than on HttpException,
+        // which is what keeps this from swallowing the 413s StoreMemoRequest raises with
+        // a size in them: those are a plain HttpException for exactly this reason. Both
+        // are worded by the same method, so the two paths cannot drift apart.
+        //
+        // Scoped to the one route that takes a body, because the replacement sentence
+        // talks about recordings and this middleware runs on every request -- a large
+        // body posted to a path that matches no route would otherwise be told to record a
+        // shorter memo. Matched on the path rather than on the route name: ValidatePostSize
+        // is global middleware and throws before routing, so there is no route to name yet.
+        // Returning null falls through to the framework's own rendering.
+        //
+        // Status and headers come from the exception rather than being restated, so this
+        // cannot answer with a status the thing it is rendering does not have.
+        $exceptions->render(function (PostTooLargeException $e, Request $request): ?JsonResponse {
+            if (! $request->isMethod('POST') || ! $request->is('api/memos')) {
+                return null;
+            }
+
+            return response()->json(
+                ['message' => StoreMemoRequest::tooLargeMessage((int) config('memo.max_audio_bytes'))],
+                $e->getStatusCode(),
+                $e->getHeaders(),
+            );
+        });
+
         // Unconditionally JSON, not the skeleton's `$request->is('api/*')`.
         // Every route here is already under /api, so the only requests that
         // predicate excludes are the ones matching no route at all -- and those

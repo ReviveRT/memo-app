@@ -224,26 +224,24 @@ final class MemoEndpointsTest extends TestCase
 
     public function test_the_stored_mime_is_sniffed_from_the_bytes_rather_than_read_off_the_request(): void
     {
-        // A text file wearing an audio name and an audio Content-Type -- the dishonest
-        // version of the Firefox mismatch above, and the case where believing the label
-        // is most obviously wrong.
+        // Firefox: bytes that are Ogg, announced as `audio/webm` by the `recording()`
+        // helper below because that is what its own MediaRecorder says (Mozilla bug
+        // 1501308). The label and the file genuinely disagree, and the row follows the
+        // file -- including the storage key, because the client's name is the one thing
+        // in this request nobody vouches for and it becomes part of a filesystem path.
+        //
+        // This used to be demonstrated with a text file, which was accepted and stored as
+        // text/plain. It is not accepted any more; that case moved to the test below,
+        // where it is now the rejection MEMO-11 exists for. The claim being pinned is the
+        // same one either way: nothing here believes the request's own Content-Type.
         $this->post('/api/memos', [
-            StoreMemoRequest::AUDIO_FIELD => $this->recording('This is plainly not a recording.'),
+            StoreMemoRequest::AUDIO_FIELD => $this->recording(self::containers()['Firefox']['bytes']),
         ])->assertCreated();
 
         $insert = $this->repository->inserted[0];
 
-        $this->assertSame('text/plain', $insert['audio_mime']);
-
-        // And the storage key follows the sniffed type rather than the name the client
-        // chose, because that name is the one thing in this request nobody vouches for
-        // and it would otherwise become part of a filesystem path.
-        $this->assertSame("{$insert['id']}.txt", $insert['audio_path']);
-
-        // Note what this test is *not* asserting: that the upload was refused. It was
-        // accepted, and MEMO-11 is the task that rejects it -- "a .txt renamed to .webm
-        // is rejected" is that task's acceptance criterion, and the allowlist it needs
-        // is built on exactly the sniffed value pinned above.
+        $this->assertSame('audio/ogg', $insert['audio_mime']);
+        $this->assertSame("{$insert['id']}.ogg", $insert['audio_path']);
     }
 
     public function test_text_and_audio_in_one_request_are_refused_rather_than_merged(): void
