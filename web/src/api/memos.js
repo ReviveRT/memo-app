@@ -61,12 +61,51 @@ export async function listMemos(query = null) {
  * @returns {Promise<object>}
  */
 export async function createMemo(text) {
-  const body = await request('/api/memos', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text }),
-  })
+  return storedMemo(
+    await request('/api/memos', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    }),
+  )
+}
 
+/**
+ * POST /api/memos again, as multipart/form-data -- the same route, the same 201, the
+ * same row (MEMO-10).
+ *
+ * One route rather than a /api/memos/audio of its own, because both produce one memo
+ * and differ only in which of `transcript` and `audio_path` starts out set. That is
+ * what lets the caller prepend the answer to the same list without knowing which kind
+ * of memo it just made; api/routes/api.php argues the same thing from its side.
+ *
+ * **No Content-Type header, deliberately.** fetch sets it from the FormData, and the
+ * value it sets carries the multipart boundary -- `multipart/form-data;
+ * boundary=----WebKitFormBoundary...`. Setting the header by hand omits the boundary,
+ * PHP finds no parts, and $_FILES arrives empty: the request looks to the API exactly
+ * like one that forgot to attach anything, and answers 422 "The audio field is
+ * required."
+ *
+ * The third argument to append() is the filename. Without it the part is named `blob`,
+ * which is legal and reaches PHP fine -- this is here so a request is legible in a
+ * network log. Nothing on the server reads it: the storage key's extension comes from
+ * the sniffed bytes, not from this.
+ *
+ * @param {Blob} blob The recording, as MediaRecorder produced it. Whatever container
+ *   that is, it is sent unchanged and normalized server-side -- see useRecorder.
+ * @param {string} filename
+ * @returns {Promise<object>}
+ */
+export async function createVoiceMemo(blob, filename) {
+  const form = new FormData()
+
+  form.append('audio', blob, filename)
+
+  return storedMemo(await request('/api/memos', { method: 'POST', body: form }))
+}
+
+/** The row out of a 201's envelope, or a readable error if the envelope was empty. */
+function storedMemo(body) {
   if (!body?.memo) {
     throw new Error('The API accepted the memo but did not return it.')
   }

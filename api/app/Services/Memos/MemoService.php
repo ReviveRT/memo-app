@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Memos;
 
+use App\Contracts\AudioStorage;
 use App\Repositories\MemoRepository;
 use Illuminate\Support\Str;
 
@@ -13,7 +14,10 @@ use Illuminate\Support\Str;
  */
 final class MemoService
 {
-    public function __construct(private readonly MemoRepository $repository) {}
+    public function __construct(
+        private readonly MemoRepository $repository,
+        private readonly AudioStorage $audio,
+    ) {}
 
     /**
      * The text path: the typed text *is* the transcript, so this row skips
@@ -37,6 +41,56 @@ final class MemoService
             source: Memo::SOURCE_TEXT,
             status: Memo::STATUS_QUEUED,
             transcript: $text,
+        );
+    }
+
+    /**
+     * The voice path: the bytes are stored first, then the row that points at them.
+     *
+     * That order is the whole of this method's correctness and it is not an
+     * optimisation to be tidied away. The worker claims `queued` rows and opens
+     * whatever `audio_path` names (memo_ai/pipeline.py), so between the INSERT and the
+     * blob landing there is a row promising a file that is not there -- and both
+     * replicas poll about once a second, which is far inside the time a 5 MB write
+     * takes. AudioStorage::putFile covers the other half: it fsyncs and renames, so the
+     * key is never briefly a partial file, which is the failure a reader cannot detect.
+     *
+     * A write that succeeds and an INSERT that then fails leaves an orphan blob, and
+     * that is deliberately not compensated with a delete() in a catch. The two failures
+     * are not symmetric: an orphan blob is bytes nothing references, reclaimable by a
+     * sweep at any later time, while a row whose file has been deleted is a memo that
+     * reaches the user as `failed` and can never be anything else. And the case that
+     * makes the catch actively wrong is the ordinary one for a database error -- a
+     * connection lost *after* Postgres committed, where the INSERT threw here and the
+     * row exists. MEMO-11 states the same preference from the write side.
+     *
+     * The key is `{id}.{ext}` -- flat, one segment. LocalAudioStorage handles nested
+     * keys (SharedAudioVolumeTest pins the directory modes three levels down), so
+     * date-sharding is available if this ever holds enough files to want it, and it
+     * would buy nothing today: the id is a UUIDv7, so a plain `ls` of the volume is
+     * already in recording order, and the id is what a row and its blob are matched by
+     * when something has gone wrong.
+     */
+    public function createFromAudio(AudioUpload $audio): Memo
+    {
+        $id = Str::uuid7()->toString();
+        $key = "{$id}.{$audio->extension}";
+
+        $this->audio->putFile($key, $audio->path);
+
+        return $this->repository->insert(
+            id: $id,
+            source: Memo::SOURCE_VOICE,
+            status: Memo::STATUS_QUEUED,
+
+            // NULL, which is what tells the worker this row owes a transcription.
+            // Nothing else distinguishes the two paths for it -- see
+            // transcribe_if_owed in memo_ai/pipeline.py, and the `source` column
+            // exists for reporting rather than for that branch.
+            transcript: null,
+
+            audioPath: $key,
+            audioMime: $audio->mimeType,
         );
     }
 

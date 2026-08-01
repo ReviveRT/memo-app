@@ -19,10 +19,35 @@ docker compose up
 
 Then open **<http://localhost:5173>**.
 
-> Open it on `localhost`, **not** a LAN IP. The microphone silently fails outside
-> a secure context, with no error in the console.
+> **Open it on `localhost`, not a LAN IP.** Browsers only expose the microphone
+> in a secure context — HTTPS or `localhost` — and outside one they do not refuse
+> it, they remove it: `navigator.mediaDevices` is not defined at all. So on
+> `http://192.168.1.5:5173` the **Record** button reports that it needs a secure
+> context, and nothing in the console explains why. Typing memos works anywhere.
 
 _TODO (MEMO-26): first-build time and image size, given the baked whisper weights._
+
+## Recording
+
+Press **Record**, speak, press **Stop**. The memo appears in the list as soon as
+the API has stored it, and the transcript fills in when the worker gets to it.
+**Discard** throws a recording away before it is uploaded — once it is sent there
+is no delete yet.
+
+The elapsed timer next to the button is there so you know the length before you
+send it. Nothing enforces a duration at the moment; the `MAX_AUDIO_SECONDS` cap
+below is applied in the worker and arrives with MEMO-13.
+
+The first press asks for microphone permission. If you refuse it, the browser
+remembers — re-allow it from the icon at the end of the address bar, there is
+nothing this app can do to re-prompt.
+
+Each browser records a different container and all three are accepted as they
+are: Chrome and Edge produce WebM, Safari MP4, Firefox Ogg — including when
+Firefox's own `MediaRecorder` says it is producing WebM ([Mozilla bug
+1501308](https://bugzilla.mozilla.org/show_bug.cgi?id=1501308)). The API
+identifies the file from its bytes rather than from anything the browser
+claims, and MEMO-13 normalizes it before transcription.
 
 ## Searching
 
@@ -76,7 +101,7 @@ reference and contains no real credentials.
 | `OPENAI_API_KEY` | _(empty)_ | Optional. Enables hosted transcription |
 | `ANTHROPIC_API_KEY` | _(empty)_ | Optional. Enables Claude enrichment |
 | `ENRICH_MODEL` | `claude-opus-5` | Claude model for title/summary/tags/category |
-| `MAX_AUDIO_BYTES` | `12582912` | Upload byte cap enforced at the API edge (12 MiB) |
+| `MAX_AUDIO_BYTES` | `12582912` | Upload byte cap for the API edge (12 MiB). Not enforced yet — MEMO-11 applies it; until then `upload_max_filesize` (16 MiB) is the real limit and this number only shows up in `/api/health` |
 | `MAX_AUDIO_SECONDS` | `600` | Duration cap enforced in the worker after normalization |
 | `WORKER_POLL_SECONDS` | `1.0` | How long an `ai-worker` replica waits after finding the queue empty. Bounds how long a new memo sits in `queued`, not how fast the queue drains |
 | `AUDIO_DIR` | `/data/audio` | Audio path inside the containers, on the shared `audio` volume. Changing it needs a rebuild with a matching `--build-arg AUDIO_DIR` — see the note in `.env.example` |
@@ -86,9 +111,18 @@ reference and contains no real credentials.
 Only `STT_PROVIDER=fake` is implemented so far (MEMO-08); `local` and `openai`
 arrive with MEMO-14. The default of `local` is still safe to leave alone — the
 worker starts normally on it and text memos are unaffected, because a typed memo
-carries its own transcript and never reaches a provider. A *voice* memo would stop
-at `status=failed` with a `last_error` explaining it, and there is no way to create
-one yet in any case: the upload endpoint arrives in MEMO-11.
+carries its own transcript and never reaches a provider.
+
+A **voice** memo is a different matter now that MEMO-10 can create one. Recording
+and upload work on the default configuration, and the memo is stored — but the
+worker has no provider to transcribe it with, so it reaches `status=failed` with
+a `last_error` saying so rather than gaining a transcript. To watch the whole
+queue run end to end before MEMO-14 lands, start the stack with the fake
+provider, which returns a fixed sentence instantly and never opens the file:
+
+```bash
+STT_PROVIDER=fake docker compose up
+```
 
 ### Using the hosted providers
 

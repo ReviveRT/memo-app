@@ -88,6 +88,56 @@ button:disabled {
   font-weight: 400;
 }
 
+/* --- recorder -------------------------------------------------------------- */
+
+.recorder {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  margin: 1.25rem 0 0;
+}
+
+.recorder__discard {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text);
+  font-weight: 400;
+}
+
+.recorder__hint,
+.recorder__elapsed {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/*
+ * Tabular figures, so the seconds digit changing does not shift the width of the
+ * number and jog everything after it sideways five times a second. font-variant-numeric
+ * needs a font with the feature; the fallback is the monospace stack, which has it by
+ * construction.
+ */
+.recorder__elapsed {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--error);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * The recording dot. Steady rather than blinking: prefers-reduced-motion would have to
+ * turn an animation off anyway, and a still dot next to a number that is visibly
+ * counting already says the same thing.
+ */
+.recorder__dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: var(--error);
+}
+
 /* --- composer -------------------------------------------------------------- */
 
 .composer {
@@ -247,9 +297,13 @@ button:disabled {
 }
 
 /*
- * The four statuses 001_init.sql allows, plus the source. Only `queued` and `text` can
- * occur today; the rest are here so the row a worker updates does not come back
- * unstyled.
+ * The four statuses 001_init.sql allows, plus the source. Both sources occur now that
+ * MEMO-10 records; the statuses past `queued` are here so the row a worker updates does
+ * not come back unstyled.
+ *
+ * One rule for the source rather than one per value, deliberately. `text` and `voice`
+ * are the same kind of fact about a memo and neither is the exception, so colouring one
+ * of them would read as a warning about it.
  */
 .badge--source {
   color: var(--muted);

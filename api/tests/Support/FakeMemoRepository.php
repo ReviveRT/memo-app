@@ -27,7 +27,8 @@ final class FakeMemoRepository extends MemoRepository
 {
     /** Every insert() call, in order, as the repository received it.
      *
-     * @var list<array{id: string, source: string, status: string, transcript: ?string}>
+     * @var list<array{id: string, source: string, status: string, transcript: ?string,
+     *                 audio_path: ?string, audio_mime: ?string}>
      */
     public array $inserted = [];
 
@@ -55,13 +56,26 @@ final class FakeMemoRepository extends MemoRepository
 
     public function __construct() {}
 
-    public function insert(string $id, string $source, string $status, ?string $transcript): Memo
-    {
+    public function insert(
+        string $id,
+        string $source,
+        string $status,
+        ?string $transcript,
+        ?string $audioPath = null,
+        ?string $audioMime = null,
+    ): Memo {
         $this->inserted[] = [
             'id' => $id,
             'source' => $source,
             'status' => $status,
             'transcript' => $transcript,
+
+            // Recorded under the column names rather than the parameter names, because
+            // what the assertions are about is the row -- `audio_path` holds a storage
+            // key and `audio_mime` describes it, and those are the two names the worker
+            // and MEMO-23 read them back under.
+            'audio_path' => $audioPath,
+            'audio_mime' => $audioMime,
         ];
 
         // Shaped like the row Postgres would have returned: the columns the INSERT
