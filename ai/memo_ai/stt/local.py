@@ -193,6 +193,81 @@ BATCH_ABOVE_SECONDS = 120.0
 REPETITION_PENALTY = 1.1
 TEMPERATURE = 0.0
 
+# The sentence handed to the decoder before the audio, to make it punctuate.
+#
+# Whisper was trained on both punctuated and unpunctuated transcripts, and which
+# style it produces is a property of the audio rather than a setting. When it
+# chooses wrong it is spectacular: a real 89-second memo recorded into this app came
+# back as 1204 characters of lowercase words with not one comma in them, while every
+# short memo from the same session was punctuated correctly. Reproduced here
+# whenever wanted, from that recording.
+#
+# `initial_prompt` is the fix, and it is a style prompt rather than an instruction:
+# whisper receives it as if it were the transcript of the audio immediately before
+# this, so a primer that is punctuated, capitalized and full of ordinary sentences
+# is a demonstration of the register to continue in. On that recording it is the
+# whole difference between the blob above and fifteen clean sentences.
+#
+# Measured on it, once per setting, with the *first* wording of the primer -- which
+# is not the one below, for a reason two paragraphs down, but is what these four
+# rows were run with:
+#
+#   baseline                                lowercase blob, 13 segments
+#   condition_on_previous_text=False        lowercase blob, 13 segments
+#   initial_prompt                          punctuated, 7 segments
+#   initial_prompt + no conditioning        punctuated for four sentences, then blob
+#
+# The last row is the one that explains the mechanism, and it is why
+# `condition_on_previous_text` is deliberately left at its default of True. The
+# primer only reaches the first 30-second window directly; what carries its register
+# through the rest of a long recording is whisper conditioning each window on the
+# text of the one before. Switch that off and the style decays a few sentences in,
+# which is exactly what the fourth row shows.
+#
+# It costs nothing measurable: 28.2 s against 27.7 s on that recording. The wording
+# actually shipped punctuates the same recording just as fully, in 10 segments.
+#
+# **The wording is load-bearing, and both halves of it were paid for.**
+#
+#   * *The digits.* The first version of this primer was prose with no numeral in
+#     it, and it taught the model to spell numbers out -- the browser fixture that
+#     transcribes as "1, 2, 3, 4, 5, 6, 7, 8, 9, 10" came back as "One, two,
+#     three...". That is a real loss in a column that gets full-text searched, and
+#     BATCH_ABOVE_SECONDS already declined a faster decode path over the same
+#     regression. "2 or 3" in the primer is what keeps numerals as numerals.
+#   * *Everything else about it.* A third variant, also with digits but differently
+#     phrased, reintroduced the repetition loop REPETITION_PENALTY exists to stop:
+#     the same 89 seconds came back with "Let me clean up." repeated 25 times and 34
+#     segments instead of 10. So this is not a slot for any punctuated sentence, and
+#     editing it means re-running the recordings in tests/fixtures/ plus a long one.
+#     The prompt perturbs decoding, and decoding here has a known way to fail.
+#
+# What the shipped primer does cost, stated because it is a real measurement and not
+# a nil one: on the four deliberately degenerate recordings here -- somebody saying
+# one word over and over, which is what REPETITION_PENALTY was found with -- it moves
+# the count in both directions. Twice each, baseline against primed:
+#
+#   "Rock" x11, 4.3 s (two uploads)      11 -> 12
+#   "Rock" x11, 6.2 s                    11 ->  5
+#   "Rocka" x15, 6.8 s                   15 -> 17
+#
+# Every one of those is deterministic, and none is a runaway; the 5 is the primer
+# reading a wall of identical words as prose and stopping early. That is the safer
+# direction of the two, and none of it is a shape human speech takes -- these clips
+# exist to provoke the decoder. It is recorded here so that nobody re-measuring the
+# repetition table wonders why the numbers moved.
+#
+# English, on recordings that may not be. Checked rather than assumed: the Russian
+# fixture still comes back Russian, detected at 0.99, with its words unchanged --
+# because the language token decides the language and the prompt only suggests a
+# register. What is *not* claimed is that an English primer punctuates a long
+# non-English recording as well as it does this one; there is no long non-English
+# recording here to find out on.
+PUNCTUATION_PRIMER = (
+    "Okay, here is a note to myself. It runs to 2 or 3 sentences, with commas "
+    "where they belong and a full stop at the end. Does it read well? Yes, it does."
+)
+
 # The model that decides what language a recording is in, when STT_LANGUAGE has
 # not already said.
 #
@@ -431,6 +506,9 @@ class LocalWhisperStt:
                 # not worth two decode paths that behave differently.
                 "temperature": TEMPERATURE,
                 "repetition_penalty": REPETITION_PENALTY,
+                # See PUNCTUATION_PRIMER, which also has the reason
+                # `condition_on_previous_text` is left at its default beside it.
+                "initial_prompt": PUNCTUATION_PRIMER,
             }
             seconds = _wav_seconds(source)
             transcriber = engines.transcriber

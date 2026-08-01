@@ -24,6 +24,7 @@ from memo_ai.stt.local import (
     BATCH_SIZE,
     DEADLINE_FLOOR_SECONDS,
     DETECT_MIN_CONFIDENCE,
+    PUNCTUATION_PRIMER,
     REPETITION_PENALTY,
     TEMPERATURE,
     VAD_SPEECH_PAD_MS,
@@ -165,6 +166,11 @@ def test_it_asks_for_wav_and_switches_the_voice_filter_on():
             # them -- see REPETITION_PENALTY for the six-run table.
             "temperature": TEMPERATURE,
             "repetition_penalty": REPETITION_PENALTY,
+            # The style primer. Without it, one real 89-second memo came back as
+            # 1204 characters of lowercase words with not one comma in them --
+            # PUNCTUATION_PRIMER has the four-row table and the two ways the
+            # wording of it has already gone wrong.
+            "initial_prompt": PUNCTUATION_PRIMER,
         },
     )
 

@@ -310,6 +310,24 @@ domain `initial_prompt`, `beam_size=10`, greedy decoding, loudness-normalizing t
 audio, pinning the language, and switching between the WAV and Opus intermediate
 formats. Model capacity was the lever.
 
+There _is_ an `initial_prompt` set now, for the unrelated problem in the next
+section, and it does not bring the runaway back — but it does move these counts, in
+both directions. Baseline against primed, twice each on the four degenerate
+recordings here:
+
+| Recording | Baseline | Primed |
+| --- | --- | --- |
+| "Rock" ×11, 4.3 s _(two uploads)_ | 11 | 12 |
+| "Rock" ×11, 6.2 s | 11 | **5** |
+| "Rocka" ×15, 6.8 s | 15 | 17 |
+
+All deterministic, none a runaway; the 5 is the primer reading a wall of identical
+words as prose and stopping early, which is the safer direction of the two. None of
+this is a shape human speech takes — these clips exist to provoke the decoder — but
+one candidate wording of that prompt _did_ reintroduce the runaway on a different
+recording, so treat the prompt as part of this failure mode's surface rather than a
+free slot.
+
 One thing that did, and it is not a knob you have to turn. The voice-activity
 filter that keeps whisper from inventing words over silence ships with 400 ms of
 padding around each speech region, and that was enough to swallow the opening
@@ -318,6 +336,56 @@ order" without it. The padding is 1000 ms here, checked against the
 filter-disabled baseline on five real recordings, which keeps the transcript
 honest without giving up silence detection. Silence still comes back as _"No
 speech was detected"_ rather than as whisper's habitual "Thank you."
+
+### Punctuation and paragraphs
+
+Whisper was trained on both punctuated and unpunctuated transcripts, and which
+style you get is a property of the audio rather than a setting you can pick. When
+it goes the wrong way there is nothing subtle about it. A real 89-second memo
+recorded into this app came back as 1204 characters of lowercase words with **not
+one comma in them**, while every short memo from the same session was punctuated
+correctly:
+
+> database is running from yet another work free and nothing is running from main
+> also that earlier 200 i trusted was misleading let me see what it actually
+> returns and critically confirms your 38 memos are …
+
+The fix is an `initial_prompt`. Whisper receives it as though it were the
+transcript of the audio immediately preceding this one, so a primer that is
+punctuated, capitalized and made of ordinary sentences is a demonstration of the
+register to continue in — not an instruction. On that recording, measured once per
+setting, with the first wording of the primer rather than the one shipped:
+
+| | Result |
+| --- | --- |
+| default | lowercase blob, 13 segments |
+| `condition_on_previous_text=False` | lowercase blob, 13 segments |
+| **`initial_prompt`** | **punctuated, 7 segments** |
+| `initial_prompt`, no conditioning | punctuated for four sentences, then blob |
+
+The last row is the one that explains the mechanism, and it is why
+`condition_on_previous_text` is deliberately left at its default of `True`. The
+primer only reaches the first 30-second window directly; what carries its register
+through the rest of a long recording is whisper conditioning each window on the
+text of the one before. It costs 28.2 s against 27.7 s on that recording. The
+wording actually shipped punctuates the same 89 seconds just as fully — 10 segments,
+fifteen sentences, three paragraphs.
+
+The **wording is load-bearing**, and both halves of it were paid for. A first
+version was prose with no numeral in it and it taught the model to spell numbers
+out — the browser fixture that transcribes as `1, 2, 3, …` came back as "One, two,
+three, …", which is a real loss in a column that gets full-text searched. A third
+variant, also with digits but phrased differently, reintroduced the repetition loop
+from the previous section: the same 89 seconds came back with _"Let me clean up."_
+25 times over. Editing `PUNCTUATION_PRIMER` means re-running the fixtures in
+`ai/tests/fixtures/` plus one long recording.
+
+The English primer was checked against the non-English fixture rather than assumed
+safe: the Russian recording still comes back Russian, detected at 0.99, with its
+words unchanged, because the language token decides the language and the prompt
+only suggests a register. What is _not_ claimed is that it punctuates a long
+non-English recording as well as it does this one — there is no long non-English
+recording here to find out on.
 
 Two other providers exist behind the same interface:
 
