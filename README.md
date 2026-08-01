@@ -108,8 +108,9 @@ which is 77 percent of OpenAI's 25 MB request limit. The app uploaded that same
 memo in about 3.7 MB, so normalizing to WAV would mean carrying roughly five times
 what the user actually recorded, and most of the request budget, for a format
 nothing downstream asked for. Opus is a fraction of either. WAV is kept as an
-option for a provider that decodes in-process, which is what MEMO-14's local
-whisper will want.
+option for a provider that decodes in-process, and the `local` one asks for it —
+it reads the file itself, so a codec in between is two conversions for bytes that
+never leave the container.
 
 One consequence worth knowing before you go looking for a bug: an Opus stream
 always reports `48000` as its sample rate, whatever it was encoded from — the
@@ -163,10 +164,10 @@ reference and contains no real credentials.
 | `POSTGRES_PORT` | `5432` | Host port for Postgres. Change it if something else on your machine owns 5432 |
 | `API_PORT` | `8080` | Host port for the API |
 | `WEB_PORT` | `5173` | Host port for the frontend |
-| `STT_PROVIDER` | `local` | Primary transcription provider: `openai` \| `local` \| `fake`. Only `fake` is implemented so far — see below |
-| `STT_FALLBACK` | `local` | Provider used when the primary errors or its key is absent |
-| `STT_MODEL` | `base` | Model for the chosen provider — the main cost lever on the hosted path |
-| `OPENAI_API_KEY` | _(empty)_ | Optional. Enables hosted transcription |
+| `STT_PROVIDER` | `local` | Transcription provider: `local` \| `fake` \| `openai`. `openai` is recognised but not built — see below |
+| `STT_FALLBACK` | `local` | Provider used when the primary cannot run at all. Not used when a recording simply produced no words |
+| `STT_MODEL` | `base` | Whisper size for the `local` provider: `tiny` \| `base` \| `small` \| `medium`. The accuracy/speed lever |
+| `OPENAI_API_KEY` | _(empty)_ | Read by nothing today. Passed through for whoever writes the hosted adapter |
 | `ANTHROPIC_API_KEY` | _(empty)_ | Optional. Enables Claude enrichment |
 | `ENRICH_MODEL` | `claude-opus-5` | Claude model for title/summary/tags/category |
 | `MAX_AUDIO_BYTES` | `12582912` | Upload byte cap for the API edge (12 MiB). Anything larger is a 413. Raising it above `upload_max_filesize` (16 MiB, in `api/conf.d/uploads.ini`) silently breaks uploads instead of widening them — `/api/health` reports both numbers and flags the mismatch |
@@ -174,35 +175,71 @@ reference and contains no real credentials.
 | `WORKER_POLL_SECONDS` | `1.0` | How long an `ai-worker` replica waits after finding the queue empty. Bounds how long a new memo sits in `queued`, not how fast the queue drains |
 | `AUDIO_DIR` | `/data/audio` | Audio path inside the containers, on the shared `audio` volume. Changing it needs a rebuild with a matching `--build-arg AUDIO_DIR` — see the note in `.env.example` |
 
-### Transcription today
+### Transcription
 
-Only `STT_PROVIDER=fake` is implemented so far (MEMO-08); `local` and `openai`
-arrive with MEMO-14. The default of `local` is still safe to leave alone — the
-worker starts normally on it and text memos are unaffected, because a typed memo
-carries its own transcript and never reaches a provider.
+Recordings are transcribed **on your machine**, by
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper) running inside the
+`ai-worker` container. There is no account to create, no key to paste and no
+per-minute bill; the only thing it spends is CPU. The weights are MIT-licensed and
+so is everything that runs them.
 
-A **voice** memo is a different matter now that MEMO-10 can create one. Recording
-and upload work on the default configuration, and the memo is stored — but the
-worker has no provider to transcribe it with, so it reaches `status=failed` with
-a `last_error` saying so rather than gaining a transcript. To watch the whole
-queue run end to end before MEMO-14 lands, start the stack with the fake
-provider, which returns a fixed sentence instantly and never opens the file:
+The one moment it needs the internet is the **first voice memo after a clean
+build**, which downloads about 145 MB of model into the `whisper-cache` volume.
+That memo may fail with _"the local transcription model is still being
+downloaded"_ if the connection is slow — record another one a minute later and it
+will transcribe. Everything after that is offline, and it stays offline across
+restarts because the cache is a named volume.
+
+On a laptop, `STT_MODEL=base` turns a five-second recording into a finished memo
+about two seconds after the worker picks it up. The ten-minute maximum the
+duration cap allows is bounded at roughly two minutes — measured on a deliberately
+awful input, so real speech should be quicker. The language is detected rather
+than configured; the Russian test recording is identified as Russian with nothing
+told to it.
+
+Two other providers exist behind the same interface:
+
+| `STT_PROVIDER` | What happens |
+| --- | --- |
+| `local` _(default)_ | faster-whisper, as above |
+| `fake` | A fixed canned sentence, instantly. Useful for watching the queue work without waiting on a model |
+| `openai` | Recognised, deliberately **not built**. See below |
 
 ```bash
 STT_PROVIDER=fake docker compose up
 ```
 
-### Using the hosted providers
+`STT_FALLBACK` names the provider to use when the primary cannot run *at all* —
+not built, model missing, out of memory. It does **not** retry a recording that
+simply produced no words, because both providers are handed the same normalized
+audio and the second would reach the same answer more slowly. With the shipped
+defaults the two are equal and there is no chain at all.
 
-Both API keys are optional and neither is needed for the app to work end to end.
+### Why there is no hosted provider
 
-- **No `OPENAI_API_KEY`** — transcription runs locally on faster-whisper. Slower
-  on first use, no network, no cost.
-- **No `ANTHROPIC_API_KEY`** — memos still transcribe, store and search. They get
-  a fallback title (first 60 characters of the transcript) and `enrichment_error`
-  is recorded on the row.
+`openai` is a name the configuration accepts and nothing implements, and that is a
+decision rather than an unfinished edge. Writing an adapter against an API this
+project has never called would mean shipping a code path nobody has run, in the
+one place where "it looks right" and "it works" are hardest to tell apart. What
+proves the seam instead is that two providers really do go through it — `local`
+and `fake` — with different formats, different failure modes and different costs.
 
-To use either, paste your own key into `.env`. _TODO (MEMO-26): what measurably
+Setting it is not a dead end: `openai` reports itself unavailable, the worker logs
+that it was skipped, and `STT_FALLBACK` transcribes the memo. The row records the
+provider that actually ran, so `memos.stt_provider` never claims a request was
+made that was not.
+
+Pricing it needs no invoice, either. Hosted transcription bills per minute of
+audio, so the levers are the model and `MAX_AUDIO_SECONDS` — not the sample rate
+— and MEMO-22 keeps the rate table that turns "10,000 memos" into a number.
+
+### Using the Anthropic key
+
+`ANTHROPIC_API_KEY` is optional and nothing here needs it. Without it, memos still
+transcribe, store and search; they get a fallback title (first 60 characters of
+the transcript) and `enrichment_error` is recorded on the row.
+
+To use it, paste your own key into `.env`. _TODO (MEMO-26): what measurably
 changes when you do._
 
 ## Repository layout
@@ -257,6 +294,20 @@ a bare host without it, those tests skip and the rest of the suite still passes.
 recordings in `ai/tests/fixtures/`, since no synthesized file reproduces the
 missing-duration defect. It skips and names what is missing until they are there —
 `ai/tests/fixtures/README.md` has the capture instructions.
+
+`tests/test_local_whisper.py` runs the real model against those same recordings.
+It skips unless the weights are already in the HuggingFace cache, and it will not
+download them itself — a test run that quietly pulled 145 MB would be a worse
+surprise than a skip. Mount the same cache the stack uses to make it run:
+
+```bash
+docker compose run --rm --no-deps --user 0:0 -v memo-app_whisper-cache:/cache --entrypoint sh ai-worker -c 'pip install -q -r requirements-dev.txt && python -m pytest'
+```
+
+Everything else about the local provider is covered by `tests/test_local_stt.py`,
+which stubs the model out: what it checks is the classification — which failures
+send the chain to the fallback and which are terminal — and none of that needs
+inference.
 
 _TODO (MEMO-26): running the api tests, running a service outside Docker, applying
 a new migration._

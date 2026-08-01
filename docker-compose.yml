@@ -277,8 +277,13 @@ services:
       DATABASE_URL: *database-url
       AUDIO_DIR: *audio-dir
       MAX_AUDIO_SECONDS: ${MAX_AUDIO_SECONDS:-600}
+      # Equal by default, which the worker collapses to a single provider rather
+      # than a chain that would call the same one twice on every failure. The two
+      # only differ if somebody sets one of them.
       STT_PROVIDER: ${STT_PROVIDER:-local}
       STT_FALLBACK: ${STT_FALLBACK:-local}
+      # tiny | base | small | medium. The whole of what transcription costs here,
+      # which is CPU time rather than money.
       STT_MODEL: ${STT_MODEL:-base}
       ENRICH_MODEL: ${ENRICH_MODEL:-claude-opus-5}
       # How long a replica waits after finding an empty queue. Only ever a sleep on
@@ -286,12 +291,18 @@ services:
       # without waiting, so this is not a rate limit and it does not bound throughput.
       # It is roughly the delay between POST /api/memos and the row leaving `queued`.
       WORKER_POLL_SECONDS: ${WORKER_POLL_SECONDS:-1.0}
-      # Deliberately defaulted to empty rather than left unset: the container
-      # sees a defined-but-blank key and takes the local path.
+      # Passed through and read by nothing. Transcription is local and free as of
+      # MEMO-14, which built `local` and deliberately left the hosted adapter out
+      # — the README says why. The line stays because the variable is documented
+      # in .env.example and a key pasted there should reach the container that
+      # would use it, rather than being silently dropped one layer earlier.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # Weights are baked into the image (MEMO-15); this volume only keeps a
-      # rebuild from refetching anything that was not baked.
+      # Where faster-whisper caches its weights, and as of MEMO-14 the only copy
+      # of them: the first voice memo after a clean build downloads ~145 MB here
+      # and every later one, and every restart, reads it back with no network.
+      # MEMO-15 bakes them into the image as well, at which point this volume
+      # stops being load-bearing and becomes a place for anything not baked.
       HF_HOME: /cache/huggingface
     volumes:
       - "audio:${AUDIO_DIR:-/data/audio}"
