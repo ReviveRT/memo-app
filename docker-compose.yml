@@ -301,6 +301,32 @@ services:
       # without waiting, so this is not a rate limit and it does not bound throughput.
       # It is roughly the delay between POST /api/memos and the row leaving `queued`.
       WORKER_POLL_SECONDS: ${WORKER_POLL_SECONDS:-1.0}
+      # Retries and the reaper (MEMO-16). Three attempts including the first,
+      # counted by the claim statement rather than by the failure write — which is
+      # what makes the bound hold when a memo kills its worker instead of failing.
+      MAX_ATTEMPTS: ${MAX_ATTEMPTS:-3}
+      # Base of the exponential backoff written to `next_attempt_at`: ~30s before
+      # the second attempt, ~60s before the third, jittered ±20% so two replicas
+      # that failed together do not retry together.
+      RETRY_BACKOFF_SECONDS: ${RETRY_BACKOFF_SECONDS:-30}
+      # How long a claim may be held before the reaper takes it back.
+      #
+      # It has one hard constraint: it must exceed the longest a healthy job can
+      # run, or the reaper requeues work that is still in progress. At the defaults
+      # above that ceiling is 2,880s — 180s of ffprobe and ffmpeg, 300s of model
+      # load, and a 2,400s decode deadline for a 600-second memo — so 3,600 clears
+      # it by twelve minutes.
+      #
+      # The coupling is the part to remember: raising MAX_AUDIO_SECONDS lengthens
+      # the decode deadline and this number has to follow. The worker recomputes the
+      # ceiling at boot and logs a warning naming both numbers if it no longer fits,
+      # rather than leaving that to whoever edited the .env.
+      REAP_AFTER_SECONDS: ${REAP_AFTER_SECONDS:-3600}
+      # How often each replica looks for expired leases. Separate from the poll
+      # interval, which runs twice a second per replica — reaping writes against
+      # every `processing` row and there is nothing to gain from doing it at that
+      # rate. Both replicas running it concurrently is safe; see memo_ai/memos.py.
+      REAPER_INTERVAL_SECONDS: ${REAPER_INTERVAL_SECONDS:-60}
       # Passed through and read by nothing. Transcription is local and free as of
       # MEMO-14, which built `local` and deliberately left the hosted adapter out
       # — the README says why. The line stays because the variable is documented
@@ -338,13 +364,15 @@ services:
     #
     # The case it does not cover is a pathological file that runs ffmpeg to its own
     # 120 s ceiling (NORMALIZE_TIMEOUT_SECONDS in memo_ai/audio.py). That job is
-    # SIGKILLed mid-work and its row is left in `processing` -- which is a reaper
-    # case, and the reaper is MEMO-16's.
+    # SIGKILLed mid-work and its row is left in `processing` -- which is now a reaper
+    # case rather than a memo lost for good.
     #
-    # 30s rather than MAX_AUDIO_SECONDS: a `docker compose down` that hangs for ten
-    # minutes is not a better outcome than a reaped row, and reaping is what MEMO-16
-    # builds for exactly this case. That task owns the deliberate version of this
-    # number, together with the reaper's own threshold -- which has to stay above it.
+    # 30s rather than MAX_AUDIO_SECONDS, and that is the deliberate version of the
+    # number rather than a placeholder: a `docker compose down` that hangs for ten
+    # minutes is not a better outcome than a reaped row. What it costs is bounded on
+    # both sides now -- a job killed at 30s keeps whatever it had already committed,
+    # so a memo cut off after transcription resumes at enrichment instead of being
+    # transcribed again, and REAP_AFTER_SECONDS above is what eventually notices.
     stop_grace_period: 30s
     restart: unless-stopped
 
