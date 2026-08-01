@@ -47,10 +47,46 @@ body {
   font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
+/*
+ * Widened from 44rem, which was the right column for one list of memos and is too narrow for
+ * a grid whose whole specification is "as many columns as the screen allows". At 44rem that
+ * grid is two columns on any monitor, which makes the three-row cap meaningless.
+ *
+ * The reading column is preserved where it still matters -- the composer and the recorder cap
+ * themselves below, because a textarea the width of a desktop screen is unusable for the same
+ * reason a newspaper has columns.
+ */
 .app {
-  max-width: 44rem;
+  max-width: 72rem;
   margin: 0 auto;
   padding: 2rem 1rem 4rem;
+}
+
+/*
+ * The two writing controls keep the old measure. The bloom is anchored to the Record button
+ * (MemoBackdrop), so this also keeps the hot core in the left third of a wide window rather
+ * than dead centre, which is where the cards are.
+ */
+.recorder,
+.composer {
+  max-width: 44rem;
+}
+
+/*
+ * Visually hidden, still announced. The clip-path pair rather than `display: none` or
+ * `visibility: hidden`, either of which removes the element from the accessibility tree --
+ * which is the opposite of what a label needs.
+ */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 .app__header {
@@ -225,7 +261,22 @@ h1,
 .notice:not(.notice--error),
 .app__header button,
 .recorder__discard,
-.search__clear {
+.search__clear,
+
+/*
+ * The landing page's own four, added when it arrived. It is the worst case on the site for
+ * exactly the reason it is the best-looking screen: the bloom is centred behind the middle of
+ * the viewport, and the title is centred in the middle of the viewport, so the largest text in
+ * the app sits directly on the hot core rather than beside it. The scrim helps and does not
+ * finish the job -- see its own note on why it is deliberately too weak to.
+ */
+.landing__title,
+.landing__tagline,
+.landing__note,
+
+/* And the section furniture on the memos screen, which sits on the background like the rest. */
+.section__head h2,
+.section__hint {
   text-shadow:
     0 1px 2px color-mix(in srgb, var(--bg) 82%, transparent),
     0 2px 14px color-mix(in srgb, var(--bg) 70%, transparent);
@@ -572,4 +623,841 @@ h1,
 .memo__working-label {
   color: var(--muted);
   font-size: 0.9rem;
+}
+
+/* --- landing ---------------------------------------------------------------- */
+
+/*
+ * The front door. One screen, centred, with the bloom behind it.
+ *
+ * `min-height: 100svh` rather than `100vh`: on mobile browsers `vh` is the viewport with the
+ * URL bar *hidden*, so a full-height hero is taller than the screen at rest and the page
+ * scrolls by exactly the height of the toolbar. `svh` is the small viewport -- the one that is
+ * always visible -- which is what "fills the screen" has to mean here.
+ */
+.landing {
+  display: grid;
+  place-items: center;
+  min-height: 100svh;
+  padding: 2rem 1.25rem;
+  text-align: center;
+}
+
+/*
+ * The element MemoBackdrop measures. Zero-sized and invisible: it exists to have a position.
+ *
+ * Placed by the same grid that centres the hero, so it follows the title on any screen -- the
+ * whole reason the backdrop looks up an element instead of taking a percentage. It shares the
+ * single grid cell with the hero (both at 1/1), which is what puts it behind the middle of the
+ * text block rather than above or below it.
+ */
+.landing__anchor {
+  grid-area: 1 / 1;
+  width: 0;
+  height: 0;
+}
+
+.landing__hero {
+  grid-area: 1 / 1;
+  max-width: 34rem;
+}
+
+/*
+ * clamp() rather than a media query, because there is one value here and it should scale
+ * continuously: 2.5rem on a phone, 4.5rem on a desktop, and everything between without a step
+ * at some arbitrary breakpoint.
+ */
+.landing__title {
+  margin: 0;
+  font-size: clamp(2.5rem, 8vw, 4.5rem);
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+}
+
+.landing__tagline {
+  margin: 1.25rem auto 0;
+  max-width: 30rem;
+  color: var(--muted);
+  font-size: 1.05rem;
+}
+
+/*
+ * A link that looks like a button. `display: inline-flex` rather than inline-block so the
+ * label centres on both axes without line-height arithmetic.
+ */
+.landing__cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 2rem;
+  padding: 0.85rem 2.25rem;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 1.05rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.landing__cta:hover {
+  /* Toward the text colour in both schemes, so one rule serves light and dark. */
+  background: color-mix(in srgb, var(--accent) 88%, var(--text));
+}
+
+.landing__note {
+  margin: 1.5rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* --- sections --------------------------------------------------------------- */
+
+.section {
+  margin-top: 2.5rem;
+}
+
+.section__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.section__head h2 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.section__hint {
+  margin: 0.25rem 0 0.9rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* --- filters ---------------------------------------------------------------- */
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.filters__search {
+  display: flex;
+  flex: 1 1 18rem;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.filters__input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+}
+
+/*
+ * WebKit's own clear affordance for type="search", hidden because the Clear button next to it
+ * does the same job on every browser and two clear controls side by side read as one of them
+ * being broken.
+ */
+.filters__input::-webkit-search-cancel-button {
+  appearance: none;
+}
+
+.filters__clear {
+  flex: none;
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text);
+  font-weight: 400;
+}
+
+.filters__dates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+/*
+ * The preset buttons. `chip` rather than a <select>, because there are four of them and the
+ * one that matters is visible at a glance -- a select hides the current value behind a click
+ * on the one control that is meant to say what the list is filtered to.
+ */
+.chip {
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.85rem;
+  font-weight: 400;
+}
+
+.chip--on {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.filters__custom {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  flex-basis: 100%;
+}
+
+.filters__date {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.filters__date input {
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+/* --- the horizontal memo strip ---------------------------------------------- */
+
+/*
+ * One row, as wide as the screen, scrolling sideways. The brief's shape exactly.
+ *
+ * `grid-auto-flow: column` with a fixed `grid-auto-columns` is what keeps it to one row: a
+ * grid that flows in columns never wraps, so the track simply grows to the right and the
+ * container's overflow-x becomes the scroll. `flex-wrap: nowrap` would do the same thing; grid
+ * is used because the fixed column width is one declaration rather than a flex triple on every
+ * child.
+ *
+ * `overscroll-behavior-x: contain` stops a horizontal flick at the end of the strip from
+ * becoming a browser back-gesture, which on a trackpad is very easy to do by accident and
+ * loses the page.
+ */
+.strip {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x proximity;
+  padding-bottom: 0.5rem;
+}
+
+/* A visible focus ring, since the scroller is focusable for keyboard scrolling. */
+.strip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 8px;
+}
+
+.strip__track {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(15rem, 15rem);
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.strip__item {
+  position: relative;
+  scroll-snap-align: start;
+}
+
+/*
+ * The transcribing bar, laid over the card's lower edge.
+ *
+ * Positioned rather than placed in flow because it lives outside the <button> -- a button may
+ * only contain phrasing content and ProgressBar's root is a div, so nesting it would be
+ * invalid HTML that each browser recovers from its own way. Absolute placement puts it back
+ * where it looks like it belongs without that.
+ *
+ * Inset by the card's border radius so the bar does not sit proud of the rounded corners.
+ */
+.strip__progress {
+  position: absolute;
+  right: 0.6rem;
+  bottom: 0.55rem;
+  left: 0.6rem;
+  width: auto;
+}
+
+/*
+ * A card is a button, so every inherited button style has to be undone: the shared rule gives
+ * it the accent background, white text, centred content and 600 weight, none of which is
+ * wanted here.
+ */
+.memo-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  width: 100%;
+  height: 100%;
+  min-height: 10rem;
+  padding: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 400;
+  text-align: left;
+}
+
+.memo-card:hover {
+  border-color: var(--accent);
+}
+
+.memo-card__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.memo-card__bell {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  color: var(--accent);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.memo-card__title {
+  font-size: 0.98rem;
+  font-weight: 600;
+  line-height: 1.3;
+
+  /* Two lines, then an ellipsis. A title is a label; a third line makes it a paragraph. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.memo-card__preview {
+  flex: 1;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.4;
+
+  /*
+   * Clamped rather than truncated in JavaScript, so the card shows as much as fits at whatever
+   * width the screen gave it -- and so the full transcript is still in the DOM for find-in-page.
+   */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.memo-card__preview--empty {
+  font-style: italic;
+}
+
+.memo-card__when {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+/* --- the collections grid --------------------------------------------------- */
+
+/*
+ * "Columns from the screen width, at most three rows, then scroll down for the rest."
+ *
+ * Every part of that is CSS and none of it is JavaScript, which is what keeps it right while
+ * the window is being dragged: `auto-fill` reflows the columns, and the max-height keeps
+ * meaning three rows however many columns that turns out to be.
+ *
+ * The arithmetic needs a known row height, which is why `--card-h` exists and why
+ * `.collection` is `height: 100%` inside a fixed `grid-auto-rows`. A card that grew with its
+ * content would make three rows an unknown number of pixels, and the cap would have to be
+ * measured in JavaScript on every resize.
+ */
+.grid {
+  --card-h: 11.5rem;
+  --grid-gap: 0.75rem;
+
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+  grid-auto-rows: var(--card-h);
+  gap: var(--grid-gap);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+
+  /* Three rows and two gaps. The fourth row is behind the scroll. */
+  max-height: calc(3 * var(--card-h) + 2 * var(--grid-gap));
+  overflow-y: auto;
+
+  /* So a flick at the bottom of the grid does not scroll the page behind it. */
+  overscroll-behavior-y: contain;
+}
+
+.collection {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  height: 100%;
+  padding: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.collection__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+/* The name is the control that opens the collection, so it is a button dressed as a heading. */
+.collection__name {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 1rem;
+  font-weight: 600;
+  text-align: left;
+}
+
+.collection__name:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.collection__count {
+  flex: none;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.collection__recent {
+  flex: 1;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.collection__recent li {
+  padding: 0.15rem 0;
+  border-top: 1px solid var(--border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.collection__empty {
+  flex: 1;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-style: italic;
+}
+
+.collection__actions {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.collection__rename {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  width: 100%;
+}
+
+.collection__rename input {
+  width: 100%;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+}
+
+.collection__rename button {
+  padding: 0.3rem 0.6rem;
+  font-size: 0.8rem;
+}
+
+/* A quiet button: the shared rule fills every <button> with the accent, and most are not that. */
+.ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 400;
+  padding: 0.3rem 0.6rem;
+}
+
+.ghost:hover {
+  color: var(--text);
+}
+
+.ghost--danger:hover {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.creator {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.creator__field {
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+
+.creator__field input {
+  width: 100%;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+}
+
+/* --- dialogs ---------------------------------------------------------------- */
+
+/*
+ * A native <dialog>, so focus trapping, Escape, inertness behind, and the top layer all come
+ * from the browser. The top layer is also why nothing here needs a z-index: a modal dialog
+ * renders above every stacking context on the page, including the fixed backdrop layers, which
+ * keeps styles.css's "no rule needs a z-index" rule intact.
+ *
+ * `margin: auto` is what centres it -- a <dialog> is absolutely positioned by the UA stylesheet
+ * with `inset: 0`, so auto margins on all four sides centre it on both axes.
+ */
+.sheet {
+  width: min(38rem, calc(100vw - 2rem));
+  max-height: min(85svh, 48rem);
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--text);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+/* The collection dialog holds a horizontal strip, which wants the room. */
+.sheet--wide {
+  width: min(54rem, calc(100vw - 2rem));
+}
+
+/*
+ * The dim behind it. A colour-mix on the page background rather than a flat black, so the
+ * light scheme dims to grey instead of to a heavy shadow -- and the bloom stays faintly
+ * visible through it, which is what keeps the two screens feeling like one app.
+ */
+.sheet::backdrop {
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  backdrop-filter: blur(3px);
+}
+
+.sheet__body {
+  padding: 1.25rem;
+}
+
+.sheet__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.sheet__title {
+  margin: 0;
+  font-size: 1.2rem;
+}
+
+.sheet__meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.sheet__close {
+  flex: none;
+  padding: 0 0.5rem;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 1.5rem;
+  line-height: 1.2;
+}
+
+.sheet__close:hover {
+  color: var(--text);
+}
+
+.sheet__section {
+  margin-top: 1.25rem;
+}
+
+.sheet__label {
+  margin: 0 0 0.4rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* The main event: the transcription gets body size and the newlines it was typed with. */
+.sheet__transcript {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.sheet__transcript--empty {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.sheet__select {
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+}
+
+.sheet__hint {
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.sheet__past {
+  margin-top: 0.75rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.sheet__past summary {
+  cursor: pointer;
+}
+
+/* --- reminders -------------------------------------------------------------- */
+
+.reminders {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.reminders__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.45rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.reminders__when {
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.reminders__note {
+  margin: 0.1rem 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.reminders__drop {
+  flex: none;
+  padding: 0.25rem 0.55rem;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 400;
+}
+
+.reminders__drop:hover {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.remind {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-top: 0.9rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--border);
+}
+
+.remind__note input,
+.remind__field input {
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+}
+
+.remind__timers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.remind__alarm {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.remind__field {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.remind__hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+/* --- fired reminders -------------------------------------------------------- */
+
+/*
+ * Fixed to the corner, so a reminder firing does not reflow the page under the cursor.
+ *
+ * This is one of the few things in the app that needs a z-index, and it needs a large one:
+ * everything else on the page is at or below 0, but a native <dialog> renders in the top layer
+ * and is *above any z-index at all*. So a toast cannot be layered over an open dialog by this
+ * value -- it will sit behind one. That is the right outcome rather than a defect to fix: the
+ * dialog is modal, the user is in the middle of something, and the reminder is still there
+ * when they close it.
+ */
+.toasts {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  width: min(22rem, calc(100vw - 2rem));
+
+  /* So the empty live region never sits over the page catching clicks. */
+  pointer-events: none;
+}
+
+.toast,
+.toast__all {
+  pointer-events: auto;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: var(--surface);
+
+  /* The one shadow in the app: this floats over content and needs to read as being above it. */
+  box-shadow: 0 6px 24px color-mix(in srgb, var(--text) 18%, transparent);
+}
+
+.toast__title {
+  margin: 0;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.toast__note {
+  margin: 0.2rem 0 0;
+  font-size: 0.85rem;
+}
+
+.toast__when {
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.toast__close {
+  flex: none;
+  padding: 0 0.35rem;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 1.2rem;
+  line-height: 1;
+}
+
+.toast__all {
+  align-self: flex-end;
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 400;
+}
+
+/* --- narrow screens --------------------------------------------------------- */
+
+/*
+ * The grid's three-row cap is dropped below 40rem, and that is deliberate rather than an
+ * oversight in the brief. On a phone the grid is one column, so three rows is three cards --
+ * a scroll container barely taller than its own scrollbar, nested inside the page's scroll.
+ * Letting it grow means one scroll gesture instead of two.
+ */
+@media (max-width: 40rem) {
+  .grid {
+    max-height: none;
+    overflow-y: visible;
+  }
+
+  .strip__track {
+    /* Cards nearly the width of the screen, so one is clearly "current" and the next peeks. */
+    grid-auto-columns: minmax(13rem, 80vw);
+  }
 }

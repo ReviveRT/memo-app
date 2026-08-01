@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace App\Repositories;
 
 use App\Services\Memos\Memo;
+use App\Services\Memos\MemoQuery;
 use Illuminate\Database\DatabaseManager;
+use Illuminate\Database\QueryException;
 use RuntimeException;
 use stdClass;
 
@@ -17,8 +19,8 @@ use stdClass;
  * Not final, unlike HealthRepository, and only for one reason: the feature suite
  * substitutes a fake for it. `php artisan test` runs against sqlite in memory (see
  * phpunit.xml) and every query below is Postgres-specific -- to_jsonb, to_char,
- * INSERT ... RETURNING over a table with a generated tsvector column -- so the
- * alternative to a seam here is a second, drifting definition of the schema in the
+ * jsonb_agg, INSERT ... RETURNING over a table with a generated tsvector column -- so
+ * the alternative to a seam here is a second, drifting definition of the schema in the
  * test suite. HealthEndpointTest gets to stay honest by misconfiguring the real
  * connection because "the database is unreachable" is a driver-independent
  * outcome; "the list came back newest first" is not. MEMO-25 owns the suite that
@@ -27,15 +29,15 @@ use stdClass;
 class MemoRepository
 {
     /**
-     * The projection, shared by both statements below so the create response and
-     * the list rows cannot drift apart.
+     * The projection, shared by every statement below so the create response, the list
+     * rows, the PATCH response and the reminder responses cannot drift apart.
      *
      * Enumerated rather than `*`, and that is a rule on this table rather than a
      * preference: `search_vector` is part of `*` and is the largest thing on the
      * row, so shipping it would put a full stemmed copy of every transcript into a
      * response nobody reads it from.
      *
-     * Two conversions happen in SQL rather than in PHP:
+     * Three conversions happen in SQL rather than in PHP:
      *
      *   * to_jsonb(tags), because the driver hands back Postgres' `{a,b}` array
      *     literal as an undifferentiated string and its quoting rules are not worth
@@ -44,11 +46,12 @@ class MemoRepository
      *     string -- milliseconds, UTC, RFC 3339 -- instead of whatever the server's
      *     DateStyle and the session TimeZone would have produced for PHP to reparse.
      *     `AT TIME ZONE 'UTC'` is what makes the literal Z true.
+     *   * the reminders aggregate, for both of those reasons at once. See below.
      *
      * That second one is aliased `created_at_iso` rather than `created_at`, and the
      * ugly name is load-bearing. ORDER BY resolves a bare name against the output
      * column labels before the table's columns, so with the obvious alias the
-     * `ORDER BY created_at DESC` in recent() below silently stops meaning the
+     * `ORDER BY created_at DESC` in list() below silently stops meaning the
      * timestamp column and starts meaning this formatted string. Caught here by
      * reading the plan rather than by reasoning: at 5,000 rows the aliased version
      * plans a Seq Scan plus a Sort on the to_char expression, while the same query
@@ -60,11 +63,28 @@ class MemoRepository
      * the index scan by relying on the same subtlety, one dropped qualifier away from
      * regressing.
      *
-     * This paragraph used to end by saying MEMO-19 would add a ts_rank ordering here and
-     * should not have to know any of the above. It did have to know, and then it did not
-     * add one -- search() below orders by created_at too, for reasons measured there. So
-     * the aliasing still matters, and now it matters to both statements rather than to
-     * one of them plus a future one.
+     * **The reminders subquery.** A correlated scalar subquery producing one jsonb array,
+     * ordered soonest-first off reminders_memo_idx. Three things about it are deliberate:
+     *
+     *   * `coalesce(..., '[]'::jsonb)`. jsonb_agg over no rows is NULL, not an empty
+     *     array, so without this a memo with no reminders would carry `"reminders": null`
+     *     and every reader would need a null check before iterating. Every memo now
+     *     carries an array, empty or not.
+     *   * The timestamps inside it go through the same to_char expression as
+     *     created_at above, so a client parsing one format parses all of them.
+     *     `to_char(NULL, ...)` is NULL, which is what an undelivered reminder should
+     *     carry, so the pending case needs no special casing.
+     *   * It survives `INSERT ... RETURNING`, which is what lets one constant serve both
+     *     statements. Checked against a real Postgres rather than assumed, because a
+     *     subquery referencing the inserted row is the kind of thing that either works
+     *     or fails with a parse error: `RETURNING` resolves `memos.id` to the new row and
+     *     answers `[]`, since a memo cannot have a reminder before it exists.
+     *
+     * The join it costs is paid on every list request, and it is bounded by the LIMIT
+     * rather than by the size of the reminders table. It is here rather than fetched
+     * separately because the fast strip badges a memo that has something pending, so
+     * every row needs its reminders anyway -- a second request per memo is the thing
+     * this avoids.
      */
     private const COLUMNS = <<<'SQL'
         id,
@@ -76,8 +96,28 @@ class MemoRepository
         to_jsonb(tags) AS tags,
         duration_ms,
         last_error,
-        to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at_iso
+        collection_id,
+        to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at_iso,
+        (
+            SELECT coalesce(jsonb_agg(jsonb_build_object(
+                'id', r.id,
+                'remind_at', to_char(r.remind_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                'note', r.note,
+                'delivered_at', to_char(r.delivered_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+            ) ORDER BY r.remind_at), '[]'::jsonb)
+            FROM reminders r
+            WHERE r.memo_id = memos.id
+        ) AS reminders
         SQL;
+
+    /**
+     * SQLSTATE for foreign_key_violation.
+     *
+     * Reachable from one place: filing a memo into a collection id that does not exist.
+     * That is a 404 rather than a 500 -- see moveToCollection, which is where the code is
+     * turned into one.
+     */
+    private const FOREIGN_KEY_VIOLATION = '23503';
 
     public function __construct(private readonly DatabaseManager $db) {}
 
@@ -105,6 +145,11 @@ class MemoRepository
      * that does not exist. Nothing here enforces the pairing -- MemoService is the only
      * caller and passes both -- and it is not worth a CHECK constraint on a table
      * written by one statement in one file.
+     *
+     * `collection_id` is deliberately not a parameter. Every memo is created unfiled --
+     * that is what a fast memo is -- and filing happens afterwards through
+     * moveToCollection. Accepting it here would mean the recorder had to know which
+     * collection was on screen, which is a coupling the strip exists to avoid.
      *
      * @param  string  $source  Memo::SOURCE_TEXT with a transcript and no audio, or
      *                          Memo::SOURCE_VOICE with audio and a null transcript.
@@ -145,102 +190,63 @@ class MemoRepository
     }
 
     /**
-     * Newest first, which is the only order this endpoint offers.
+     * The list, newest first, narrowed by whichever of MemoQuery's filters are set.
      *
-     * ORDER BY created_at DESC is served by memos_created_idx, declared DESC in
-     * 001_init.sql for exactly this query -- confirmed as `Index Scan using
-     * memos_created_idx` on a 5,000-row table, and see COLUMNS for the aliasing that
-     * turns it back into a Seq Scan.
+     * One statement assembled from optional predicates, replacing the `recent()` and
+     * `search()` pair this class used to have. That pair did not survive the filters
+     * growing to four independent dimensions -- text, a from bound, a to bound and a
+     * collection scope -- because eight combinations is eight methods, and the point of
+     * MemoQuery is that the call site names what it wants instead of picking one.
      *
-     * No tiebreaker, and not because UUIDv7 ids happen to agree with created_at --
-     * that agreement does nothing for a tie, since without id in the ORDER BY
-     * Postgres does not order tied rows by it at all. It is that a tie needs two
-     * memos with the same created_at, and created_at defaults to now(), which is
-     * transaction-start time: two rows can only share one if they were inserted in
-     * the same transaction. This API inserts exactly one row per request. Confirmed
-     * from the other side too -- 5,010 rows written one-per-statement had 5,008
-     * distinct timestamps, the two duplicates being a fixture that did insert several
-     * in one transaction. Adding `, id DESC` for the unreachable case is not free
-     * either: it plans an Incremental Sort on top of the index scan.
+     * With no filters at all the assembled statement is character-for-character the old
+     * `recent()`: `SELECT ... FROM memos ORDER BY created_at DESC LIMIT ?`. So the
+     * unfiltered list keeps the plan it had -- an Index Scan straight down
+     * memos_created_idx -- and there is no `WHERE TRUE` in front of it to cost that.
+     * MemoService no longer needs its own branch for the same reason.
      *
-     * $limit is bound rather than interpolated. Laravel binds a PHP int as
-     * PDO::PARAM_INT, which is what a parameterised LIMIT needs; the value reaching
-     * here has already been validated by ListMemosRequest, so the bound parameter
-     * is defence in depth rather than the only check.
+     * **The text predicate is unchanged, and its three arms still are what they were.**
      *
-     * @return list<Memo>
-     */
-    public function recent(int $limit): array
-    {
-        $rows = $this->db->connection()->select(
-            'SELECT '.self::COLUMNS.' FROM memos ORDER BY created_at DESC LIMIT ?',
-            [$limit],
-        );
-
-        return $this->hydrate($rows);
-    }
-
-    /**
-     * The same page, filtered by text.
+     * 1. `websearch_to_tsquery`, not `to_tsquery` or `plainto_tsquery`. It gives quoted
+     *    phrases and minus-exclusion for free -- `"call the dentist"` compiles to
+     *    `'call' <2> 'dentist'` and `dentist -thursday` to `'dentist' & !'thursday'` --
+     *    and, unlike to_tsquery, it never raises on input a human typed. That is the part
+     *    that matters, because the input is a search box: `to_tsquery('english', 'dentist
+     *    &')` is `ERROR: no operand in tsquery` and `'a | | b'` is `ERROR: syntax error in
+     *    tsquery`, both of which would be a 500 for a half-typed query.
+     *    websearch_to_tsquery answers `'dentist'` and `'b'`.
      *
-     * Three OR'd predicates, and Postgres serves all three from an index -- confirmed as
-     * a BitmapOr over memos_search_idx, memos_trgm_idx and memos_claim_idx on a 5,006-row
-     * table, with bound parameters rather than literals so the plan is the one this
-     * statement actually gets.
+     * 2. The ILIKE fallback, for the two cases the tsvector cannot reach: a partial word,
+     *    and a run-together token. Both are spelled out in 001_init.sql next to the index
+     *    that serves them. Not the similarity operator -- see likePattern below and the
+     *    measurements in 001_init.sql for why `%` silently matches nothing here.
      *
-     * **1. The full-text match.** `websearch_to_tsquery`, not `to_tsquery` or
-     * `plainto_tsquery`. It gives quoted phrases and minus-exclusion for free -- `"call
-     * the dentist"` compiles to `'call' <2> 'dentist'` and `dentist -thursday` to
-     * `'dentist' & !'thursday'` -- and, unlike to_tsquery, it never raises on input a
-     * human typed. That is the part that matters here, because the input is a search box:
-     * `to_tsquery('english', 'dentist &')` is `ERROR: no operand in tsquery` and
-     * `'a | | b'` is `ERROR: syntax error in tsquery`, both of which would be a 500 for a
-     * half-typed query. websearch_to_tsquery answers `'dentist'` and `'b'`.
+     * 3. The in-flight pin. A memo still being transcribed has no transcript, so it
+     *    matches nothing and would vanish from the list the moment a filter was active --
+     *    right after the user recorded it. Memo::inFlightStatuses() says which statuses
+     *    that covers and why 'failed' is not one of them.
      *
-     * A query of nothing but punctuation or stop words compiles to the empty tsquery,
-     * which matches no row -- `@@` returns false, not null, so it does not poison the OR.
-     * The ILIKE arm is what keeps such a query useful.
+     * **Where the pin sits is the one thing this method changed about search, and it is a
+     * correctness fix rather than a refactor.** The pin is inside the text group's
+     * parentheses, so it is OR'd with the two text arms and then AND'd with the window and
+     * the collection scope. Written the other way -- as a fourth top-level OR -- it would
+     * escape both, and both escapes are wrong in a way that reads as a bug in the filter:
      *
-     * **2. The ILIKE fallback,** for the two cases the tsvector cannot reach: a partial
-     * word, and a run-together token. Both are spelled out in 001_init.sql next to the
-     * index that serves them.
+     *   * A memo recorded ten seconds ago would appear in a list filtered to *yesterday*,
+     *     because it is queued. The date filter would look broken, and the user cannot
+     *     tell that the row is there on purpose.
+     *   * That same memo, which is unfiled, would appear inside every collection's list.
+     *     A collection would appear to contain a memo that was never put in it.
      *
-     * Not the similarity operator, and this is the trap worth naming: `%` looks like the
-     * right tool and silently matches nothing. Against a 751-character transcript
-     * containing "reorganise", `similarity('reorg', transcript)` is 0.0129 -- similarity
-     * divides by the union of both trigram sets, so a long transcript drives any short
-     * needle towards zero -- and the default threshold is 0.3, so `'reorg' % transcript`
-     * is false. `word_similarity` scores the same pair 0.8333 and would work, but it
-     * reads its threshold from a session GUC (`set_limit`/`show_limit`), which makes the
-     * result depend on connection state this application never sets. ILIKE has no
-     * threshold to be wrong about, and it is the operator whose semantics match what
-     * somebody typing five characters means: this substring, exactly.
+     * So the pin is scoped: it keeps an in-flight memo visible in the list it *belongs*
+     * to while it is still being worked on, and nowhere else. The window and the scope are
+     * hard bounds with no exception, which is what a filter naming a date range or a
+     * folder has to be.
      *
-     * Only `transcript`, matching the one gin_trgm_ops index there is. Extending the
-     * fallback to `title` and `summary` was measured and rejected: with no trigram index
-     * on either, the added OR arms drop the whole statement to a Seq Scan over every row.
-     * Little is lost -- both columns are generated from the transcript by MEMO-21, so a
-     * partial word in a title is almost always a partial word in the transcript as well
-     * -- and the full-text arm covers them exactly, since search_vector spans title,
-     * summary, transcript and tags.
-     *
-     * **3. The in-flight pin.** A memo still being transcribed has no transcript, so it
-     * matches nothing and would vanish from the list the moment a filter was active --
-     * right after the user recorded it. Memo::inFlightStatuses() says which statuses that
-     * covers and why 'failed' is not one of them.
-     *
-     * Worth knowing about the pin: a *text* memo is inserted with its transcript already
-     * set, so it is searchable while queued and does not need the pin to be visible. What
-     * the pin buys it is the enrichment window -- its title, summary and tags land later,
-     * so a query that only its future tags would match finds it from the start rather
-     * than when the worker gets to it. The voice path (MEMO-11) is the case the pin is
-     * really for.
-     *
-     * **Ordering: created_at DESC, the same as recent().** Both 001_init.sql and COLUMNS
-     * above expected a ts_rank ordering here. Three measurements against the schema said
+     * **Ordering: created_at DESC, whatever the filters.** Both 001_init.sql and COLUMNS
+     * above expected a ts_rank ordering. Three measurements against the schema said
      * otherwise, and the third is decisive:
      *
-     *   * ts_rank cannot rank the ILIKE half of this predicate. A row matched only by
+     *   * ts_rank cannot rank the ILIKE half of the predicate. A row matched only by
      *     substring does not match the tsquery, so its rank is exactly 0 -- the same trap
      *     001_init.sql documented for tag-only rows under ts_rank_cd, one arm further
      *     along. Ordering by rank would bury every partial-word hit beneath every
@@ -254,44 +260,165 @@ class MemoRepository
      *     dropped outright once there are `limit` matches. The memo the pin exists to
      *     keep on screen is the first thing rank ordering throws away.
      *
-     * created_at DESC needs no special term for any of that: a memo recorded seconds ago is
-     * the newest row there is, so it sorts to the top on its own, and the list keeps one
-     * order whether or not a filter is active.
+     * created_at DESC needs no special term for any of that, and it is now also the only
+     * ordering that makes the date filter legible: a list filtered to a range should read
+     * in the same direction as the unfiltered one.
      *
-     * What the pin does not survive is the LIMIT, and only for a memo that has been
-     * in-flight long enough to stop being near the top -- one stuck behind a stopped worker
-     * for days. Measured: with 60 newer matches and `limit=50`, a ten-day-old queued memo is
-     * not in the response. Left as is, because the unfiltered list drops that same row for
-     * the same reason, so the filter is not hiding anything the app would otherwise show,
-     * and pinning it regardless would mean a UNION with a limit of its own -- which then
-     * makes a stalled queue able to crowd the matches out of the page instead. The window
-     * the pin exists for is seconds long, and it is comfortably inside this.
+     * **The plans, measured on 5,002 rows.** Worth recording because the interesting one
+     * is not the one that sounds interesting:
+     *
+     *   * `collection = <uuid>` is a Bitmap Index Scan on memos_collection_idx with the
+     *     text arms as a recheck filter.
+     *   * a date window is an Index Cond on memos_created_idx -- `created_at >= ... AND
+     *     created_at < ...` -- with everything else filtered on top. That is the plan a
+     *     bounded list wants: the index walk is already in output order and the window
+     *     ends it.
+     *   * `collection = none` with four fifths of the table unfiled does *not* use
+     *     memos_collection_idx, and should not: it walks memos_created_idx and filters,
+     *     which the LIMIT makes cheaper because nearly every row is a match. 003's
+     *     comment on that index has the inverted measurement.
      *
      * @return list<Memo>
      */
-    public function search(string $query, int $limit): array
+    public function list(MemoQuery $query): array
     {
-        // Built from the constant rather than written out, so adding a status to
-        // Memo::inFlightStatuses() cannot leave the placeholder count behind and turn a
-        // lifecycle change into a bound-parameter mismatch.
-        $inFlight = implode(', ', array_fill(0, count(Memo::inFlightStatuses()), '?'));
+        /** @var list<string> $where */
+        $where = [];
+
+        /** @var list<mixed> $bindings */
+        $bindings = [];
+
+        if ($query->text !== null) {
+            // Built from the constant rather than written out, so adding a status to
+            // Memo::inFlightStatuses() cannot leave the placeholder count behind and turn
+            // a lifecycle change into a bound-parameter mismatch.
+            $inFlight = implode(', ', array_fill(0, count(Memo::inFlightStatuses()), '?'));
+
+            $where[] = "(search_vector @@ websearch_to_tsquery('english', ?)"
+                .' OR transcript ILIKE ?'
+                ." OR status IN ({$inFlight}))";
+
+            $bindings[] = $query->text;
+            $bindings[] = self::likePattern($query->text);
+
+            foreach (Memo::inFlightStatuses() as $status) {
+                $bindings[] = $status;
+            }
+        }
+
+        // Two separate predicates rather than a BETWEEN, because BETWEEN is inclusive at
+        // both ends and this interval is half-open. See App\Support\TimeWindow for why the
+        // last millisecond of a day is not something to hand-wave.
+        if ($query->window->from !== null) {
+            $where[] = 'created_at >= ?';
+            $bindings[] = $query->window->from;
+        }
+
+        if ($query->window->to !== null) {
+            $where[] = 'created_at < ?';
+            $bindings[] = $query->window->to;
+        }
+
+        // `unfiledOnly` wins over `collectionId` if both were somehow set, and nothing can
+        // set both: ListMemosRequest spells the scope as one `?collection=` parameter, so
+        // there is no request that asks for a memo that is both filed and unfiled. The
+        // elseif states the precedence anyway rather than leaving it to argument order.
+        if ($query->unfiledOnly) {
+            $where[] = 'collection_id IS NULL';
+        } elseif ($query->collectionId !== null) {
+            $where[] = 'collection_id = ?';
+            $bindings[] = $query->collectionId;
+        }
+
+        // $limit is bound rather than interpolated. Laravel binds a PHP int as
+        // PDO::PARAM_INT, which is what a parameterised LIMIT needs; the value reaching
+        // here has already been validated by ListMemosRequest, so the bound parameter
+        // is defence in depth rather than the only check.
+        $bindings[] = $query->limit;
 
         $rows = $this->db->connection()->select(
             'SELECT '.self::COLUMNS
-                ." FROM memos\n"
-                ."WHERE (search_vector @@ websearch_to_tsquery('english', ?) OR transcript ILIKE ?)\n"
-                ."   OR status IN ({$inFlight})\n"
-                ."ORDER BY created_at DESC\n"
-                .'LIMIT ?',
-            [
-                $query,
-                self::likePattern($query),
-                ...Memo::inFlightStatuses(),
-                $limit,
-            ],
+                ."\nFROM memos"
+                .($where === [] ? '' : "\nWHERE ".implode("\n  AND ", $where))
+                ."\nORDER BY created_at DESC"
+                ."\nLIMIT ?",
+            $bindings,
         );
 
         return $this->hydrate($rows);
+    }
+
+    /**
+     * One memo by id, or null when there is no such row.
+     *
+     * Exists for the reminder routes: adding or acknowledging a reminder answers with the
+     * memo it belongs to rather than with the reminder alone, so the frontend reconciles
+     * one shape by id and never has to merge a reminder into a row itself. The read after
+     * the write is what makes that possible without duplicating the aggregate in COLUMNS
+     * into a second projection.
+     */
+    public function find(string $id): ?Memo
+    {
+        $rows = $this->db->connection()->select(
+            'SELECT '.self::COLUMNS.' FROM memos WHERE id = ?',
+            [$id],
+        );
+
+        $row = $rows[0] ?? null;
+
+        return $row instanceof stdClass ? Memo::fromRow($row) : null;
+    }
+
+    /**
+     * File a memo into a collection, or move it back to the fast strip with null.
+     *
+     * One UPDATE with RETURNING, so the caller gets the memo in its new state without a
+     * follow-up SELECT -- the same reason insert() returns a row, and it matters more here
+     * because `updated_at` is set by the trigger from 002 and PHP has no way to know what
+     * it became.
+     *
+     * Returns null for "no such memo", which the controller turns into a 404. An UPDATE
+     * that matches nothing is not an error in SQL, so distinguishing it from a successful
+     * write is exactly what checking the returned row is for.
+     *
+     * **Both failure modes are the caller's fault and both are 404s, not 500s.** A memo id
+     * that does not exist matches no row and comes back null. A *collection* id that does
+     * not exist raises a foreign key violation, which is caught here and returned as
+     * false-ish in the same way -- because from the client's side they are the same
+     * mistake, naming something that is not there, and a 500 for one of them would put a
+     * stack trace on stderr for a bad request. The controller has no way to tell the two
+     * apart afterwards and does not need to; the message it answers with names both
+     * possibilities.
+     *
+     * Not wrapped in a transaction: it is one statement.
+     *
+     * @param  ?string  $collectionId  Null unfiles the memo. That is a real operation
+     *                                 rather than a cleared field -- it is how a memo gets
+     *                                 back out of a collection the user put it in by
+     *                                 mistake -- so it is spelled as a value and not as an
+     *                                 omitted argument.
+     */
+    public function moveToCollection(string $memoId, ?string $collectionId): ?Memo
+    {
+        try {
+            $rows = $this->db->connection()->selectFromWriteConnection(
+                'UPDATE memos SET collection_id = ? WHERE id = ? RETURNING '.self::COLUMNS,
+                [$collectionId, $memoId],
+            );
+        } catch (QueryException $e) {
+            // Rethrown unless it is the one code that means "you named a collection that
+            // does not exist". Anything else here -- a dead connection, a disk full -- is
+            // genuinely a 500 and must not be flattened into a 404.
+            if (! self::isSqlState($e, self::FOREIGN_KEY_VIOLATION)) {
+                throw $e;
+            }
+
+            return null;
+        }
+
+        $row = $rows[0] ?? null;
+
+        return $row instanceof stdClass ? Memo::fromRow($row) : null;
     }
 
     /**
@@ -321,11 +448,34 @@ class MemoRepository
      * Public and static so it can be tested for what it returns rather than for what
      * Postgres does with it: LikePatternTest asserts the pattern this builds for `50%`, so
      * what is pinned is the escaping that prevents those 102 rows rather than the count
-     * itself, which would need a live database to reach.
+     * itself, which would need a live database to reach. CollectionRepository reuses it
+     * for the same reason on its own name filter.
      */
     public static function likePattern(string $query): string
     {
         return '%'.str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $query).'%';
+    }
+
+    /**
+     * Whether a QueryException carries a particular SQLSTATE.
+     *
+     * `errorInfo[0]` first, and `getCode()` only as a fallback, because the two do not
+     * agree as reliably as they look. PDOException::getCode() is documented as the
+     * SQLSTATE and is a *string* there rather than the int the Throwable interface
+     * declares -- but a QueryException raised before the driver ever answered (a
+     * connection that could not be opened) carries no errorInfo and a code of 0, and
+     * some drivers report `HY000` in getCode() while putting the real state in
+     * errorInfo. Reading the array first and comparing as a string is what makes this
+     * mean the same thing in every case.
+     *
+     * Public and static so CollectionRepository can use it for the unique-name violation
+     * without a second copy of the same subtlety.
+     */
+    public static function isSqlState(QueryException $e, string $sqlState): bool
+    {
+        $reported = $e->errorInfo[0] ?? $e->getCode();
+
+        return is_scalar($reported) && (string) $reported === $sqlState;
     }
 
     /**

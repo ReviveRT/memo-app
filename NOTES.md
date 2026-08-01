@@ -2,10 +2,121 @@
 
 Decisions and trade-offs that the code cannot state for itself.
 
-> **Status: partial.** MEMO-27 owns this file and writes the rest of it. The two
+> **Status: partial.** MEMO-27 owns this file and writes the rest of it. The
 > entries below are here early for the same reason: each is a contract that
-> several files — and, in both cases, two different runtimes — have to agree
+> several files — and, in every case, two different runtimes — have to agree
 > about, so it cannot live in any one of them.
+
+## The date filter is half-open, and the browser owns the timezone
+
+**Decision.** `GET /api/memos` and `GET /api/collections` take `from` and `to` as
+ISO 8601 **instants**, and the interval is **half-open**: `created_at >= from AND
+created_at < to`. The browser converts a chosen calendar day into that pair; the
+API has no timezone setting and no `tz` parameter. The two halves live in
+`web/src/composables/useDateRange.js` and `api/app/Support/TimeWindow.php`.
+
+**Why the timezone belongs to the browser.** "Yesterday" is a local question — the
+same instant is Sunday in Auckland and Saturday in Los Angeles — so only the client
+knows which 24 hours were meant. Giving the API a `tz` parameter would mean two
+places that both believe they know the user's zone, and the failure when they
+disagree is a filter that is silently off by hours. Sending instants leaves exactly
+one place that can be wrong.
+
+**Why half-open rather than an inclusive `to`.** The obvious alternative is to end
+the range at `23:59:59` on the last day. It drops every row written in the last
+second of the range — and `created_at` is a `timestamptz` with microsecond
+precision and the wire format carries milliseconds, so it really drops the last 999
+ms as well. Nothing surfaces: the list is simply short, at the boundary, for the
+newest rows, which is the hardest kind of gap to notice because the newest rows are
+the ones being looked at.
+
+The cost is that the client has to add a day, and that is a real trap: a range
+ending on the 23rd must be sent as `to = 24th 00:00`. Getting it wrong excludes the
+whole last day. Two things guard it — `useDateRange` adds the day in one place and
+subtracts it back for the caption, so the `+1` never reaches the screen; and the API
+**refuses** `to <= from` with a 422 rather than answering an empty list, because an
+empty list is exactly how that bug hides.
+
+**What the filter does not bend for.** The in-flight pin — the rule that a memo
+still being transcribed stays in a filtered list regardless of match — is scoped
+*inside* the text predicate, so it cannot escape the date window or the collection
+scope. Without that, a memo recorded ten seconds ago would appear in a list filtered
+to yesterday, and an unfiled memo would appear inside every collection. Both read as
+the filter being broken. Verified against a live Postgres: a queued memo is returned
+for `?q=nomatch`, returned for `?q=nomatch&collection=<its own>`, and **not**
+returned for `?q=nomatch&collection=<another>` or for a window it falls outside.
+
+**What was rejected.**
+
+- *`?from=2026-07-19&to=2026-07-23` as calendar dates.* Reads better in a hand-written
+  `curl`, and needs the API to decide what timezone a bare date is in — which is the
+  variable this design removes.
+- *An inclusive `to`.* Above.
+- *Clamping an inverted range instead of refusing it.* A 422 names the problem; an
+  empty list is indistinguishable from having no memos.
+
+## Reminders are stored in Postgres and delivered by an open tab
+
+**Decision.** A reminder is a row in `reminders` with an absolute `remind_at`. The
+browser polls `GET /api/reminders` for what is still owed, schedules a timer against
+the soonest, shows it, and `PATCH`es it delivered. There is no service worker, no
+Web Push, and nothing server-side that fires anything.
+
+**What that promises, and what it does not.** With the app open in a tab, a reminder
+arrives on time. With it closed, nothing arrives until it is opened again. That
+limit is stated on the card itself rather than only here, because a user setting a
+7am alarm and shutting the laptop would otherwise reasonably expect it to go off.
+
+**Why the delivery time lives on the server.** `delivered_at` is what makes a
+reminder fire once rather than once per page load, and it is a column rather than
+browser state because the reminder is not browser state — two tabs, or a reload
+mid-delivery, would each fire it again. The `UPDATE` is
+`SET delivered_at = coalesce(delivered_at, now())`, which makes acknowledging
+idempotent: a retry after a dropped response keeps the *first* delivery time, where
+`SET delivered_at = now()` would rewrite it. Verified against a live Postgres — two
+PATCHes to the same reminder answered the same timestamp. The alternative guard,
+`WHERE delivered_at IS NULL`, is worse in a visible way: the second acknowledgement
+matches no row and comes back a 404, telling the client a reminder it is looking at
+does not exist.
+
+**Why `now()` and not a timestamp from the client.** This column is the only thing
+that can answer "did reminders arrive on time?", and a browser clock is not
+something to write it from.
+
+**Why there is a `GET /api/reminders` at all,** when every other reminder route
+answers with the memo: the delivery loop has to know about reminders on memos that
+are nowhere on screen. The fast strip holds only unfiled memos, so a reminder set
+and then filed into a collection would silently never fire. It is a small flat row
+per reminder — id, memo id, an 80-character label, the time, the note — rather than
+a memo, because a notification body shows about that much and the transcript is the
+largest thing on the row.
+
+**Two delivery paths, deliberately.** Due while the app is open gets a system
+notification plus an in-app card; due while it was closed gets the card only. A
+single "always notify" rule turns a weekend away into eleven system notifications at
+once. Both paths acknowledge, so nothing is shown twice.
+
+**Permission is requested when the first reminder is set,** never on load. An
+unprompted request has no user gesture behind it, which Chrome and Firefox suppress
+or auto-deny — and a denial is permanent, so a badly timed ask does not merely fail,
+it removes the option. Refusal costs the system notification and nothing else.
+
+**What was rejected.**
+
+- *`remind_at` and `note` as columns on `memos`.* The card offers an alarm *and* a
+  timer, and they are not alternatives — setting one must not silently clear the
+  other. A table costs a correlated subquery on the memo projection, which is paid
+  because the list has to badge a memo that has something pending.
+- *A `delivered` boolean.* A reminder shown four hours late and one shown on time are
+  both "delivered", and the difference is the whole of what anyone would complain
+  about.
+- *A scheduler in the `ai-worker`, or Web Push.* Either would deliver with the app
+  closed, and both are a different feature: key management, a push endpoint, and a
+  second thing that owes the user something on a timer. The honest small version
+  ships first and says what it does.
+- *Filtering the pending list to `remind_at <= now()`.* The browser needs the ones
+  that have *not* fired yet — that is what a timer is scheduled against. Filtering to
+  what is already due would leave the client polling to discover the future.
 
 ## `updated_at` is maintained by a trigger, not by convention
 

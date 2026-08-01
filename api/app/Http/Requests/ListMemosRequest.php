@@ -4,17 +4,41 @@ declare(strict_types=1);
 
 namespace App\Http\Requests;
 
+use App\Http\Requests\Concerns\FiltersByTime;
 use App\Http\Rules\NoNullBytes;
+use App\Services\Memos\MemoQuery;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Support\Str;
 
 /**
  * Validation for GET /api/memos.
  *
- * Two parameters: `limit`, which bounds the single unpaginated page, and `q`, which
- * filters it. Neither may quietly widen the other -- see MAX_LIMIT.
+ * Five parameters now: `limit`, which bounds the single unpaginated page, `q`, which
+ * filters it by text, `from` and `to`, which bound it by creation time, and `collection`,
+ * which scopes it to one collection or to the memos in none. None of them may quietly
+ * widen another -- see MAX_LIMIT.
+ *
+ * All four filters are independent and any combination is a valid request, which is why
+ * the repository assembles one statement rather than offering a method per shape.
  */
 final class ListMemosRequest extends FormRequest
 {
+    use FiltersByTime;
+
+    /**
+     * `?collection=none` -- the fast strip: memos filed nowhere.
+     *
+     * One parameter with three readings (absent, `none`, an id) rather than a
+     * `collection_id` plus an `unassigned` flag, and that is worth the magic value. Two
+     * parameters can contradict each other -- `?collection_id=<uuid>&unassigned=1` asks
+     * for a memo that is both filed and unfiled -- and something then has to decide which
+     * one wins, in a place no reader of the URL can see. One parameter cannot say both.
+     *
+     * Not a collision risk with a real id: this is matched before the uuid check, and no
+     * uuid is the string `none`.
+     */
+    public const COLLECTION_NONE = 'none';
+
     /** The default the task specifies. Enough to fill a screen several times over. */
     public const DEFAULT_LIMIT = 50;
 
@@ -62,11 +86,11 @@ final class ListMemosRequest extends FormRequest
     }
 
     /**
-     * @return array<string, list<string|NoNullBytes>>
+     * @return array<string, mixed>
      */
     public function rules(): array
     {
-        return [
+        return $this->timeWindowRules() + [
             // nullable, so `?limit=` means "unset" rather than 422. That matches
             // App\Support\Env, which exists because a set-but-empty value is the
             // normal output of a template that had nothing to put in it -- here, a
@@ -87,6 +111,30 @@ final class ListMemosRequest extends FormRequest
             // a validation failure -- the difference from StoreMemoRequest, where a
             // blank `text` is a memo with nothing in it.
             'q' => ['sometimes', 'nullable', 'string', 'max:'.self::MAX_QUERY_LENGTH, new NoNullBytes],
+
+            // A closure rather than a rule class, unlike NoNullBytes and SniffedAudioType.
+            // Those two exist as classes because what they enforce is subtle and shared --
+            // the driver's NUL truncation, and sniffing bytes rather than trusting a
+            // filename. This is neither: it is one field on one route, and the two things
+            // it accepts are both named in the message it fails with.
+            //
+            // Checked in this order because `none` is not a uuid, so the uuid test has to
+            // be the fallback rather than the gate.
+            'collection' => [
+                'sometimes',
+                'nullable',
+                'string',
+                function (string $attribute, mixed $value, callable $fail): void {
+                    if ($value === self::COLLECTION_NONE || Str::isUuid($value)) {
+                        return;
+                    }
+
+                    $fail(
+                        'The :attribute field must be a collection id or "'
+                            .self::COLLECTION_NONE.'" for memos in no collection.'
+                    );
+                },
+            ],
         ];
     }
 
@@ -102,12 +150,19 @@ final class ListMemosRequest extends FormRequest
      * looking at.
      *
      * `limit` is left alone. It is already an English word, and nothing in the UI sends it.
+     * `collection` is left alone too, and for a stronger reason: its only failure message
+     * is the one written in rules() above, which already names what it wants.
+     *
+     * The trait's two are merged rather than inherited, because a trait cannot contribute
+     * to a method the using class also defines -- PHP resolves that as the class winning
+     * outright, silently. Spelling the merge out is what stops `from` and `to` losing their
+     * names the moment this method exists.
      *
      * @return array<string, string>
      */
     public function attributes(): array
     {
-        return ['q' => 'filter'];
+        return ['q' => 'filter'] + $this->timeWindowAttributes();
     }
 
     /**
@@ -143,5 +198,32 @@ final class ListMemosRequest extends FormRequest
         $query = $this->validated()['q'] ?? null;
 
         return is_string($query) && $query !== '' ? $query : null;
+    }
+
+    /**
+     * Everything above, as the one object the service and repository take.
+     *
+     * Assembled here rather than in the controller because this is the class that knows
+     * what each parameter means once validated -- that a blank `q` is no filter, that
+     * `collection=none` is not a collection id, that an absent `limit` is
+     * DEFAULT_LIMIT. The controller's job is to hand the result on and serialise what
+     * comes back.
+     *
+     * The three-way read of `collection` happens here and nowhere else, which is the
+     * point of the parameter being one field: `unfiledOnly` and `collectionId` reach
+     * MemoQuery already reconciled, so no layer below this can be handed both.
+     */
+    public function memoQuery(): MemoQuery
+    {
+        $collection = $this->validated()['collection'] ?? null;
+        $collection = is_string($collection) && $collection !== '' ? $collection : null;
+
+        return new MemoQuery(
+            window: $this->timeWindow(),
+            text: $this->searchQuery(),
+            collectionId: $collection === self::COLLECTION_NONE ? null : $collection,
+            unfiledOnly: $collection === self::COLLECTION_NONE,
+            limit: $this->limit(),
+        );
     }
 }

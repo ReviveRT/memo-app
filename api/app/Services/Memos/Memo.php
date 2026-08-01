@@ -112,12 +112,22 @@ final class Memo
     private const REQUIRED_COLUMNS = [
         'id', 'source', 'status', 'transcript', 'title',
         'summary', 'tags', 'duration_ms', 'last_error', 'created_at_iso',
+        'collection_id', 'reminders',
     ];
 
     /**
      * @param  list<string>  $tags
      * @param  string  $createdAt  Already ISO-8601 in UTC; the repository asks Postgres
      *                             to format it. See MemoRepository::COLUMNS.
+     * @param  ?string  $collectionId  The collection this memo is filed in, or null for a
+     *                                 fast memo. Null is a state rather than missing data:
+     *                                 it is what puts the memo in the strip at the top of
+     *                                 the page, and 003_collections_and_reminders.sql has
+     *                                 the argument for one column instead of a join table.
+     * @param  list<Reminder>  $reminders  Soonest first. Empty for most memos, and always
+     *                                     an array -- the aggregate in
+     *                                     MemoRepository::COLUMNS coalesces to `[]` so no
+     *                                     reader needs a null check before iterating.
      */
     public function __construct(
         public readonly string $id,
@@ -130,6 +140,8 @@ final class Memo
         public readonly ?int $durationMs,
         public readonly ?string $lastError,
         public readonly string $createdAt,
+        public readonly ?string $collectionId = null,
+        public readonly array $reminders = [],
     ) {}
 
     /**
@@ -172,6 +184,8 @@ final class Memo
 
             lastError: self::nullableString($row->last_error),
             createdAt: (string) $row->created_at_iso,
+            collectionId: self::nullableString($row->collection_id),
+            reminders: self::reminders($row->reminders),
         );
     }
 
@@ -189,6 +203,11 @@ final class Memo
             'duration_ms' => $this->durationMs,
             'last_error' => $this->lastError,
             'created_at' => $this->createdAt,
+            'collection_id' => $this->collectionId,
+            'reminders' => array_map(
+                static fn (Reminder $reminder): array => $reminder->toArray(),
+                $this->reminders,
+            ),
         ];
     }
 
@@ -224,6 +243,51 @@ final class Memo
             static fn (mixed $tag): string => is_scalar($tag) ? (string) $tag : '',
             $decoded,
         ));
+    }
+
+    /**
+     * The reminders aggregate, decoded.
+     *
+     * Arrives as a jsonb array built by MemoRepository::COLUMNS rather than as separate
+     * rows, because a memo and its reminders come back from one statement -- the list
+     * badges a memo that has something pending, so every row needs them. That is the same
+     * reason `tags` above is jsonb: assembling it in SQL means PHP never has to know
+     * Postgres' quoting rules.
+     *
+     * A non-array element is skipped rather than coerced. `tags` turns a non-scalar into
+     * an empty string because a tag is a string and an empty one is harmless; a reminder
+     * is an object with an id that has to be usable to acknowledge or delete it, and there
+     * is no empty reminder to fall back to. Reminder::fromJson is the loud half of this
+     * -- an object present but missing a key throws rather than being skipped, because
+     * that means the aggregate and the mapper disagree.
+     *
+     * @return list<Reminder>
+     *
+     * @throws JsonException
+     */
+    private static function reminders(mixed $value): array
+    {
+        if (! is_string($value)) {
+            return [];
+        }
+
+        /** @var mixed $decoded */
+        $decoded = json_decode($value, true, flags: JSON_THROW_ON_ERROR);
+
+        if (! is_array($decoded)) {
+            return [];
+        }
+
+        $reminders = [];
+
+        foreach ($decoded as $row) {
+            if (is_array($row)) {
+                /** @var array<string, mixed> $row */
+                $reminders[] = Reminder::fromJson($row);
+            }
+        }
+
+        return $reminders;
     }
 
     private static function nullableString(mixed $value): ?string

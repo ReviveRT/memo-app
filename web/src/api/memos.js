@@ -1,24 +1,23 @@
 /*
- * The two calls MEMO-06 exposes, and the only place in this app that knows the
- * wire format.
+ * Every call this app makes about a memo, and the only place in it that knows the
+ * wire format. Collections have their own file; reminders live here, because every
+ * reminder route answers with the memo it belongs to and so returns this file's shape.
  *
  * Relative paths on purpose -- `/api/memos`, not an absolute base URL. The dev
  * server proxies /api to the API container (vite.config.js), so same-origin is what
  * makes this app need no CORS handling, no base-URL variable and no build-time
  * configuration at all.
  *
- * Both responses are envelopes, `{"memos": [...]}` and `{"memo": {...}}`, rather
+ * Every response is an envelope, `{"memos": [...]}` and `{"memo": {...}}`, rather
  * than a bare array and a bare row. That was decided for a search that did not exist
- * yet, and the room got used: the list now also carries `query`. Nothing already read
- * here changed type; see api/app/Http/Controllers/MemoController.php.
+ * yet, and the room has been used twice over: the list carries `query` and now also
+ * `from`, `to` and `collection`. Nothing already read here has changed type -- `query`
+ * is still a string or null -- see api/app/Http/Controllers/MemoController.php.
  */
-
-/** Matches application/json and the +json suffix types, ignoring any charset. */
-const JSON_CONTENT_TYPE = /^application\/(?:[\w.+-]+\+)?json\b/i
+import { JSON_CONTENT_TYPE, request } from './request'
 
 /**
- * GET /api/memos -- newest first, capped by the API's own default limit of 50, and
- * filtered by `query` when there is one.
+ * Builds a query string from a filter, leaving out everything that is not set.
  *
  * URLSearchParams rather than a template string, and it is load-bearing rather than
  * tidy: the query is somebody's raw typing, and `&`, `#`, `+` and `%` all mean something
@@ -29,28 +28,172 @@ const JSON_CONTENT_TYPE = /^application\/(?:[\w.+-]+\+)?json\b/i
  * for LIKE rather than for URLs -- two different syntaxes, two separate escapes, neither
  * standing in for the other.
  *
- * @param {?string} query Null for the unfiltered list. An empty string would be sent as
- *   `?q=` and mean the same thing to the API, but null keeps the parameter off the URL
- *   entirely so the common request has one canonical form.
- * @returns {Promise<{memos: Array<object>, query: ?string}>} The rows, and the filter the
- *   API says they came back for. See useMemos for what the echo is used for.
+ * Absent parameters are omitted rather than sent empty. `?q=` and no `q` at all mean the
+ * same thing to the API -- both collapse to "no filter" -- but omitting them keeps the
+ * common request to one canonical form, which is what makes a URL in a network log worth
+ * reading.
+ *
+ * Exported because collections.js sends the same three of these against its own route: the
+ * search box and the date filter behave identically on both screens, which is a property of
+ * the API's contract (see ListCollectionsRequest) and is kept true here by the two callers
+ * building their query strings with one function.
+ *
+ * @param {{query?: ?string, from?: ?string, to?: ?string, collection?: ?string}} filter
+ * @returns {string} Including the leading `?`, or empty when nothing is filtered.
  */
-export async function listMemos(query = null) {
-  const path =
-    query === null ? '/api/memos' : `/api/memos?${new URLSearchParams({ q: query }).toString()}`
+export function filterQueryString({ query = null, from = null, to = null, collection = null }) {
+  const params = new URLSearchParams()
 
-  const body = await request(path)
+  if (query !== null && query !== '') {
+    params.set('q', query)
+  }
+
+  // The two dates are ISO instants, not calendar dates: the browser turns "yesterday" into a
+  // pair of absolute times because only it knows the reader's timezone. See useDateRange,
+  // and App\Support\TimeWindow on the other side, for why the interval is half-open.
+  if (from !== null) {
+    params.set('from', from)
+  }
+
+  if (to !== null) {
+    params.set('to', to)
+  }
+
+  // 'none' for the fast strip, an id for one collection, absent for everything. One
+  // parameter with three readings, so a request cannot ask for both at once.
+  if (collection !== null) {
+    params.set('collection', collection)
+  }
+
+  const encoded = params.toString()
+
+  return encoded === '' ? '' : `?${encoded}`
+}
+
+/**
+ * GET /api/memos -- newest first, capped by the API's own default limit of 50, and narrowed
+ * by whichever of the four filters are set.
+ *
+ * @param {{query?: ?string, from?: ?string, to?: ?string, collection?: ?string}} [filter]
+ * @returns {Promise<{memos: Array<object>, query: ?string, from: ?string, to: ?string,
+ *   collection: ?string}>} The rows, and the filters the API says they came back for. See
+ *   useMemos for what the echo is used for.
+ */
+export async function listMemos(filter = {}) {
+  const body = await request(`/api/memos${filterQueryString(filter)}`)
 
   return {
     // Defensive because the alternative is a template crash: `v-for` over a
     // non-iterable throws inside the render function, and the stack trace names
-    // MemoList rather than the response that caused it.
+    // MemoStrip rather than the response that caused it.
     memos: Array.isArray(body?.memos) ? body.memos : [],
 
-    // Normalised to null for anything that is not a string, so callers compare against
+    // Each normalised to null for anything that is not a string, so callers compare against
     // one absent value rather than against null, undefined and a missing key.
-    query: typeof body?.query === 'string' ? body.query : null,
+    query: echoed(body?.query),
+    from: echoed(body?.from),
+    to: echoed(body?.to),
+    collection: echoed(body?.collection),
   }
+}
+
+/** One echoed filter, normalised so absent has exactly one spelling. */
+function echoed(value) {
+  return typeof value === 'string' ? value : null
+}
+
+/**
+ * PATCH /api/memos/{id} -- file a memo into a collection, or take it back out.
+ *
+ * `collectionId` of null is the unfile, and it is sent as an explicit `null` rather than by
+ * omitting the key. The API requires the field to be *present* (UpdateMemoRequest uses
+ * `present` + `nullable`) precisely so that a body which forgot it is a 422 rather than a
+ * 200 that changed nothing -- so JSON.stringify has to emit `{"collection_id":null}`, which
+ * it does for null and would not for undefined.
+ *
+ * @param {string} id
+ * @param {?string} collectionId
+ * @returns {Promise<object>} The memo in its new state.
+ */
+export async function patchMemo(id, collectionId) {
+  return storedMemo(
+    await request(`/api/memos/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ collection_id: collectionId }),
+    }),
+  )
+}
+
+/**
+ * POST /api/memos/{id}/reminders -- set an alarm or a timer on a memo.
+ *
+ * @param {string} memoId
+ * @param {string} remindAt An absolute instant, ISO 8601. Both of the card's controls
+ *   produce one of these: an alarm converts the picked local date and time, and a timer adds
+ *   its minutes to the current clock. The API never learns which it was, and does not need
+ *   to.
+ * @param {?string} note
+ * @returns {Promise<object>} The memo, now carrying the reminder.
+ */
+export async function createReminder(memoId, remindAt, note = null) {
+  return storedMemo(
+    await request(`/api/memos/${encodeURIComponent(memoId)}/reminders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ remind_at: remindAt, note }),
+    }),
+  )
+}
+
+/**
+ * GET /api/reminders -- every reminder still owed, soonest first.
+ *
+ * The one reminder call that does not answer with a memo, because it is the one that is not
+ * about a memo the caller is holding. The delivery loop has to know about a reminder set on a
+ * memo filed inside a collection nobody has opened -- the fast strip cannot see it -- so this
+ * reads across all of them and carries just a label per row rather than the memos themselves.
+ *
+ * Rows are `{id, memo_id, memo_label, remind_at, note}`. No `delivered_at`: everything here
+ * is by definition undelivered, so a column that would be null on every row is not sent.
+ *
+ * @returns {Promise<Array<object>>}
+ */
+export async function listPendingReminders() {
+  const body = await request('/api/reminders')
+
+  return Array.isArray(body?.reminders) ? body.reminders : []
+}
+
+/**
+ * PATCH /api/reminders/{id} -- record that a reminder has been shown.
+ *
+ * No body: the delivery time is `now()` in SQL rather than anything this sends, because a
+ * browser's clock has no business writing the column used to judge whether reminders arrive
+ * late. Idempotent on the server, which matters here -- this is called from a timer, and a
+ * retry after a dropped response must not move the timestamp or 404.
+ *
+ * @param {string} id
+ * @returns {Promise<object>} The memo, with that reminder marked delivered.
+ */
+export async function acknowledgeReminder(id) {
+  return storedMemo(
+    await request(`/api/reminders/${encodeURIComponent(id)}`, { method: 'PATCH' }),
+  )
+}
+
+/**
+ * DELETE /api/reminders/{id} -- drop a reminder that was set by mistake.
+ *
+ * Answers with the memo rather than 204, so the card can re-render from one shape.
+ *
+ * @param {string} id
+ * @returns {Promise<object>} The memo, without that reminder.
+ */
+export async function deleteReminder(id) {
+  return storedMemo(
+    await request(`/api/reminders/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  )
 }
 
 /**
@@ -215,71 +358,4 @@ function storedMemo(body) {
   }
 
   return body.memo
-}
-
-/**
- * One fetch, one JSON body, and an Error whose message is safe to render.
- *
- * Every failure this can produce ends up in front of the user as `error.message`,
- * so each of the three branches below has to say something a human can act on:
- *
- *   1. fetch() rejected. It only does that for a transport failure -- the dev
- *      server itself is gone -- never for a 4xx or 5xx.
- *   2. The response is not JSON. The API answers JSON for every status including 404
- *      and 500 (shouldRenderJsonWhen in api/bootstrap/app.php), so a non-JSON body
- *      means the answer did not come from the API: it came from the dev server's proxy
- *      failing to reach it. Verified by stopping the api container -- the proxy answers
- *      `502 Bad Gateway`, `Content-Type: text/plain`, zero bytes of body -- and so is
- *      the reason for the branch: calling .json() on that throws `SyntaxError: Failed
- *      to execute 'json' on 'Response': Unexpected end of JSON input`, which reads as a
- *      bug in this file rather than as a container that is down.
- *   3. A JSON error body. Laravel puts the first validation failure in `message`, so a
- *      422 already reads as "The text field is required." and there is no need to walk
- *      the `errors` map to say the same thing.
- *
- *      A 500 is the weak case and deliberately not improved here: with APP_DEBUG off
- *      the API answers `{"message":"Server Error"}` -- checked, by stopping the db
- *      container -- so that is what the user sees, and the detail is on the api
- *      container's stderr where LOG_CHANNEL puts it. MEMO-17 owns failure UX and is
- *      where a better answer belongs; inventing one here would be a second, different
- *      story about the same 500.
- */
-async function request(path, init) {
-  let response
-
-  try {
-    response = await fetch(path, init)
-  } catch (cause) {
-    throw new Error('Could not reach the app server. Is the stack still running?', { cause })
-  }
-
-  const notFromTheApi = () =>
-    new Error(
-      `The API did not answer (HTTP ${response.status}). Check that the api container is up: docker compose ps`,
-    )
-
-  if (!JSON_CONTENT_TYPE.test(response.headers.get('content-type') ?? '')) {
-    throw notFromTheApi()
-  }
-
-  let body
-
-  try {
-    body = await response.json()
-  } catch {
-    // A body that claims to be JSON can still be truncated -- the api container dying
-    // mid-response. That is the same failure as case 2 from where the user is standing,
-    // and an unhandled SyntaxError here would instead read as a bug in this file.
-    throw notFromTheApi()
-  }
-
-  if (!response.ok) {
-    throw new Error(
-      typeof body?.message === 'string' && body.message !== ''
-        ? body.message
-        : `The API answered HTTP ${response.status}.`,
-    )
-  }
-
-  return body
 }

@@ -6,6 +6,7 @@ namespace Tests\Support;
 
 use App\Repositories\MemoRepository;
 use App\Services\Memos\Memo;
+use App\Services\Memos\MemoQuery;
 
 /**
  * Stands in for MemoRepository so the HTTP contract can be tested without Postgres.
@@ -32,27 +33,40 @@ final class FakeMemoRepository extends MemoRepository
      */
     public array $inserted = [];
 
-    /** What recent() hands back. Set this to whatever the test needs to see rendered.
+    /** What list() and find() hand back. Set this to whatever the test needs to see rendered.
      *
      * @var list<Memo>
      */
     public array $rows = [];
 
-    /** The limit the last call was made with, which is how the default is asserted. */
-    public ?int $lastLimit = null;
+    /**
+     * The MemoQuery list() was last called with, or null if it has not been called.
+     *
+     * One recorded object rather than the four separate fields this fake used to keep
+     * (`lastLimit`, `lastQuery`, `searched`), and the collapse is the point: the repository no
+     * longer has two methods to distinguish between, so "was this a search?" is now a question
+     * about `$lastQuery->text` rather than about which method ran. Keeping the old flags would
+     * have meant a fake asserting on a distinction the real class stopped making.
+     *
+     * Several assertions ride on this: that a blank `?q=` arrives as null text rather than as
+     * a filter matching everything, that a query arrives trimmed and otherwise exactly as
+     * typed, that `?collection=none` becomes `unfiledOnly` rather than a null collection id,
+     * and that an absent `?limit=` becomes ListMemosRequest::DEFAULT_LIMIT.
+     */
+    public ?MemoQuery $lastQuery = null;
+
+    /** Every moveToCollection() call, in order, as `[memoId, collectionId]`.
+     *
+     * @var list<array{0: string, 1: ?string}>
+     */
+    public array $moved = [];
 
     /**
-     * The query search() was last called with, or null when the last call was recent().
-     *
-     * Two separate assertions ride on this: that a blank `?q=` reaches the unfiltered
-     * statement rather than a filter matching everything, and that a query arrives
-     * trimmed and otherwise exactly as it was typed -- the SQL is what interprets it, and
-     * nothing between the query string and the bound parameter may rewrite it.
+     * What moveToCollection() answers with. Null is the "no such memo or collection" case the
+     * controller turns into a 404, so the default has to be overridden by any test expecting
+     * a successful move.
      */
-    public ?string $lastQuery = null;
-
-    /** Whether the last call was search() rather than recent(). */
-    public bool $searched = false;
+    public ?Memo $moveResult = null;
 
     public function __construct() {}
 
@@ -82,6 +96,11 @@ final class FakeMemoRepository extends MemoRepository
         // sets, plus the defaults. created_at is fixed rather than generated, since a
         // test asserting on a clock it does not control is a test that fails at
         // midnight.
+        //
+        // `collectionId` and `reminders` are left at their defaults, which is what the real
+        // INSERT produces: every memo is created unfiled and with no reminders, and neither
+        // is a parameter of insert() -- see the repository for why filing is a separate
+        // operation.
         return new Memo(
             id: $id,
             source: $source,
@@ -96,35 +115,48 @@ final class FakeMemoRepository extends MemoRepository
         );
     }
 
-    /** @return list<Memo> */
-    public function recent(int $limit): array
+    /**
+     * Records the query and returns the rows the test set, whatever was asked for.
+     *
+     * Deliberately not filtering $rows to whatever matches. The filtering is
+     * websearch_to_tsquery, a trigram ILIKE, a status pin, two timestamp comparisons and a
+     * nullable-column test, and a PHP imitation of those would be a second, wrong definition
+     * of what the list does -- passing while the SQL was broken, or failing while it was
+     * right. Each arm was measured against a live Postgres and the numbers are recorded on
+     * MemoRepository::list; what this pins is everything up to it, which is the half that has
+     * an HTTP contract. MEMO-25 owns running the statement itself.
+     *
+     * @return list<Memo>
+     */
+    public function list(MemoQuery $query): array
     {
-        $this->lastLimit = $limit;
-        $this->lastQuery = null;
-        $this->searched = false;
+        $this->lastQuery = $query;
 
         return $this->rows;
     }
 
     /**
-     * Records the query and returns the same rows.
+     * The first row whose id matches, or null.
      *
-     * Deliberately not filtering $rows to whatever matches: the filtering is
-     * websearch_to_tsquery, a trigram ILIKE and a status pin, and a PHP imitation of
-     * those would be a second, wrong definition of what the search does -- passing while
-     * the SQL was broken, or failing while it was right. Each arm of that predicate was
-     * measured against a live Postgres and the numbers are recorded on
-     * MemoRepository::search; what this pins is everything up to it, which is the half
-     * that has an HTTP contract. MEMO-25 owns running the statement itself.
-     *
-     * @return list<Memo>
+     * This one *does* imitate the real query, because unlike list() there is nothing
+     * driver-specific to get wrong: "the row with this id" means the same thing in every
+     * database, and the reminder routes need it to answer with a memo at all.
      */
-    public function search(string $query, int $limit): array
+    public function find(string $id): ?Memo
     {
-        $this->lastLimit = $limit;
-        $this->lastQuery = $query;
-        $this->searched = true;
+        foreach ($this->rows as $memo) {
+            if ($memo->id === $id) {
+                return $memo;
+            }
+        }
 
-        return $this->rows;
+        return null;
+    }
+
+    public function moveToCollection(string $memoId, ?string $collectionId): ?Memo
+    {
+        $this->moved[] = [$memoId, $collectionId];
+
+        return $this->moveResult;
     }
 }
