@@ -387,6 +387,37 @@ only suggests a register. What is _not_ claimed is that it punctuates a long
 non-English recording as well as it does this one — there is no long non-English
 recording here to find out on.
 
+#### Shaping, after the model
+
+`ai/memo_ai/prose.py` then does the typographic half, which a punctuated transcript
+still needs: spacing around punctuation, a capital starting each sentence, the
+English pronoun `I`, a full stop on a transcript that ends without one, and
+paragraphs so a long memo is not one block. Its one invariant is that **no word is
+ever added, removed, reordered or respelled** — every rule touches whitespace,
+punctuation or letter case and nothing else, and a test asserts it over every
+fixture in the suite. A formatter that quietly improved somebody's wording would be
+indistinguishable from a transcription error.
+
+What it deliberately does not do is restore punctuation from the words. That is a
+real problem whose real solutions are all models, and guessing clause commas from
+English word order with regular expressions produces confident nonsense. The primer
+above is what makes the model punctuate; this layer only tidies what it produced.
+
+The paragraphs are **counted rather than heard**, and that is a concession. Reading
+breaks off the pauses in the recording is much better evidence — a speaker who
+stops for two seconds has changed subject — but the evidence is not there to read:
+whisper's segments tile the audio, so `segment.end` is the next segment's `start`
+and the gap between them is always exactly `0.00`. Only two of the seven real
+recordings here have more than one segment — the rest decode as a single span and
+offer no gap to measure at all — and across those two, one on each decode path, run
+with and without the primer, that is 28 inter-segment gaps and every one is zero. The
+segment boundaries are 30-second window cuts and land mid-sentence, so they carry
+no structure either. Genuine pause data does exist one level down, in
+`word_timestamps=True`, and that is where to start if you want the idea back; it
+was declined for now because it costs an extra alignment pass on every memo, and
+because the primer above is already proof that perturbing the decode options can
+break something else.
+
 Two other providers exist behind the same interface:
 
 | `STT_PROVIDER` | What happens |

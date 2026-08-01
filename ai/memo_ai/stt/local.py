@@ -69,7 +69,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from memo_ai import audio
+from memo_ai import audio, prose
 from memo_ai.stt.base import SttError, SttUnavailable, Transcript
 
 log = logging.getLogger(__name__)
@@ -526,7 +526,12 @@ class LocalWhisperStt:
             if info.duration <= 0:
                 raise SttError(_EMPTY)
 
-            text = self._decode(segments, info.duration)
+            # Shaped outside the deadline, and after `info` exists, because both
+            # things it needs are here: the language the model actually decoded in,
+            # which gates one of memo_ai/prose.py's rules, and the finished text.
+            # The shaping itself is regular expressions over a few kilobytes and
+            # does not want a timeout of its own.
+            text = prose.shape(self._decode(segments, info.duration), info.language)
         except SttError:
             raise
         except MemoryError:
