@@ -73,12 +73,43 @@ COMPUTE_TYPE = "int8"
 # Generous, because the thing it is waiting for is a download and the penalty for
 # being wrong is a failed memo. Not unbounded, because a stalled transfer would
 # otherwise hold a replica for as long as the socket stays open.
-MODEL_LOAD_TIMEOUT_SECONDS = 120.0
+#
+# Five minutes rather than the two this started at, because the default model
+# went from 142 MB to 1.6 GB. Most of that wait is normally already spent by the
+# time a memo arrives -- `prefetch` starts the download at boot -- so this covers
+# the case where somebody records within a minute of `docker compose up` on a
+# slow link, and holding one replica once beats failing their first memo.
+MODEL_LOAD_TIMEOUT_SECONDS = 300.0
 
 # The whole-job decode deadline: a multiple of the audio's own length, with a
 # floor. See _deadline_seconds for both numbers.
 DEADLINE_REALTIME_FACTOR = 4.0
 DEADLINE_FLOOR_SECONDS = 120.0
+
+# How much audio to keep on each side of every region the voice-activity filter
+# calls speech. faster-whisper's default is 400 ms and it is not enough: it eats
+# words.
+#
+# Found on a real recording rather than reasoned about. "I would like to place an
+# order", spoken in an Indian accent, transcribes correctly with the filter off
+# and as "I would like to blaze an order" with it on at the default padding --
+# the /p/ burst falls inside the trimmed margin, and without it the plosive reads
+# as /b/. Every other setting was ruled out first: the same clip is wrong at both
+# audio formats, both model sizes above `small`, and with the language pinned or
+# detected. It is the padding.
+#
+# A full second, against the 800 ms that was the smallest value to fix it, and
+# both were checked against the filter-off baseline on all five real recordings
+# available -- two of the user's and the three browser fixtures. 800 and 1000
+# match it everywhere; 400 breaks exactly one. So this is margin on a threshold
+# that is already clear of the edge, not a value tuned until one case passed.
+#
+# What it costs is that the filter now trims almost nothing: with
+# min_silence_duration_ms at 2000, a gap has to exceed two seconds to be cut at
+# all, and a second of it survives on each side. That is the intended shape. The
+# filter's job here is to answer "is there any speech in this at all" and to
+# drop long dead air -- not to tighten around words.
+VAD_SPEECH_PAD_MS = 1000
 
 # Plain ASCII, like every other sentence that can reach `memos.last_error` --
 # memo_ai/audio.py's four are, and the one non-ASCII character anywhere near this
@@ -148,7 +179,12 @@ class LocalWhisperStt:
 
     name = "local"
 
-    def __init__(self, model_size: str, loader: ModelLoader | None = None) -> None:
+    def __init__(
+        self,
+        model_size: str,
+        language: str | None = None,
+        loader: ModelLoader | None = None,
+    ) -> None:
         # WAV, opting out of the Opus default. This provider decodes in-process,
         # so a codec between ffmpeg and the model is two extra conversions for a
         # file that never leaves the container -- memo_ai/audio.py's `WAV` exists
@@ -158,7 +194,12 @@ class LocalWhisperStt:
         # fallback chain: a `local` sitting behind a primary that wanted Opus is
         # handed Opus and transcribes it fine. Checked rather than assumed --
         # tests/test_local_whisper.py runs both formats through this provider and
-        # asserts the transcripts match.
+        # asserts the same words come back.
+        #
+        # The same *words*, and the qualifier was earned. On `base` the two
+        # outputs were byte-identical and this comment said so; on the
+        # `large-v3-turbo` now shipped they differ by a trailing full stop. The
+        # codec does reach the output, just not the content of it.
         #
         # An instance attribute rather than a class one, which is the shape
         # `audio.format_for` reads either way, and it is the import graph that
@@ -171,6 +212,7 @@ class LocalWhisperStt:
         self.audio_format = audio.WAV
 
         self.model_size = model_size
+        self.language = language
         self._loader = loader or _load_whisper_model
         self._lock = threading.Lock()
         self._model: object | None = None
@@ -182,19 +224,30 @@ class LocalWhisperStt:
 
         try:
             # vad_filter is off by default in faster-whisper and is switched on
-            # here for two reasons. Whisper is well known for inventing text over
-            # silence -- subtitle credits, "Thank you." -- and this is what keeps
-            # a memo of a quiet room from arriving as a plausible sentence nobody
-            # said. It is also what makes _NO_SPEECH detectable at all: with the
-            # speech segments gone, the transcript is empty rather than
-            # hallucinated. Silero ships inside the faster-whisper wheel, so it
-            # costs no download and works with networking disabled -- verified
-            # under `docker run --network none`.
+            # here, with more padding than it ships with -- see VAD_SPEECH_PAD_MS
+            # for the word it eats at the default.
             #
-            # Everything else is the library's default, including beam_size=5 and
-            # automatic language detection. Nothing here is told what language to
-            # expect and nothing needs to be: the Russian fixture is detected as
-            # `ru` at 0.90 and transcribed without configuration.
+            # On, because whisper invents text over silence and is *confident*
+            # about it. With the filter off, four seconds of digital silence
+            # transcribes as "Thank you.", low-level hiss as "Obrigado.", and
+            # both come back with no_speech_prob 0.00 -- so the model's own
+            # confidence cannot be used to catch them and this filter is the only
+            # thing that can. It is also what makes _NO_SPEECH detectable at all:
+            # with no speech region found there are no segments, and an empty
+            # transcript is a fact rather than a guess.
+            #
+            # Silero ships inside the faster-whisper wheel, so it costs no
+            # download and works with networking disabled -- verified under
+            # `docker run --network none`.
+            #
+            # `language` is None unless STT_LANGUAGE says otherwise, and None is
+            # what makes the Russian fixture come back as Russian without being
+            # told. Naming it buys about 30 percent of the job by skipping a
+            # detection pass, and buys certainty on short or accented audio,
+            # where detection is genuinely unreliable -- three seconds of
+            # accented English scored 0.39, and one committed English fixture is
+            # detected as Russian at 0.89. memo_ai/config.py has both numbers and
+            # the reason the default is still to detect.
             #
             # beam_size is left at the default rather than dropped to 1, and the
             # speed argument for dropping it is real: 35 s against 125 s on a
@@ -205,7 +258,12 @@ class LocalWhisperStt:
             # measured here. The two settings did produce different text on that
             # file; which is *better* is not something a character count answers,
             # so the library's tuned default stands.
-            segments, info = model.transcribe(str(source), vad_filter=True)
+            segments, info = model.transcribe(
+                str(source),
+                language=self.language,
+                vad_filter=True,
+                vad_parameters={"speech_pad_ms": VAD_SPEECH_PAD_MS},
+            )
 
             if info.duration <= 0:
                 raise SttError(_EMPTY)
@@ -252,6 +310,41 @@ class LocalWhisperStt:
             raise SttError(_NO_SPEECH)
 
         return Transcript(text=text, provider=self.name, model=self.model_size)
+
+    def prefetch(self) -> None:
+        """
+        Start the load now, without waiting for it or caring whether it works.
+
+        Called once at boot by memo_ai/worker/__main__.py, and it exists because
+        the default model got eleven times bigger. Lazily loading 142 MB on the
+        first voice memo was a pause; lazily loading 1.6 GB is a failed memo on
+        any connection that cannot finish it inside
+        ``MODEL_LOAD_TIMEOUT_SECONDS``. Starting at boot spends the download
+        against the minutes between ``docker compose up`` and somebody actually
+        pressing Record, which is time that was going to be idle anyway.
+
+        This does not weaken the rule that construction loads nothing, and the
+        distinction is worth being exact about. Resolving a provider is still
+        free, boot still cannot fail on a model, and a worker whose primary is
+        `fake` never gets here -- the chain only offers up its primary, so
+        ``STT_PROVIDER=fake`` stays the way to run the queue without a download.
+        What changed is that a worker configured for real transcription now
+        fetches its model when it starts rather than when it is first asked,
+        which is what a reader of `STT_PROVIDER=local` would expect anyway.
+
+        Nothing is raised and nothing is waited on. A failure here is recorded on
+        the handle and surfaces on the first memo, with the retry ``failed``
+        already provides -- a download that did not work is not a reason to stop
+        serving text memos.
+        """
+        with self._lock:
+            if self._model is None and (self._load is None or self._load.failed):
+                log.info(
+                    "prefetching whisper model %r (%s) in the background",
+                    self.model_size,
+                    COMPUTE_TYPE,
+                )
+                self._load = _BackgroundLoad(self._loader, self.model_size)
 
     def _decode(self, segments, started: float, audio_seconds: float) -> str:
         """

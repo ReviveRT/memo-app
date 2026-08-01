@@ -17,13 +17,22 @@ AUDIO = Path("/tmp/normalized.opus")
 class Stub:
     """A provider in five lines, importing nothing but Transcript — see SttProvider."""
 
-    def __init__(self, name, error=None, audio_format=None):
+    def __init__(self, name, error=None, audio_format=None, warmable=False):
         self.name = name
         self.calls = 0
+        self.warmed = 0
         self._error = error
 
         if audio_format is not None:
             self.audio_format = audio_format
+
+        if warmable:
+            # Only a provider that opts in gets one, which is the point of reading
+            # it with getattr rather than putting it on the protocol.
+            self.prefetch = self._prefetch
+
+    def _prefetch(self):
+        self.warmed += 1
 
     def transcribe(self, source: Path) -> Transcript:
         self.calls += 1
@@ -101,6 +110,22 @@ def test_the_fallbacks_own_error_is_what_reaches_the_row():
     # The fallback is the attempt that actually read the audio, so its sentence is
     # the one about this memo. The primary's goes to the log.
     assert str(raised.value) == "this recording is silent"
+
+
+def test_only_the_primary_is_warmed():
+    # `STT_PROVIDER=fake` ships with `STT_FALLBACK=local`, and the README offers
+    # that pair as the way to run the queue without waiting on a model. Warming
+    # the fallback too would fetch 1.6 GB for the one configuration whose entire
+    # point is not to.
+    primary, fallback = Stub("primary", warmable=True), Stub("fallback", warmable=True)
+
+    FallbackStt(primary, fallback).prefetch()
+
+    assert (primary.warmed, fallback.warmed) == (1, 0)
+
+
+def test_warming_a_chain_whose_primary_has_nothing_to_warm_is_a_no_op():
+    FallbackStt(Stub("primary"), Stub("fallback", warmable=True)).prefetch()
 
 
 def test_the_chain_asks_for_the_primarys_audio_format():

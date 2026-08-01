@@ -63,7 +63,7 @@ def resolve(name: str, settings: Settings) -> SttProvider:
         return FakeStt()
 
     if name == LocalWhisperStt.name:
-        return LocalWhisperStt(settings.stt_model)
+        return LocalWhisperStt(settings.stt_model, settings.stt_language)
 
     if name in _UNIMPLEMENTED:
         return UnimplementedStt(name, because=_UNIMPLEMENTED[name])

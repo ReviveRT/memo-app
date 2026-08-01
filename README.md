@@ -166,7 +166,8 @@ reference and contains no real credentials.
 | `WEB_PORT` | `5173` | Host port for the frontend |
 | `STT_PROVIDER` | `local` | Transcription provider: `local` \| `fake` \| `openai`. `openai` is recognised but not built — see below |
 | `STT_FALLBACK` | `local` | Provider used when the primary cannot run at all. Not used when a recording simply produced no words |
-| `STT_MODEL` | `base` | Whisper size for the `local` provider: `tiny` \| `base` \| `small` \| `medium`. The accuracy/speed lever |
+| `STT_MODEL` | `large-v3-turbo` | Whisper size for the `local` provider. The accuracy lever — see the table below before changing it |
+| `STT_LANGUAGE` | _(empty)_ | ISO code of your recordings (`en`, `ru`, …). Empty detects it per recording. Setting it is ~30% faster and safer on short or accented audio |
 | `OPENAI_API_KEY` | _(empty)_ | Read by nothing today. Passed through for whoever writes the hosted adapter |
 | `ANTHROPIC_API_KEY` | _(empty)_ | Optional. Enables Claude enrichment |
 | `ENRICH_MODEL` | `claude-opus-5` | Claude model for title/summary/tags/category |
@@ -183,19 +184,53 @@ Recordings are transcribed **on your machine**, by
 per-minute bill; the only thing it spends is CPU. The weights are MIT-licensed and
 so is everything that runs them.
 
-The one moment it needs the internet is the **first voice memo after a clean
-build**, which downloads about 145 MB of model into the `whisper-cache` volume.
-That memo may fail with _"the local transcription model is still being
-downloaded"_ if the connection is slow — record another one a minute later and it
-will transcribe. Everything after that is offline, and it stays offline across
-restarts because the cache is a named volume.
+The one moment it needs the internet is **the first run after a clean build**,
+which downloads 1.6 GB of model into the `whisper-cache` volume. The worker starts
+that download the moment it boots rather than waiting for your first recording, so
+in practice it is finished before you have opened the browser and pressed Record.
+If you beat it, that memo fails with _"the local transcription model is still
+being downloaded"_ — record another a minute later. Everything after that is
+offline, and stays offline across restarts because the cache is a named volume.
 
-On a laptop, `STT_MODEL=base` turns a five-second recording into a finished memo
-about two seconds after the worker picks it up. The ten-minute maximum the
-duration cap allows is bounded at roughly two minutes — measured on a deliberately
-awful input, so real speech should be quicker. The language is detected rather
-than configured; the Russian test recording is identified as Russian with nothing
-told to it.
+The language is detected per recording rather than configured, so one stack takes
+memos in several languages; the Russian test recording is identified as Russian
+with nothing told to it. Set `STT_LANGUAGE=en` if you only ever speak one — it is
+about 30% faster and removes a misdetection risk that is real on short clips.
+
+### Choosing a model
+
+`STT_MODEL` is the accuracy lever and it matters more than it looks. Measured on a
+real recording of _"I would like to place an order"_, spoken in an Indian accent:
+
+| `STT_MODEL` | Disk | Speed | 10-min memo | RAM per replica | Transcribed it as |
+| --- | --- | --- | --- | --- | --- |
+| `base` | 142 MB | 0.31× realtime | ~3 min | 302 MB | "I would like to **blaze a door there**" |
+| `small` | 464 MB | 0.76× realtime | ~8 min | ~600 MB | "I would like to **blaze an order**" |
+| `medium` | 1.5 GB | 2.14× realtime | ~21 min | ~2.2 GB | correct |
+| **`large-v3-turbo`** _(default)_ | 1.6 GB | 0.64× realtime | ~6 min | 1.1 GB | correct |
+
+turbo is not the slow choice despite being the largest. It pairs a `large-v3`
+encoder with a four-layer decoder, so it beats `small` on speed and is more than
+three times faster than the `medium` it out-transcribes — a ten-minute memo is six
+minutes rather than twenty-one.
+
+What it costs is disk and memory. With `replicas: 2` that is about 2.2 GB resident
+for transcription alone, so on a machine with little to spare set `STT_MODEL=base`
+and accept the errors above, or leave turbo and drop the worker to one replica.
+
+Things that did **not** help, tried on the same recording so you need not: a
+domain `initial_prompt`, `beam_size=10`, greedy decoding, loudness-normalizing the
+audio, pinning the language, and switching between the WAV and Opus intermediate
+formats. Model capacity was the lever.
+
+One thing that did, and it is not a knob you have to turn. The voice-activity
+filter that keeps whisper from inventing words over silence ships with 400 ms of
+padding around each speech region, and that was enough to swallow the opening
+consonant of "place" — turbo returned "blaze an order" with it and "place an
+order" without it. The padding is 1000 ms here, checked against the
+filter-disabled baseline on five real recordings, which keeps the transcript
+honest without giving up silence detection. Silence still comes back as _"No
+speech was detected"_ rather than as whisper's habitual "Thank you."
 
 Two other providers exist behind the same interface:
 

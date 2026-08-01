@@ -5,7 +5,12 @@ from pathlib import Path
 import pytest
 
 from memo_ai import stt
-from memo_ai.config import ConfigError, Settings
+from memo_ai.config import (
+    DEFAULT_STT_LANGUAGE,
+    DEFAULT_STT_MODEL,
+    ConfigError,
+    Settings,
+)
 from memo_ai.stt.fake import CANNED_TRANSCRIPT, FakeStt
 from memo_ai.stt.local import LocalWhisperStt
 from memo_ai.stt.unimplemented import UnimplementedStt
@@ -41,21 +46,35 @@ def test_fake_never_touches_the_filesystem():
     assert result.text == CANNED_TRANSCRIPT
 
 
-def test_local_resolves_to_the_real_provider_and_carries_the_configured_model():
-    # The one thing `settings` was in resolve's signature for since MEMO-08.
+def test_local_resolves_to_the_real_provider_and_carries_its_configuration():
+    # The two things `settings` has been in resolve's signature for since MEMO-08.
     provider = stt.resolve(
         "local",
         Settings.from_env(
-            {"DATABASE_URL": "postgresql://memo:memo@db:5432/memo", "STT_MODEL": "small"}
+            {
+                "DATABASE_URL": "postgresql://memo:memo@db:5432/memo",
+                "STT_MODEL": "small",
+                "STT_LANGUAGE": "en",
+            }
         ),
     )
 
     assert isinstance(provider, LocalWhisperStt)
-    assert provider.model_size == "small"
-    # Resolve runs at boot on both replicas whether or not a voice memo ever
-    # arrives, so it must not fetch a weight. tests/test_local_stt.py proves that
-    # against a loader; this only checks the default is carried, not acted on.
-    assert stt.resolve("local", SETTINGS).model_size == "base"
+    assert (provider.model_size, provider.language) == ("small", "en")
+
+
+def test_an_unconfigured_local_provider_takes_the_committed_defaults():
+    # Against the constants rather than against literals, so that changing a
+    # default is one edit in memo_ai/config.py and not a test that has to be
+    # chased. `.env.example`, docker-compose.yml and the README still have to be
+    # kept in step by hand -- that is what the mirroring note in config.py is for.
+    provider = stt.resolve("local", SETTINGS)
+
+    assert provider.model_size == DEFAULT_STT_MODEL
+    # None, not "en". A stack nobody configured must still transcribe whatever
+    # language it is handed -- see tests/test_local_whisper.py for the fixture
+    # that proves it does.
+    assert provider.language is DEFAULT_STT_LANGUAGE is None
 
 
 def test_a_declared_but_unbuilt_provider_resolves_and_fails_only_on_use():

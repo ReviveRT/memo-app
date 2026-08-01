@@ -64,15 +64,29 @@ def main() -> int:
     # of the local provider's cost and quality, and nothing else in the logs would
     # say which model a slow transcription was running.
     logger.info(
-        "ai-worker starting: stt_provider=%s stt_fallback=%s stt_model=%s "
+        "ai-worker starting: stt_provider=%s stt_fallback=%s stt_model=%s stt_language=%s "
         "audio_dir=%s max_audio=%.0fs poll=%.1fs",
         settings.stt_provider,
         settings.stt_fallback,
         settings.stt_model,
+        settings.stt_language or "auto",
         settings.audio_dir,
         settings.max_audio_seconds,
         settings.poll_seconds,
     )
+
+    # Start fetching the model now rather than on the first voice memo. Optional
+    # on the protocol, so only a provider that has something to warm does
+    # anything -- `fake` has no such method and this is a no-op for it.
+    #
+    # Deliberately after the line above. A 1.6 GB download logs its own progress
+    # through huggingface_hub, and having that arrive before the worker has said
+    # what it is configured as would bury the one line that explains why it is
+    # downloading anything.
+    prefetch = getattr(provider, "prefetch", None)
+
+    if prefetch is not None:
+        prefetch()
 
     # A warning, not a refusal. Text memos never reach ffmpeg, so a worker without
     # it still drains half the queue -- and MEMO-08's rule, set by UnimplementedStt,

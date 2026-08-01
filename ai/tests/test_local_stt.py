@@ -18,7 +18,12 @@ import pytest
 
 from memo_ai import audio
 from memo_ai.stt.base import SttError, SttUnavailable
-from memo_ai.stt.local import DEADLINE_FLOOR_SECONDS, LocalWhisperStt, _deadline_seconds
+from memo_ai.stt.local import (
+    DEADLINE_FLOOR_SECONDS,
+    VAD_SPEECH_PAD_MS,
+    LocalWhisperStt,
+    _deadline_seconds,
+)
 
 AUDIO = Path("/tmp/normalized.wav")
 
@@ -66,8 +71,8 @@ class StubModel:
             yield StubSegment(text)
 
 
-def provider(model=None, **kwargs) -> LocalWhisperStt:
-    return LocalWhisperStt("base", loader=lambda size: model or StubModel(**kwargs))
+def provider(model=None, language=None, **kwargs) -> LocalWhisperStt:
+    return LocalWhisperStt("base", language, loader=lambda size: model or StubModel(**kwargs))
 
 
 def test_it_transcribes_and_reports_the_model_that_did_it():
@@ -89,7 +94,33 @@ def test_it_asks_for_wav_and_switches_the_voice_filter_on():
     # invents text over silence, and because an empty transcript is only
     # detectable once the silence has been cut out.
     assert audio.format_for(local) is audio.WAV
-    assert model.calls[0] == (str(AUDIO), {"vad_filter": True})
+    assert model.calls[0] == (
+        str(AUDIO),
+        {
+            "language": None,
+            "vad_filter": True,
+            # Not the library's 400 ms. At that padding the filter clips the
+            # onset of a word off a real recording -- VAD_SPEECH_PAD_MS has the
+            # measurement, and it is the difference between "place an order" and
+            # "blaze an order".
+            "vad_parameters": {"speech_pad_ms": VAD_SPEECH_PAD_MS},
+        },
+    )
+
+
+def test_a_configured_language_is_passed_through_and_absence_means_detect():
+    # None rather than a default of "en", which is what keeps the Russian fixture
+    # transcribing as Russian on a stack nobody configured. memo_ai/config.py has
+    # what pinning it buys and why it is still not the default.
+    detecting = StubModel()
+    provider(detecting).transcribe(AUDIO)
+
+    assert detecting.calls[0][1]["language"] is None
+
+    pinned = StubModel()
+    provider(pinned, language="en").transcribe(AUDIO)
+
+    assert pinned.calls[0][1]["language"] == "en"
 
 
 def test_the_model_is_loaded_once_and_kept():
@@ -107,14 +138,65 @@ def test_the_model_is_loaded_once_and_kept():
     assert loads == ["small"]
 
 
-def test_nothing_is_loaded_until_the_first_memo():
-    # The property that keeps `docker compose up` converging: two replicas that
-    # only ever see text memos never fetch a weight, and a bad STT_MODEL is not a
-    # boot failure.
+def test_constructing_a_provider_loads_nothing():
+    # The property that keeps `docker compose up` converging: resolving a provider
+    # happens at boot on both replicas, and a bad STT_MODEL must not be able to
+    # turn `restart: unless-stopped` into a restart loop.
     loads = []
     LocalWhisperStt("base", loader=lambda size: loads.append(size) or StubModel())
 
     assert loads == []
+
+
+def test_prefetch_starts_the_load_without_waiting_for_a_memo():
+    # What stops a 1.6 GB default from landing on somebody's first recording: the
+    # download is spent against the idle minutes after `docker compose up`.
+    release = threading.Event()
+    loads = []
+
+    def loader(size):
+        loads.append(size)
+        release.wait(5)
+
+        return StubModel(texts=("warmed",))
+
+    local = LocalWhisperStt("large-v3-turbo", loader=loader)
+    local.prefetch()
+
+    # Returned immediately, with the load still running behind it. Nothing raised
+    # and nothing waited on -- a worker must reach its claim loop either way.
+    assert loads == ["large-v3-turbo"]
+
+    release.set()
+
+    assert local.transcribe(AUDIO).text == "warmed"
+    assert loads == ["large-v3-turbo"]
+
+
+def test_prefetch_is_idempotent_and_does_not_disturb_a_loaded_model():
+    loads = []
+    local = LocalWhisperStt("base", loader=lambda size: loads.append(size) or StubModel())
+
+    local.prefetch()
+    local.prefetch()
+    local.transcribe(AUDIO)
+    local.prefetch()
+
+    assert loads == ["base"]
+
+
+def test_a_prefetch_that_fails_does_not_raise_and_leaves_the_memo_to_report_it():
+    # A failed download is not a reason to stop serving text memos, so this is
+    # silent at boot. The first voice memo finds the failure and the ordinary
+    # retry path takes over from there.
+    def loader(size):
+        raise RuntimeError("cold cache, no network")
+
+    local = LocalWhisperStt("base", loader=loader)
+    local.prefetch()
+
+    with pytest.raises(SttUnavailable, match="could not be loaded"):
+        local.transcribe(AUDIO)
 
 
 def test_a_failed_load_is_unavailable_and_is_retried_on_the_next_memo():

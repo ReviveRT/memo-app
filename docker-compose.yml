@@ -282,9 +282,16 @@ services:
       # only differ if somebody sets one of them.
       STT_PROVIDER: ${STT_PROVIDER:-local}
       STT_FALLBACK: ${STT_FALLBACK:-local}
-      # tiny | base | small | medium. The whole of what transcription costs here,
-      # which is CPU time rather than money.
-      STT_MODEL: ${STT_MODEL:-base}
+      # The whole of what transcription costs here, which is CPU time, disk and
+      # RAM rather than money. `large-v3-turbo` is 1.6 GB on disk and about 1.1 GB
+      # resident per replica — with `replicas: 2` below, budget accordingly, and
+      # drop to `base` (142 MB, 302 MB resident) on a small machine. The README
+      # has the accuracy each one actually delivers, measured rather than quoted.
+      STT_MODEL: ${STT_MODEL:-large-v3-turbo}
+      # Empty means detect it per recording, which is what lets one stack take
+      # memos in more than one language. Naming it is worth about 30% of the job
+      # and removes a real misdetection risk on short or accented audio.
+      STT_LANGUAGE: ${STT_LANGUAGE:-}
       ENRICH_MODEL: ${ENRICH_MODEL:-claude-opus-5}
       # How long a replica waits after finding an empty queue. Only ever a sleep on
       # the *idle* path: after a claim that found work the worker loops straight back

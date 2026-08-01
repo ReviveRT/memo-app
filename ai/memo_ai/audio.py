@@ -132,9 +132,10 @@ OPUS = AudioFormat("opus", ".opus", ("-c:a", "libopus", "-b:a", "24k"))
 # reason the choice exists rather than a hypothetical second caller.
 #
 # Not the default, for the size reason above: a provider gets WAV by asking. The
-# two are interchangeable to the local model -- both were run through it on all
-# three browser fixtures and produced identical text -- so this is a saving of two
-# codec passes on a file that never leaves the container, not a correctness need.
+# two are near enough interchangeable to the local model -- both were run through
+# it on the browser fixtures and produced the same words, differing only by a
+# trailing full stop -- so this is a saving of two codec passes on a file that
+# never leaves the container, not a correctness need.
 #
 # The 19.20 MB figure above is this format at 600 seconds, and it was confirmed a
 # second time here rather than left as arithmetic: the 600-second WAV built for

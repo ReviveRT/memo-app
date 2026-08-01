@@ -17,22 +17,24 @@ Once MEMO-15 bakes the weights into ai/Dockerfile the guard is satisfied by the
 image itself and this file always runs.
 """
 
+import re
 import time
 from pathlib import Path
 
 import pytest
 
 from memo_ai import audio, stt
-from memo_ai.config import Settings
+from memo_ai.config import DEFAULT_STT_MODEL, Settings
 from memo_ai.stt.base import SttError
 from memo_ai.stt.fake import CANNED_TRANSCRIPT
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
-# `base`, matching DEFAULT_STT_MODEL. Deliberately the shipped default rather
-# than `tiny`: a faster test that exercised a model nobody runs would prove
-# nothing about the configuration this project ships.
-MODEL = "base"
+# Read from the config rather than named here, so this always exercises whatever
+# is actually shipped. A faster test against `tiny` would prove nothing about the
+# configuration a stranger gets, and a hardcoded `base` silently stopped being
+# that configuration the moment the default changed.
+MODEL = DEFAULT_STT_MODEL
 
 SETTINGS = Settings.from_env(
     {"DATABASE_URL": "postgresql://memo:memo@db:5432/memo", "STT_MODEL": MODEL}
@@ -131,11 +133,17 @@ def test_the_same_audio_goes_through_both_providers(local):
     assert (real.provider, real.model) == ("local", MODEL)
 
 
-def test_the_two_normalized_formats_reach_the_same_transcript(local):
+def test_the_two_normalized_formats_reach_the_same_words(local):
     # The chain hands a fallback whatever the *primary* asked for, so a `local`
     # behind an Opus-wanting primary is fed Opus. That is only safe if the two
     # formats transcribe the same, which is checked here rather than asserted in
     # the comment that relies on it.
+    #
+    # The same *words*, not the same string, and the difference was found rather
+    # than anticipated. On `base` the two outputs were byte-identical; on the
+    # `large-v3-turbo` this project now ships they differ by a trailing full stop
+    # on the Opus side. So the codec does reach the output, just not the content
+    # -- and the claim worth pinning is the one the fallback depends on.
     fixtures = recordings()
 
     if not fixtures:
@@ -147,7 +155,12 @@ def test_the_two_normalized_formats_reach_the_same_transcript(local):
         with audio.normalize(fixtures[0], fmt, 600.0) as prepared:
             transcripts.append(local.transcribe(prepared.path).text)
 
-    assert transcripts[0] == transcripts[1]
+    assert _words(transcripts[0]) == _words(transcripts[1])
+
+
+def _words(text: str) -> list[str]:
+    """Lowercased word tokens, so punctuation and spacing drop out of a comparison."""
+    return re.findall(r"\w+", text.lower())
 
 
 def test_silence_fails_with_a_readable_reason_rather_than_an_empty_memo(local, tmp_path):

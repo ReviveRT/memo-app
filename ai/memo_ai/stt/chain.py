@@ -56,8 +56,29 @@ class FallbackStt:
         # fallback would double the cost of the path that only runs when something
         # has already gone wrong. It is safe for the two providers that exist --
         # `fake` never opens the file, and `local` was run against both formats on
-        # all three browser fixtures and produced identical text.
+        # the browser fixtures and produced the same words either way. The same
+        # words rather than the same string: on the shipped model the Opus output
+        # picks up a trailing full stop the WAV one does not.
         self.audio_format = getattr(primary, "audio_format", None)
+
+    def prefetch(self) -> None:
+        """
+        Warm the primary at boot, and only the primary.
+
+        The fallback is deliberately left cold. It runs when something has
+        already gone wrong, which is rare, and paying for it up front would undo
+        the one instruction in the README for avoiding the download altogether:
+        ``STT_PROVIDER=fake`` ships with ``STT_FALLBACK=local``, so warming both
+        would fetch 1.6 GB for a configuration whose entire point is not to.
+
+        ``getattr`` for the same reason ``audio_format`` is read that way -- a
+        provider opts in, and the five-line test double in ``SttProvider``'s
+        docstring stays five lines.
+        """
+        warm = getattr(self.primary, "prefetch", None)
+
+        if warm is not None:
+            warm()
 
     def transcribe(self, source: Path) -> Transcript:
         try:
