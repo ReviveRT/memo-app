@@ -55,10 +55,20 @@ blob works just as well — the point is only that a browser wrote the container
 Safari needs a secure context, so use `http://localhost:5173` rather than a LAN
 address; the README's Recording section covers that.
 
+## These files are committed, despite the audio rules in `.gitignore`
+
+`.gitignore` drops `*.webm`, `*.ogg`, `*.m4a`, `*.wav` and `*.mp3` so that a
+bare-metal run cannot commit uploaded audio into the repo. That pattern also
+matched this directory, which meant `git add` here reported nothing and the files
+never arrived — passing locally for whoever captured them and skipping forever on
+a clean clone. There are `!ai/tests/fixtures/*` negations for exactly that, with
+the reasoning at the rules. Safari's `.mp4` was never matched and needs none.
+
 ## Until they are here
 
-`tests/test_fixtures.py` skips, and says which browsers are missing. The rest of
-the suite is unaffected, so a stranger cloning the repo still gets a green run.
+`tests/test_fixtures.py` skips **per browser**, so whichever recordings exist are
+asserted against and the skip names only what is still missing. The rest of the
+suite is unaffected, so a stranger cloning the repo still gets a green run.
 
 ## Two questions MEMO-11 left for these files
 

@@ -15,8 +15,9 @@ a sink it cannot seek back into, so the duration is never written --
 tests/test_audio.py reproduces the missing field with a pipe, which covers the
 mechanics; what only a real recording covers is each browser's own quirks.
 
-Skipped, not failed, when the fixtures are absent, so that a stranger cloning the
-repo gets a green suite. The skip names the browsers that are missing.
+Skipped, not failed, when a fixture is absent, so that a stranger cloning the repo
+gets a green suite. Skipping is per browser, so whichever recordings exist are
+actually asserted against and the skip names only what is still missing.
 """
 
 import subprocess
@@ -64,23 +65,36 @@ def probe(path: Path, entries: str) -> str:
 
 
 @pytest.fixture(scope="module", autouse=True)
-def require_fixtures():
+def require_ffmpeg():
     if not audio.ffmpeg_available():
         pytest.skip("ffmpeg and ffprobe are not on PATH; run this suite from the ai image")
 
-    missing = [browser for browser in BROWSERS if recording(browser) is None]
 
-    if missing:
+def fixture_for(browser: str) -> Path:
+    """
+    The recording for one browser, or skip this test alone.
+
+    Per-browser rather than all-or-nothing, which is what this was first. These
+    files arrive one at a time -- whoever is capturing them has to open three
+    different browsers, and Safari needs a secure context on top of that -- so a
+    guard that skipped the whole module until all three landed would report the
+    same nine skips whether two were present or none. Coverage that exists should
+    count, and coverage that does not should say which.
+    """
+    found = recording(browser)
+
+    if found is None:
         pytest.skip(
-            f"no real recording for: {', '.join(missing)}. "
-            f"MEMO-13's acceptance needs genuine MediaRecorder output -- "
-            f"see ai/tests/fixtures/README.md for how to capture it."
+            f"no real recording for {browser}. MEMO-13's acceptance needs genuine "
+            f"MediaRecorder output -- see ai/tests/fixtures/README.md for how to capture it."
         )
+
+    return found
 
 
 @pytest.mark.parametrize("browser", BROWSERS)
 def test_a_real_recording_normalizes_to_mono_with_a_usable_duration(browser):
-    source = recording(browser)
+    source = fixture_for(browser)
 
     with audio.normalize(source, audio.OPUS, max_seconds=600) as normalized:
         assert normalized.path.stat().st_size > 0
@@ -105,7 +119,7 @@ def test_the_wav_path_reports_16_khz_exactly(browser):
     # an Opus stream always advertises 48000 no matter what it was encoded from,
     # which tests/test_audio.py pins separately. Same transcode, same duration,
     # so this also checks the two formats agree about the length.
-    source = recording(browser)
+    source = fixture_for(browser)
 
     with audio.normalize(source, audio.WAV, max_seconds=600) as as_wav:
         assert probe(as_wav.path, "stream=sample_rate") == "16000"
@@ -122,7 +136,7 @@ def test_the_duration_survives_a_source_that_does_not_carry_one(browser):
     # carry a duration is not something this project controls -- Safari's MP4
     # often does, Chrome's WebM does not -- so this asserts the useful half: after
     # normalization there is always a number, whatever the source said.
-    source = recording(browser)
+    source = fixture_for(browser)
 
     with audio.normalize(source, audio.OPUS, max_seconds=600) as normalized:
         assert normalized.duration_ms > 0

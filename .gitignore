@@ -32,6 +32,25 @@ __pycache__/
 *.wav
 *.mp3
 
+# ...except the browser recordings in ai/tests/fixtures/, which are test data and
+# have to be committed. MEMO-13's acceptance criterion is that one real recording
+# from each of Chrome, Firefox and Safari normalizes correctly, and those files
+# cannot be synthesized -- a MediaRecorder container carries no duration, which is
+# the whole defect being tested, and only genuine browser output reproduces it.
+#
+# Without these negations the patterns above swallow them silently: `git add`
+# reports nothing, the files never reach the repo, and tests/test_fixtures.py
+# skips forever on a clean clone while passing locally for whoever captured them.
+# Found exactly that way.
+#
+# .mp4 needs no exception because no rule above matches it -- Safari's container
+# is the one that was never at risk.
+!ai/tests/fixtures/*.webm
+!ai/tests/fixtures/*.ogg
+!ai/tests/fixtures/*.m4a
+!ai/tests/fixtures/*.wav
+!ai/tests/fixtures/*.mp3
+
 # Whisper / HuggingFace model weights (the `whisper-cache` volume).
 # ~148 MB for faster-whisper base — never in git.
 /.cache/
