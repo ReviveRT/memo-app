@@ -54,33 +54,59 @@ FALLBACK_TITLE_CHARS = 60
 # heading reads "Sunday Meeting" today and would read "Sunday Meeting We discussed
 # the budget and then we mov" once this column is filled in.
 #
-# Hence the three parts, each matching that function exactly:
+# Hence the three parts, each matching that function:
 #
-#   * `split_part(transcript, chr(10), 1)` -- the first line. A typed memo often
-#     opens with a heading, and cutting mid-sentence when a natural break was two
-#     words earlier makes the strip look like it is guessing. `chr(10)` rather than
-#     an escaped literal, so what this file contains and what Postgres parses cannot
-#     differ over a backslash.
+#   * the first *line* of the trimmed transcript. A typed memo often opens with a
+#     heading, and cutting mid-sentence when a natural break was two words earlier
+#     makes the strip look like it is guessing. `chr(10)` rather than an escaped
+#     literal, so what this file contains and what Postgres parses cannot differ
+#     over a backslash.
 #   * the `<=` branch -- a short line is the title, untouched.
 #   * the last branch -- 59 characters plus an ellipsis, so the result is still 60
-#     and still reads as truncated rather than as an error. `rtrim` so it never ends
-#     in the space the cut landed on.
+#     and still reads as truncated rather than as an error, and trimmed so it never
+#     ends in the whitespace the cut landed on.
+#
+# "Matching" and not "identical", and the one deliberate difference is worth
+# naming: on a transcript with CRLF line endings, `memoLabel.js` yields a label
+# with a carriage return still on it, because it trims the transcript before
+# splitting and never trims the line. This strips it. A stray control character
+# rendered once is untidy; the same character *persisted into a column* is a thing
+# every later reader of `title` inherits, so the two agree on what the label says
+# and this side declines to store the wart.
 #
 # The empty case is NULL rather than '', because a blank title renders as an
 # untitled row with extra steps.
 #
-# "Exactly" is a claim, so it was checked rather than asserted: six transcripts --
-# short, over the cap, multi-line, exactly at the boundary, whitespace-padded, and
-# one whose cut lands on a space -- were run through this statement on a real
-# Postgres and through a transcription of memoLabel.js, and the two agreed
-# byte-for-byte on all six.
-_FALLBACK_TITLE = """
+# **Postgres's btrim and rtrim default to space only, not to whitespace.** That is
+# the trap in this expression and it was caught by running it rather than by
+# reading it. The first version trimmed with the defaults and split before
+# trimming, which produced three wrong titles on a real Postgres:
+#
+#   * a text memo pasted with CRLF line endings -- `Sunday Meeting\r\nWe...` --
+#     titled `Sunday Meeting` **with a carriage return still on the end**, because
+#     splitting on chr(10) leaves the \r and a bare btrim does not take it.
+#   * a transcript with a leading newline titled **NULL**, because splitting first
+#     makes the empty leading line the "first line". That is the one rule this
+#     column exists to uphold, broken by the code meant to uphold it. The API trims
+#     a typed memo (`StoreMemoRequest`) so it is not reachable from there today,
+#     which is exactly why it would have survived to be reachable later.
+#   * a leading tab kept verbatim in the title.
+#
+# Hence `_TITLE_TRIM` below, an explicit character set, and hence the outer trim on
+# the *transcript* before the split rather than only on the line after it.
+_TITLE_TRIM = r"E' \t\r\n'"
+
+# The first line of the transcript, trimmed at both ends. One sub-expression rather
+# than three copies, since the CASE has to test it, return it and truncate it.
+_FIRST_LINE = (
+    f"btrim(split_part(btrim(transcript, {_TITLE_TRIM}), chr(10), 1), {_TITLE_TRIM})"
+)
+
+_FALLBACK_TITLE = f"""
             CASE
-                WHEN btrim(split_part(transcript, chr(10), 1)) = '' THEN NULL
-                WHEN length(btrim(split_part(transcript, chr(10), 1))) <= %(title_chars)s
-                    THEN btrim(split_part(transcript, chr(10), 1))
-                ELSE rtrim(left(btrim(split_part(transcript, chr(10), 1)), %(title_chars)s - 1))
-                     || '…'
+                WHEN {_FIRST_LINE} = '' THEN NULL
+                WHEN length({_FIRST_LINE}) <= %(title_chars)s THEN {_FIRST_LINE}
+                ELSE rtrim(left({_FIRST_LINE}, %(title_chars)s - 1), {_TITLE_TRIM}) || '…'
             END"""
 
 # Written to `last_error` when a claim expires. Reaches the browser, so it is a
@@ -97,6 +123,27 @@ ABANDONED_ENRICHMENT_MESSAGE = (
     "The transcript is complete, but the memo was interrupted before a title and summary "
     "could be generated."
 )
+
+
+# The ceiling on one backoff, however many attempts have been made.
+#
+# It never binds on the shipped configuration -- three attempts at a 30s base reach
+# 60s -- and it is here for the configuration somebody else chooses. `MAX_ATTEMPTS`
+# is a knob, and doubling is faster than it looks: at 10 attempts the last wait is
+# 4.3 hours, which is not resilience, it is a memo nobody is coming back for.
+#
+# Past around forty attempts it stops being a usability problem. The first version
+# of this comment said the interval would overflow and the statement would raise;
+# checked against Postgres 16 instead, and it does something quieter and worse --
+# `make_interval` **saturates** at 2562047788:00:54.775807, about 292,471 years, and
+# returns it without complaint. A memo given that `next_attempt_at` is `queued`
+# rather than `processing`, so the reaper's predicate never sees it either. It is
+# simply gone, with every status column reading normal. An error would at least
+# have been an error.
+#
+# An hour, because it is the same order as the claim lease: waiting longer than a
+# whole abandoned job takes to be noticed is not a delay anyone chose.
+MAX_BACKOFF_SECONDS = 3600.0
 
 
 @dataclass(frozen=True)
@@ -139,8 +186,14 @@ class RetryPolicy:
         what makes the backoff survive a process that never runs this code -- a
         memo whose worker was killed comes back with a larger ``attempts`` and gets
         the longer delay it is owed, decided by whichever replica reaps it.
+
+        Capped at :data:`MAX_BACKOFF_SECONDS`, and the jitter is applied after the
+        cap so that a capped delay is still spread rather than becoming the one
+        instant every waiting memo shares.
         """
-        return self.backoff_seconds * (2 ** max(0, attempts - 1)) * random.uniform(0.8, 1.2)
+        doubled = self.backoff_seconds * (2 ** max(0, attempts - 1))
+
+        return min(doubled, MAX_BACKOFF_SECONDS) * random.uniform(0.8, 1.2)
 
 
 @dataclass(frozen=True)
@@ -424,6 +477,17 @@ _RETRY = """
 # worker whose claim had been reaped could not then write to the row -- its
 # transcript commit, its publish and its failure write all matched zero rows while
 # the new claimant's landed.
+#
+# One asymmetry across the three, because it looks like an oversight and is not:
+# the requeue **assigns** `last_error` while the two terminal statements COALESCE
+# it. What can be on that column at reap time is an error from an *earlier*
+# attempt, since the attempt being reaped was killed and wrote nothing. For a memo
+# going back to the queue, "interrupted, trying again" is the true and more useful
+# description of where it now is, and the older sentence is about an attempt that
+# is over. For a memo being given up on, the older sentence is the only real reason
+# anyone recorded, and overwriting it with ABANDONED_MESSAGE would replace a
+# diagnosis with a shrug -- worse, with a *false* one, since that message says the
+# memo failed without a reason.
 
 # Still has attempts left: hand it back to the queue after a backoff.
 #
@@ -432,16 +496,24 @@ _RETRY = """
 # of claims. `RetryPolicy.delay_for` would produce one delay for the batch and
 # release a memo on its third attempt as eagerly as one on its first. The
 # expression is that method, transcribed: base, doubled per attempt already made,
-# jittered +/-20%. `random()` inside the UPDATE is evaluated per row, so two memos
-# reaped together do not come back in the same instant.
+# capped, jittered +/-20%. `random()` inside the UPDATE is evaluated per row, so two
+# memos reaped together do not come back in the same instant.
+#
+# The `least(...)` is the cap, and this is the side where leaving it out is
+# unrecoverable rather than merely slow: `make_interval` saturates instead of
+# raising, so a large `MAX_ATTEMPTS` writes a `next_attempt_at` roughly 292,471
+# years out and the memo is never claimed and never reaped again. See
+# MAX_BACKOFF_SECONDS.
 _REAP_REQUEUE = """
     UPDATE memos
        SET status = 'queued',
            locked_at = NULL,
            last_error = %(last_error)s,
            next_attempt_at = now() + make_interval(
-               secs => %(backoff_seconds)s
-                       * power(2, greatest(attempts - 1, 0))
+               secs => least(
+                           %(backoff_seconds)s * power(2, greatest(attempts - 1, 0)),
+                           %(max_backoff_seconds)s
+                       )
                        * (0.8 + random() * 0.4)
            )
      WHERE status = 'processing'
@@ -686,6 +758,7 @@ class MemoQueue:
                 {
                     "last_error": REAPED_MESSAGE,
                     "backoff_seconds": self._policy.backoff_seconds,
+                    "max_backoff_seconds": MAX_BACKOFF_SECONDS,
                     "lease_seconds": self._policy.reap_after_seconds,
                     "max_attempts": self._policy.max_attempts,
                 },

@@ -72,6 +72,15 @@ and third branches, and it is why the cap is checked there rather than in the cl
 predicate: a row the claim silently skipped would be an invisible dead end with
 nothing on it to explain why nothing is happening.
 
+**One hand-off, for whoever builds the manual retry (MEMO-17).** Nothing resets
+`attempts`, deliberately — it is a record of what the memo cost, and MEMO-22 reads
+that kind of column. But it means moving a `failed` row back to `queued` and
+nothing else buys exactly one more attempt, because the claim increments a count
+that is already at the cap and the next failure is terminal again. A manual retry
+is a person saying "the reason it failed is gone", so it should set
+`attempts = 0` along with the status. That is a one-line difference between a retry
+button that works and one that looks like it does nothing.
+
 ## The reaper's lease is derived from the deadlines, not chosen
 
 **Decision.** `REAP_AFTER_SECONDS` defaults to 3,600, and

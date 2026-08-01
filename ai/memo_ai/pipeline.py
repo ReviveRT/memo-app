@@ -238,6 +238,22 @@ def job_budget_seconds(max_audio_seconds: float) -> float:
     provider's constants from here is a bound, not a call path -- the abstraction
     is still intact -- but a provider with a longer one belongs in this sum, and
     that is the note whoever writes it needs.
+
+    **The retry backoff is deliberately not in this sum**, which is worth saying
+    because the task that specified the lease phrased it as "``MAX_AUDIO_SECONDS``
+    plus backoff". The lease is measured against ``locked_at``, and a memo waiting
+    out its backoff is ``queued`` with its lock released -- ``_RETRY`` in
+    memo_ai/memos.py is what makes that true. So backoff time is never time spent
+    in ``processing``, and adding it here would inflate the lease by up to 90
+    seconds of a state the reaper cannot see. What the backoff does bound is how
+    long a memo takes end to end, which is a different question and not this one.
+
+    **Enrichment is not in this sum either, and will have to be.** It runs between
+    the two commit points, inside the same claim, so whatever deadline MEMO-21
+    gives its model call is time this budget currently does not account for. It is
+    zero today because ``NoEnrichment`` returns immediately; the day that changes,
+    its bound belongs here, and the boot check is what will make that visible
+    rather than a comment nobody re-reads.
     """
     return (
         # audio.normalize: probe the upload, transcode it, probe the result.

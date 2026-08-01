@@ -141,9 +141,11 @@ split buys two things:
   words are the memo. So a failed enrichment lands in `enrichment_error` on a
   `ready` row, and `failed` means one thing only: no transcript.
 
-**A memo is never untitled.** Until enrichment lands (MEMO-21), every memo's title
-is the first 60 characters of its transcript — computed in SQL, so it also applies
-to a memo published by the reaper.
+**A memo is never untitled.** Until enrichment lands (MEMO-21), a memo's title is
+the first line of its transcript, cut to 60 characters with an ellipsis if it runs
+longer — the same rule the frontend already uses to label an untitled memo, so
+filling the column in does not change what you see. It is computed in SQL, so it
+applies to a memo published by the reaper too.
 
 **Failures are retried only when retrying could help.** A recording ffmpeg cannot
 decode, or one over `MAX_AUDIO_SECONDS`, fails on the first attempt: the same file
@@ -280,7 +282,7 @@ reference and contains no real credentials.
 | `MAX_AUDIO_BYTES` | `12582912` | Upload byte cap for the API edge (12 MiB). Anything larger is a 413. Raising it above `upload_max_filesize` (16 MiB, in `api/conf.d/uploads.ini`) silently breaks uploads instead of widening them — `/api/health` reports both numbers and flags the mismatch |
 | `MAX_AUDIO_SECONDS` | `600` | Duration cap, enforced in the worker after normalization because that is the first point a duration exists. A memo over it is stored and then failed, not refused. Zero or negative is refused at boot |
 | `WORKER_POLL_SECONDS` | `1.0` | How long an `ai-worker` replica waits after finding the queue empty. Bounds how long a new memo sits in `queued`, not how fast the queue drains |
-| `MAX_ATTEMPTS` | `3` | How many times a memo is attempted, counting the first. Only failures that might resolve on their own spend an attempt — see below |
+| `MAX_ATTEMPTS` | `3` | How many times a memo may be claimed, counting the first. Only failures that might resolve on their own are retried at all — see below |
 | `RETRY_BACKOFF_SECONDS` | `30` | Base of the exponential backoff between attempts, doubling and jittered ±20% |
 | `REAP_AFTER_SECONDS` | `3600` | How long a memo may sit in `processing` before a worker assumes the one that claimed it is gone. **Must exceed the longest a healthy job can take** (2,880s at the defaults). Raising `MAX_AUDIO_SECONDS` raises that ceiling; the worker recomputes it at boot and warns if the lease no longer clears it |
 | `REAPER_INTERVAL_SECONDS` | `60` | How often each replica looks for expired leases |
@@ -564,8 +566,10 @@ audio, so the levers are the model and `MAX_AUDIO_SECONDS` — not the sample ra
 ### Using the Anthropic key
 
 `ANTHROPIC_API_KEY` is optional and nothing here needs it. Without it, memos still
-transcribe, store and search; they get a fallback title (first 60 characters of
-the transcript) and `enrichment_error` is recorded on the row.
+transcribe, store and search, and they reach `ready` with the fallback title
+described above. No enricher runs at all today, so nothing is attempted and
+`enrichment_error` stays NULL — that column carries a sentence only when an
+enricher exists and fails, which is MEMO-21's to produce.
 
 To use it, paste your own key into `.env`. _TODO (MEMO-26): what measurably
 changes when you do._

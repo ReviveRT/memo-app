@@ -19,6 +19,7 @@ from memo_ai.enrich import Enrichment
 from memo_ai.memos import (
     _CLAIM_COLUMNS,
     FALLBACK_TITLE_CHARS,
+    MAX_BACKOFF_SECONDS,
     MAX_LAST_ERROR_CHARS,
     ClaimedMemo,
     MemoQueue,
@@ -26,6 +27,11 @@ from memo_ai.memos import (
 )
 from memo_ai.stt.base import Transcript
 from tests.support import LOCKED_AT, POLICY, FakeConnection, claimed_memo
+
+# The character set every trim in the title expression has to name, because
+# Postgres's btrim and rtrim default to space only. Raw, so this string is the same
+# bytes memo_ai/memos.py puts in the SQL rather than an escaped rendering of it.
+TRIM_SET = r"E' \t\r\n'"
 
 
 def queue(connection, policy: RetryPolicy = POLICY) -> MemoQueue:
@@ -156,7 +162,7 @@ def test_finishing_with_no_enrichment_falls_back_to_the_transcript_for_a_title()
     assert connection.last_params["tags"] is None
     assert connection.last_params["category"] is None
     assert connection.last_params["title_chars"] == FALLBACK_TITLE_CHARS
-    assert "split_part(transcript, chr(10), 1)" in connection.last_sql
+    assert f"split_part(btrim(transcript, {TRIM_SET}), chr(10), 1)" in connection.last_sql
 
 
 def test_the_fallback_title_is_the_rule_the_frontend_already_uses():
@@ -170,9 +176,48 @@ def test_the_fallback_title_is_the_rule_the_frontend_already_uses():
 
     fallback = connection.last_sql
 
-    assert "split_part(transcript, chr(10), 1)" in fallback
+    assert "split_part(" in fallback
     assert "%(title_chars)s - 1" in fallback
     assert "'…'" in fallback
+
+
+def test_the_transcript_is_trimmed_before_it_is_split_into_lines():
+    # The regression guard for the sharper half of the bug this expression shipped
+    # with: splitting first makes the empty leading line of a transcript that starts
+    # with a newline into its "first line", and the memo comes out with a NULL
+    # title -- the one rule this column exists to uphold, broken by the code meant
+    # to uphold it. Confirmed on a real Postgres before the fix and after it.
+    for sql in _titling_statements():
+        assert f"split_part(btrim(transcript, {TRIM_SET})" in sql
+
+
+def test_no_trim_in_the_title_expression_is_left_on_its_default():
+    # The other half. Postgres's btrim and rtrim default to *space only*, not to
+    # whitespace, so a bare one leaves the carriage return on the title of any memo
+    # pasted with CRLF line endings, and a leading tab verbatim.
+    #
+    # Counted rather than pattern-matched, so the invariant survives the expression
+    # being rewritten: every trim call in these statements has to carry the set.
+    for sql in _titling_statements():
+        trims = sql.count("btrim(") + sql.count("rtrim(")
+
+        assert trims > 0
+        assert sql.count(TRIM_SET) == trims, "a trim in the title expression has no character set"
+
+
+def _titling_statements() -> list[str]:
+    """The two statements that can write a fallback title: the publish and the salvage."""
+    connection = FakeConnection(rowcount=1)
+    memos = queue(connection)
+
+    memos.finish_ready(claimed_memo())
+    memos.reap()
+
+    titling = [sql for sql, _params in connection.executed if "title" in sql]
+
+    assert len(titling) == 2, f"expected the publish and the salvage, found {len(titling)}"
+
+    return titling
 
 
 def test_an_enrichment_is_written_field_by_field_with_tags_as_a_list():
@@ -348,6 +393,34 @@ def test_the_backoff_doubles_per_attempt_and_stays_inside_its_jitter(attempts, l
     delay = POLICY.delay_for(attempts)
 
     assert low <= delay <= high
+
+
+def test_the_backoff_is_capped_however_many_attempts_have_been_made():
+    # Never binds on the shipped three attempts; it is here for the MAX_ATTEMPTS
+    # somebody else sets. Doubling is faster than it looks -- a tenth attempt would
+    # otherwise wait 4.3 hours, and past about forty the reaper's `make_interval`
+    # silently saturates at ~292,471 years, which loses the memo with every status
+    # column still reading normal.
+    generous = RetryPolicy(max_attempts=40, backoff_seconds=30.0, reap_after_seconds=3600.0)
+
+    assert generous.delay_for(40) <= MAX_BACKOFF_SECONDS * 1.2
+
+
+def test_the_cap_is_jittered_too_rather_than_becoming_one_shared_instant():
+    generous = RetryPolicy(max_attempts=40, backoff_seconds=30.0, reap_after_seconds=3600.0)
+
+    assert len({generous.delay_for(40) for _ in range(20)}) > 1
+
+
+def test_the_reaper_caps_its_backoff_the_same_way():
+    connection = FakeConnection()
+
+    queue(connection).reap()
+
+    sql, params = connection.executed[0]
+
+    assert "least(" in sql
+    assert params["max_backoff_seconds"] == MAX_BACKOFF_SECONDS
 
 
 def test_the_backoff_is_jittered_rather_than_fixed():

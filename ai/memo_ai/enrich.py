@@ -25,11 +25,14 @@ is the null implementation below, which exists because "no enricher" is a suppor
 configuration here and "no transcriber" is not.
 """
 
-import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Protocol
 
-log = logging.getLogger(__name__)
+# No logger in this module, deliberately. Nothing here decides anything -- the
+# contract, the result and the null implementation are all declarations -- and the
+# one place an enrichment outcome is judged is memo_ai/pipeline.py's `_enriched`,
+# which logs it there. A logger here would only ever be used by an implementation,
+# and an implementation should own its own.
 
 
 class EnrichmentError(Exception):
@@ -62,8 +65,10 @@ class Enrichment:
     absent means "leave the column alone", not "erase it".
 
     ``tags`` is a tuple rather than a list because this class is frozen and a list
-    would make it unhashable and mutable through the back door. It is converted to
-    a Python list on the way into psycopg, which is what maps to ``text[]``.
+    would make it unhashable and mutable through the back door -- and because an
+    immutable default needs no ``field(default_factory=...)``, which a list would.
+    It is converted to a Python list on the way into psycopg, which is what maps to
+    ``text[]``.
 
     Nothing here carries a cost. Enrichment spend belongs on the row rather than on
     the result, and MEMO-22 owns the column -- see ``Transcript`` for the same
@@ -72,7 +77,7 @@ class Enrichment:
 
     title: str | None = None
     summary: str | None = None
-    tags: tuple[str, ...] = field(default_factory=tuple)
+    tags: tuple[str, ...] = ()
     category: str | None = None
 
     def is_empty(self) -> bool:

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from memo_ai import audio, pipeline
+from memo_ai.config import DEFAULT_MAX_AUDIO_SECONDS, DEFAULT_REAP_AFTER_SECONDS
 from memo_ai.enrich import NO_ENRICHMENT, Enrichment, EnrichmentError
 from memo_ai.stt.base import SttError, SttUnavailable
 from tests.support import (
@@ -295,30 +296,25 @@ def test_the_transcript_is_committed_before_enrichment_runs(audio_dir, normalize
     # The ordering is the whole mechanism. Enrichment is what happens *after* the
     # transcript is safe, so that a crash in between loses the summary and never
     # the words.
+    #
+    # Asserted from inside the enricher rather than by recording a sequence, because
+    # what matters is not the order two calls happened to be made in -- it is that
+    # the transcript is already committed at the moment enrichment can start
+    # failing. An enricher that raises here would produce a memo with a summary and
+    # no words.
     queue = FakeQueue()
-    enricher = RecordingEnricher(Enrichment(title="A title"))
-    order = []
 
-    queue_commit = queue.commit_transcript
+    class AssertsTheTranscriptIsSafe:
+        name = "asserts"
 
-    def record_commit(*args, **kwargs):
-        order.append("commit")
+        def enrich(self, transcript):
+            assert queue.committed, "enrichment ran before the transcript was committed"
 
-        return queue_commit(*args, **kwargs)
+            return Enrichment(title="A title")
 
-    queue.commit_transcript = record_commit
-    original_enrich = enricher.enrich
+    run(queue, claimed_memo(), RecordingStt(), audio_dir, enricher=AssertsTheTranscriptIsSafe())
 
-    def record_enrich(transcript):
-        order.append("enrich")
-
-        return original_enrich(transcript)
-
-    enricher.enrich = record_enrich
-
-    run(queue, claimed_memo(), RecordingStt(), audio_dir, enricher=enricher)
-
-    assert order == ["commit", "enrich"]
+    assert queue.finished[0][1] == Enrichment(title="A title")
 
 
 def test_a_job_that_lost_the_fence_on_the_transcript_stops_there(audio_dir, normalizer):
@@ -428,8 +424,6 @@ def test_the_job_budget_has_a_floor_for_short_recordings():
 def test_the_shipped_lease_clears_the_shipped_budget():
     # The one constraint on REAP_AFTER_SECONDS, asserted rather than left to the
     # comment that derives it: below the budget, the reaper requeues healthy jobs.
-    from memo_ai.config import DEFAULT_MAX_AUDIO_SECONDS, DEFAULT_REAP_AFTER_SECONDS
-
     assert DEFAULT_REAP_AFTER_SECONDS > pipeline.job_budget_seconds(DEFAULT_MAX_AUDIO_SECONDS)
 
 
