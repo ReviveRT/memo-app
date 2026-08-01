@@ -179,10 +179,14 @@ def _install_signal_handlers(shutdown: threading.Event) -> None:
     the documented one either. The Compose spec gives `stop_grace_period` a default
     of 10s; measured on Compose v5.0.2, an unset grace period SIGKILLs a
     handler-less container after **1.2s**, while an explicit `stop_grace_period: 10s`
-    takes 10.2s. Since a job today finishes in about 4 ms either number is ample, but
-    a 1.2s window would silently stop being ample the moment MEMO-14 makes
-    transcription take seconds -- so docker-compose.yml now sets the value rather
-    than inheriting it, and says why at the line.
+    takes 10.2s. That gap was worth setting the value explicitly rather than
+    inheriting it, and docker-compose.yml says so at the line.
+
+    It stopped being academic with MEMO-13. A job used to be a claim and a fake
+    provider call -- about 4 ms -- and it now runs ffmpeg first: roughly 300 ms for
+    a few seconds of audio, and 11.2 s measured on the longest recording the byte
+    cap can admit. The inherited ~1.2s window would already be too short for a
+    long memo; the explicit 30s is not.
 
     A SIGKILL still leaves the row in `processing`, and so does any job that outlives
     whatever that grace period is. Those are the reaper's cases, and the reason it is

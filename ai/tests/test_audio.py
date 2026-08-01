@@ -221,13 +221,42 @@ def test_a_file_ffmpeg_cannot_decode_fails_without_leaking_its_stderr(tmp_path, 
     assert "0x" not in message
 
 
+def test_a_video_with_no_audio_track_says_so_rather_than_claiming_it_is_corrupt(tmp_path):
+    # SniffedAudioType accepts real video files and points here as the thing that
+    # "takes the audio stream and discards the rest" -- so this is a reachable
+    # upload, not a hypothetical. Left to ffmpeg it exits 234 with "Output file
+    # does not contain any stream", which would have put "could not be decoded" on
+    # a file that decoded perfectly.
+    source = tmp_path / "screencap.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-nostdin", "-v", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc=duration=2:size=160x120:rate=10",
+            "-c:v", "libx264", str(source),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    with pytest.raises(audio.AudioError) as raised:
+        with audio.normalize(source, audio.OPUS, max_seconds=60):
+            pytest.fail("normalize yielded audio from a file that has none")
+
+    assert str(raised.value) == "This file has no audio track, so there is nothing to transcribe."
+
+
 def test_a_missing_binary_is_reported_as_a_configuration_problem(tmp_path, monkeypatch):
+    # A real source, so the audio-stream pre-check passes and the failure is the
+    # one being tested rather than an undecodable file.
+    #
     # Not SttUnavailable, deliberately: that subclass means "walk the fallback
-    # chain", and every provider in that chain is fed by this module.
+    # chain", and every provider in that chain is fed by this module, so walking
+    # it would just find the same missing binary.
+    source = sine_without_duration(tmp_path / "piped.webm")
     monkeypatch.setattr(audio, "_ffmpeg_command", lambda *_: ["memo-no-such-binary"])
 
     with pytest.raises(audio.AudioError) as raised:
-        with audio.normalize(tmp_path / "any.webm", audio.OPUS, max_seconds=60):
+        with audio.normalize(source, audio.OPUS, max_seconds=60):
             pytest.fail("normalize yielded audio without ffmpeg present")
 
     assert not isinstance(raised.value, SttUnavailable)

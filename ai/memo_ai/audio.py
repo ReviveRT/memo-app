@@ -62,6 +62,14 @@ PROBE_TIMEOUT_SECONDS = 30.0
 # difference between them is not one the reader of a memo can act on.
 _UNMEASURABLE = "The length of this recording could not be determined, so it was not transcribed."
 
+# For bytes ffmpeg cannot read at all, as opposed to a file it reads fine and finds
+# nothing to transcribe in. Those are different sentences on purpose -- see
+# _require_audio_stream.
+_UNDECODABLE = (
+    "This recording could not be decoded. It may be incomplete or in a format "
+    "this server does not support."
+)
+
 
 @dataclass(frozen=True)
 class AudioFormat:
@@ -82,11 +90,26 @@ class AudioFormat:
 
 # The default, and the one a hosted provider must use.
 #
-# Measured on 600 seconds of Chrome-style webm/opus: 16 kHz mono WAV is 19.2 MB --
-# larger than the 12.3 MB input and 77 percent of OpenAI's 25 MB request limit,
-# which is a request that fails on a memo the byte cap already accepted. The same
-# audio as Opus at 24 kbps is 2.6 MB. Checked again at this task's ratio on a 7.3
-# second clip: 31 KB Opus against 234 KB WAV, which extrapolates to the same pair.
+# The number that decides it is WAV's, and it is the one that can be checked
+# exactly, because PCM does not depend on content: 600 seconds -- a memo at the
+# full MAX_AUDIO_SECONDS -- is **19.20 MB** at 16 kHz mono 16-bit, which is **77
+# percent** of OpenAI's 25 MB request limit. Both measured here. So WAV fits, with
+# almost nothing to spare, on the longest memo this app accepts.
+#
+# Against that, this app uploads that same memo in about 3.7 MB: MEMO-11 asks
+# MediaRecorder for 48 kbps and measured 49 kbps on the wire through the real
+# Record button. Normalizing to WAV would therefore carry roughly five times the
+# bytes the user actually recorded, to say the same words.
+#
+# The ticket puts the Opus output at 2.6 MB and that is *not* confirmed here, on
+# purpose: Opus is variable-bitrate, so its size is a property of the content, and
+# the synthetic tone available to this task encodes to 3.05 MB rather than 2.6 MB.
+# Either figure is a fraction of WAV's, which is all the decision needs. Real
+# recordings would settle it -- see ai/tests/fixtures/.
+#
+# An earlier version of this comment compared WAV against a 12.3 MB input, which is
+# what a Chrome recording costs at its *default* bitrate. This app stopped
+# producing those at MEMO-11.
 #
 # The cost of choosing Opus is one decode step on the local path, which is why WAV
 # exists below rather than being deleted.
@@ -183,14 +206,24 @@ def normalize(source: Path, fmt: AudioFormat, max_seconds: float) -> Iterator[No
     ``max_seconds``, before the caller ever reaches the provider -- which is the
     whole point of measuring here rather than after transcription.
     """
-    with tempfile.TemporaryDirectory(prefix="memo-normalize-") as scratch:
+    _require_audio_stream(source)
+
+    # ignore_cleanup_errors, because of *when* this cleanup runs. It happens on the
+    # way out of the caller's `with`, which is after the provider has already
+    # returned a transcript -- so an OSError raised here would propagate into
+    # memo_ai/pipeline.py's generic handler and fail a memo that had just been
+    # transcribed successfully, discarding work that on a hosted provider was paid
+    # for. MEMO-16's rule is that a transcript is never lost, and a leaked file in
+    # /tmp is a much smaller problem than losing one.
+    with tempfile.TemporaryDirectory(
+        prefix="memo-normalize-", ignore_cleanup_errors=True
+    ) as scratch:
         destination = Path(scratch) / f"normalized{fmt.suffix}"
 
         _run(
             _ffmpeg_command(source, destination, fmt),
             NORMALIZE_TIMEOUT_SECONDS,
-            "This recording could not be decoded. It may be incomplete or in a format "
-            "this server does not support.",
+            _UNDECODABLE,
         )
 
         duration_ms = _probe_duration_ms(destination)
@@ -209,6 +242,47 @@ def normalize(source: Path, fmt: AudioFormat, max_seconds: float) -> Iterator[No
             )
 
         yield NormalizedAudio(path=destination, duration_ms=duration_ms, format=fmt)
+
+
+def _require_audio_stream(source: Path) -> None:
+    """
+    Refuse a file that decodes fine and has nothing to transcribe in it.
+
+    This exists because ``App\\Http\\Rules\\SniffedAudioType`` accepts real video
+    files, and says so: an audio-only WebM and an audio-only MP4 are the same
+    containers as the video ones with no video track, libmagic reads the
+    container, so the allowlist that admits every genuine Chrome and Safari
+    recording admits a screen capture too. That rule points at this module as the
+    thing that "takes the audio stream and discards the rest" -- which is true
+    right up until there is no audio stream.
+
+    Without this check that case reached ffmpeg, which exited 234 with ``Output
+    file does not contain any stream``, and the row then said the recording could
+    not be *decoded*. It decoded perfectly. Somebody who uploaded a silent screen
+    recording would have gone looking for a corrupt file.
+
+    One extra ffprobe per voice memo, about 10 ms against a job of several
+    hundred. Checked on the cases that matter rather than matched against
+    ffmpeg's stderr, which is version- and locale-dependent: a video-only MP4
+    returns empty with exit 0, a Chrome WebM with no duration returns ``0``, and
+    a corrupt or empty file exits non-zero and is reported as undecodable by
+    :func:`_run` -- which is the right answer for those.
+    """
+    streams = _run(
+        [
+            "ffprobe",
+            "-v", "error",
+            "-select_streams", "a",
+            "-show_entries", "stream=index",
+            "-of", "csv=p=0",
+            str(source),
+        ],
+        PROBE_TIMEOUT_SECONDS,
+        _UNDECODABLE,
+    )
+
+    if not streams.strip():
+        raise AudioError("This file has no audio track, so there is nothing to transcribe.")
 
 
 def _ffmpeg_command(source: Path, destination: Path, fmt: AudioFormat) -> list[str]:

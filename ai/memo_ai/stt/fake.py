@@ -36,11 +36,19 @@ class FakeStt:
     provider usable from a test that has no volume mounted at all, and it is what
     MEMO-14 means when it specifies "`fake` is instant".
 
-    What that costs, stated rather than discovered later: this provider does not
-    exercise the missing-file or corrupt-file paths. Those are MEMO-14's
-    acceptance criteria against the local provider, and the part that *can* be
-    checked without bytes -- a memo that owes a transcript but carries no
-    `audio_path` -- is checked one level up, in memo_ai/pipeline.py.
+    What that costs is smaller than it was. This provider still does not exercise
+    the missing-file or corrupt-file paths, but as of MEMO-13 nothing needs it to:
+    normalization runs *before* whichever provider is configured, so a missing
+    blob, a file ffmpeg cannot decode, and a video with no audio track are all
+    caught in memo_ai/audio.py and never reach here. That is true on
+    `STT_PROVIDER=fake` too, which makes the fake a fair rehearsal of the queue
+    rather than a path that skips the checks.
+
+    The consequence worth stating: a voice memo on the fake provider now does real
+    work -- three ffmpeg-family processes -- before it gets its canned sentence. It
+    is no longer instant in the way MEMO-08 meant, though it is still the fastest
+    provider by a wide margin, because it is the transcription that is free rather
+    than the pipeline.
     """
 
     name = "fake"

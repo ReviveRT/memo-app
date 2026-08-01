@@ -42,11 +42,11 @@ That is not a compromise, it is the only place the check can happen: the duratio
 is not known until the worker has re-encoded the file. The next section explains
 why.
 
-What _is_ enforced at the door is size: a recording over `MAX_AUDIO_BYTES` (12 MiB) is refused
-with a 413 naming the limit, and nothing is stored. The recorder asks for 48 kbps, so
-that is about **34 minutes** — comfortably past the 10-minute duration cap, which is
-the limit meant to stop a long memo, and which says so in words about length rather
-than megabytes.
+What _is_ enforced at the door is size: a recording over `MAX_AUDIO_BYTES` (12
+MiB) is refused with a 413 naming the limit, and nothing is stored. The recorder
+asks for 48 kbps, so that is about **34 minutes** — comfortably past the 10-minute
+duration cap, which is the limit meant to stop a long memo, and which says so in
+words about length rather than megabytes.
 
 Left to the browser's own default it would not be. Measured through the app in
 Chromium: the default is 128 kbps, 153 kbps once the WebM container is counted, which
@@ -99,11 +99,13 @@ changes the bill by exactly zero. It is there for two other reasons:
   an oversized one.
 
 The output is Opus at 24 kbps, not WAV, and that matters more than it sounds.
-16 kHz mono WAV of a ten-minute memo is 19.2 MB — larger than the 12.3 MB the
-browser uploaded, and 77 percent of OpenAI's 25 MB request limit, so a memo the
-byte cap accepted would produce a request that fails. The same audio as Opus is
-2.6 MB. WAV is kept as an option for a provider that decodes in-process, which is
-what MEMO-14's local whisper will want.
+16 kHz mono WAV of a ten-minute memo — the longest this app accepts — is 19.2 MB,
+which is 77 percent of OpenAI's 25 MB request limit. The app uploaded that same
+memo in about 3.7 MB, so normalizing to WAV would mean carrying roughly five times
+what the user actually recorded, and most of the request budget, for a format
+nothing downstream asked for. Opus is a fraction of either. WAV is kept as an
+option for a provider that decodes in-process, which is what MEMO-14's local
+whisper will want.
 
 One consequence worth knowing before you go looking for a bug: an Opus stream
 always reports `48000` as its sample rate, whatever it was encoded from — the
