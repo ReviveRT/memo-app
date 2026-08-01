@@ -95,12 +95,27 @@ function formatElapsed(ms) {
       saved is no reason this button cannot be pressed, and the two write paths are
       independent all the way to two rows.
     -->
-    <button v-if="!recording" type="button" :disabled="uploading" @click="start()">
+    <!--
+      The id is MemoBackdrop's anchor: the bloom behind the page is centred on
+      whichever of these two buttons is on screen, so the light reads as coming
+      off the control rather than sitting at an arbitrary point. It is on both
+      because they are mutually exclusive -- exactly one exists at any moment, so
+      the id stays unique -- and the backdrop re-measures when this row changes
+      shape. Moving it to the section would put the bloom under the hint text
+      instead, which is the one place here that has to stay readable.
+    -->
+    <button
+      v-if="!recording"
+      id="recorder-cloud-anchor"
+      type="button"
+      :disabled="uploading"
+      @click="start()"
+    >
       {{ uploading ? 'Uploading…' : 'Record' }}
     </button>
 
     <template v-else>
-      <button type="button" @click="onStop">Stop</button>
+      <button id="recorder-cloud-anchor" type="button" @click="onStop">Stop</button>
 
       <!--
         Throwing the recording away is a separate button rather than a confirmation on
