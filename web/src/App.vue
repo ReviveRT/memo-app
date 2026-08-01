@@ -1,5 +1,6 @@
 <script setup>
 import { onMounted } from 'vue'
+import MemoBackdrop from './components/MemoBackdrop.vue'
 import MemoComposer from './components/MemoComposer.vue'
 import MemoList from './components/MemoList.vue'
 import MemoRecorder from './components/MemoRecorder.vue'
@@ -20,6 +21,14 @@ onMounted(() => load())
 </script>
 
 <template>
+  <!--
+    Outside <main> and before it, which is both of the things it needs to be: it is
+    decoration rather than content, so it does not belong inside the landmark, and
+    the layers are fixed with a negative z-index so document order does not decide
+    what covers what. It draws nothing this app depends on -- see MemoBackdrop.
+  -->
+  <MemoBackdrop />
+
   <main class="app">
     <header class="app__header">
       <h1>Memos</h1>

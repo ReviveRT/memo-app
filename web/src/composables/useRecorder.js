@@ -1,4 +1,5 @@
 import { onUnmounted, ref } from 'vue'
+import { useVoiceEnergy } from './useVoiceEnergy'
 
 /*
  * The microphone, and nothing about memos.
@@ -185,6 +186,15 @@ function failureMessage(name) {
  * }}
  */
 export function useRecorder() {
+  /*
+   * The background's meter. This file opens the microphone and is therefore the
+   * only place that can hand a stream over, but it owns nothing about what the
+   * meter does with it -- and the two calls below are the whole of the
+   * relationship. attach() is documented not to throw, so a browser without an
+   * AudioContext costs a still background rather than a recording.
+   */
+  const { attach: attachMeter, detach: detachMeter } = useVoiceEnergy()
+
   const recording = ref(false)
   const elapsedMs = ref(0)
 
@@ -334,6 +344,13 @@ export function useRecorder() {
     }
 
     recording.value = true
+
+    // After start() rather than after getUserMedia, so the meter's lifetime is the
+    // recording's rather than the stream's -- every path between the two above
+    // ends in release(), which detaches, and a background that had briefly moved
+    // to a recording that then failed to start would be describing nothing.
+    attachMeter(stream)
+
     startedAt = performance.now()
     elapsedMs.value = 0
 
@@ -511,6 +528,15 @@ export function useRecorder() {
    * time.
    */
   function release() {
+    // Detached here rather than at each of the callers, for the reason this
+    // function exists at all: every way a recording can end -- stop, discard,
+    // unmount, the device going away mid-sentence -- already comes through here,
+    // and the analyser is holding the same stream the tracks below belong to. A
+    // detach that only covered Stop would leave the audio graph open on a
+    // discarded recording, and MEMO-10's comments below record that discard() was
+    // exactly where this kind of cleanup went missing the first time.
+    detachMeter()
+
     stream?.getTracks().forEach((track) => track.stop())
     stream = null
     recorder = null

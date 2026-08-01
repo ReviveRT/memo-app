@@ -88,6 +88,149 @@ button:disabled {
   font-weight: 400;
 }
 
+/* --- backdrop -------------------------------------------------------------- */
+
+/*
+ * MemoBackdrop's three layers. Everything about *what* they draw is in that
+ * component; this is where they sit and how hard they hit.
+ *
+ * All three are fixed with a negative z-index, which puts them above the body's
+ * background and below every element in normal flow -- so no rule anywhere else
+ * needs a z-index to stay on top of them. Nothing in the app creates a stacking
+ * context between here and #app, and if something ever does, this is the first
+ * thing that will break.
+ */
+
+.cloud {
+  position: fixed;
+  inset: 0;
+  z-index: -3;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+
+  /*
+   * The canvas is rendered at about a fifth of its displayed size and stretched
+   * here, which is what makes it cheap (MemoBackdrop's RESOLUTION says why).
+   *
+   * No `filter: blur()` here, and that absence is deliberate rather than an
+   * omission -- it is where this effect's cost used to be. Blurring the stretched
+   * element means blurring 1.17 million pixels every frame; measured, it cost more
+   * than the entire rest of the page. The same blur is applied to the small
+   * offscreen as it is copied across, in MemoBackdrop's draw(), for a twentieth of
+   * the work and the same result. See BLUR_CSS_PX there.
+   *
+   * The scale stays, and it belongs to that blur: blurring samples outside the
+   * canvas as transparent, so the outermost pixels fade toward the page background
+   * and read as a soft dark frame. Oversizing pushes that fade off screen. Remove
+   * the blur and this can go too; keep one without the other and it shows.
+   */
+  transform: scale(1.06);
+}
+
+/*
+ * Grain, over the gradient and under the scrim.
+ *
+ * Wide, smooth, dark gradients band visibly on 8-bit panels -- as concentric
+ * steps, which on a background that is nothing but concentric gradients reads as
+ * the effect being crude rather than as a display limit. A few percent of noise
+ * dissolves them. Static, so the compositor rasterises it once.
+ */
+.cloud__grain {
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  pointer-events: none;
+  opacity: 0.035;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/*
+ * A wash of the page colour over the bloom, centred on the bloom itself --
+ * MemoBackdrop writes the two custom properties from the same anchor it draws
+ * from.
+ *
+ * Deliberately weak, and it is worth knowing why rather than turning it up. Wound
+ * up far enough to carry the contrast on its own, it replaces the core with a grey
+ * smear: it covers the brightest part of the picture instead of taming it, and
+ * that part is the picture. The contrast is carried by the text-shadow rule below.
+ * There is no plateau at the centre for the same reason -- a flat disc of
+ * background colour is visible as a disc.
+ */
+.cloud__scrim {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.5;
+
+  /*
+   * Wide and shallow, and that shape is the whole of what this rule got wrong the
+   * first time. As a 46rem x 22rem ellipse it was 352px tall -- far past the two
+   * rows of text it exists for -- so it dimmed most of the upper bloom, and because
+   * it is pinned to the anchor while the blobs drift up to ~80px away from it, it
+   * frequently sat on the halo rather than on the bright core. That reads as a
+   * grey-brown smudge beside the glow: paying the full aesthetic price for the
+   * protection and often not covering the thing that needed protecting.
+   *
+   * 12rem tall hugs the band from the h1 down through the recorder row, so the
+   * falloff is quick and the bloom above and below it stays clean. Being narrower
+   * vertically also means it can be *stronger* -- 0.5 rather than 0.32 -- which is
+   * what the measurement asked for: at peak loudness the cloud under the heading
+   * reaches 0.91 relative luminance unscrimmed, and white text on that is 1.09:1.
+   */
+  background: radial-gradient(
+    42rem 12rem at var(--cloud-x, 30%) var(--cloud-y, 14%),
+    var(--bg) 0%,
+    transparent 72%
+  );
+}
+
+/*
+ * Every piece of text that sits on the background rather than on a card.
+ *
+ * At full loudness the core goes white-hot, and white on white is not a contrast
+ * problem that can be solved by choosing a different magenta -- so these get a
+ * shadow, which is the technique map labels use over arbitrary imagery. It costs
+ * one paint property and leaves the effect at full strength everywhere else.
+ *
+ * A list here rather than a class in the templates, and that is the correction to
+ * a first pass that used a class: written that way it covered the h1 and the
+ * recorder hint and silently missed four other places, including the two that need
+ * it most. `.recorder__elapsed` is on screen *only* while recording -- which is
+ * exactly when the bloom is brightest -- and `.notice` is the whole of the screen
+ * when the list is empty, with nothing else drawn over the cloud at all. Naming
+ * the surfaces in one place, next to the palette they depend on, is checkable
+ * against the templates; a class has to be remembered by every component that ever
+ * renders a bare paragraph.
+ *
+ * `.notice--error` is excluded because it brings its own background.
+ *
+ * The two button selectors are here for a reason that is easy to miss: they are the
+ * *ghost* buttons -- Refresh, Discard, Clear -- and `background: transparent` means
+ * the cloud shows straight through them. Discard is the worst case on the page,
+ * because it only exists while recording and sits immediately beside the core; at
+ * peak loudness its label washes out completely. A filled button like Record brings
+ * its own background and is excluded by these selectors naturally.
+ *
+ * In the page's own background colour rather than black, so it reads as the page
+ * showing through in the light scheme instead of as a drop shadow.
+ */
+h1,
+.recorder__hint,
+.recorder__elapsed,
+.composer__hint,
+.search__status,
+.notice:not(.notice--error),
+.app__header button,
+.recorder__discard,
+.search__clear {
+  text-shadow:
+    0 1px 2px color-mix(in srgb, var(--bg) 82%, transparent),
+    0 2px 14px color-mix(in srgb, var(--bg) 70%, transparent);
+}
+
 /* --- recorder -------------------------------------------------------------- */
 
 .recorder {
