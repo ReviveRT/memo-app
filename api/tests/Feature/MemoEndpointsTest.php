@@ -71,6 +71,7 @@ final class MemoEndpointsTest extends TestCase
                 'memo' => [
                     'id', 'source', 'status', 'transcript', 'title',
                     'summary', 'tags', 'duration_ms', 'last_error', 'created_at',
+                    'collection_id', 'reminders',
                 ],
             ]);
 
@@ -159,7 +160,7 @@ final class MemoEndpointsTest extends TestCase
             ->assertJsonPath('memo.source', 'voice')
             ->assertJsonPath('memo.status', 'queued')
             // No transcript yet, which is what the worker reads as "this row owes a
-            // transcription", and what MemoList renders as "No transcript yet."
+            // transcription", and what MemoStrip renders as "No transcript yet."
             ->assertJsonPath('memo.transcript', null)
             // The same field set a text memo answers with, asserted for the same reason
             // it is asserted there: MEMO-18 replaces polled rows by id against the
@@ -170,6 +171,7 @@ final class MemoEndpointsTest extends TestCase
                 'memo' => [
                     'id', 'source', 'status', 'transcript', 'title',
                     'summary', 'tags', 'duration_ms', 'last_error', 'created_at',
+                    'collection_id', 'reminders',
                 ],
             ]);
 
@@ -350,7 +352,7 @@ final class MemoEndpointsTest extends TestCase
         // Newest-first is `ORDER BY created_at DESC` in the repository, verified
         // against a live Postgres rather than here: this asserts only that nothing
         // between the query and the JSON reorders the rows.
-        $this->assertSame(ListMemosRequest::DEFAULT_LIMIT, $this->repository->lastLimit);
+        $this->assertSame(ListMemosRequest::DEFAULT_LIMIT, $this->repository->lastQuery?->limit);
     }
 
     public function test_a_polled_list_is_never_cached(): void
@@ -366,12 +368,12 @@ final class MemoEndpointsTest extends TestCase
     public function test_limit_is_honoured_bounded_and_defaulted(): void
     {
         $this->getJson('/api/memos?limit=10')->assertOk();
-        $this->assertSame(10, $this->repository->lastLimit);
+        $this->assertSame(10, $this->repository->lastQuery?->limit);
 
         // Set but empty is "unset", the same reading App\Support\Env applies to the
         // environment: a query string built with no limit chosen must not 422.
         $this->getJson('/api/memos?limit=')->assertOk();
-        $this->assertSame(ListMemosRequest::DEFAULT_LIMIT, $this->repository->lastLimit);
+        $this->assertSame(ListMemosRequest::DEFAULT_LIMIT, $this->repository->lastQuery?->limit);
 
         // Rejected rather than clamped. A clamped 5000 answers 200 with 200 rows and
         // reads as "there are only 200 memos".
@@ -392,8 +394,7 @@ final class MemoEndpointsTest extends TestCase
         foreach (['dentist', '"call the dentist"', 'dentist -thursday', 'reorg', '50%'] as $query) {
             $this->getJson('/api/memos?q='.urlencode($query))->assertOk();
 
-            $this->assertTrue($this->repository->searched);
-            $this->assertSame($query, $this->repository->lastQuery);
+            $this->assertSame($query, $this->repository->lastQuery?->text);
         }
     }
 
@@ -422,10 +423,15 @@ final class MemoEndpointsTest extends TestCase
         foreach (['/api/memos', '/api/memos?q=', '/api/memos?q=%20%20'] as $url) {
             $this->getJson($url)->assertOk()->assertJsonPath('query', null);
 
-            // The unfiltered statement, which is the one with the index scan. A filter
-            // matching everything would answer the same rows and lose that plan.
-            $this->assertFalse($this->repository->searched);
-            $this->assertNull($this->repository->lastQuery);
+            // Null text, which is what makes the assembled statement the unfiltered one --
+            // the one with the index scan straight down memos_created_idx. A filter matching
+            // everything would answer the same rows and lose that plan.
+            //
+            // This used to be two assertions, one on a `searched` flag and one on the query
+            // itself. The flag existed because the repository had two methods to choose
+            // between; it has one now, and "was this filtered?" is the same question as "is
+            // the text null?" rather than a second fact that could disagree.
+            $this->assertNull($this->repository->lastQuery?->text);
         }
     }
 
@@ -439,8 +445,7 @@ final class MemoEndpointsTest extends TestCase
             ->assertOk()
             ->assertJsonPath('query', '0');
 
-        $this->assertTrue($this->repository->searched);
-        $this->assertSame('0', $this->repository->lastQuery);
+        $this->assertSame('0', $this->repository->lastQuery?->text);
     }
 
     public function test_a_rejected_filter_says_so_in_words_a_reader_can_act_on(): void
@@ -464,7 +469,7 @@ final class MemoEndpointsTest extends TestCase
         // match nothing. Trailing space is easy to arrive at by pasting.
         $this->getJson('/api/memos?q='.urlencode('  dentist  '))->assertOk();
 
-        $this->assertSame('dentist', $this->repository->lastQuery);
+        $this->assertSame('dentist', $this->repository->lastQuery?->text);
     }
 
     public function test_an_oversized_or_null_byte_query_is_rejected(): void
@@ -481,8 +486,10 @@ final class MemoEndpointsTest extends TestCase
             ->assertJsonValidationErrors('q');
 
         // Neither rejected request reached the database. Asserted before the passing case
-        // below, since that one legitimately sets this.
-        $this->assertFalse($this->repository->searched);
+        // below, since that one legitimately sets this -- and it is a stronger claim than it
+        // used to be: the fake records the whole MemoQuery, so a null here means list() was
+        // never called at all rather than merely that it was called without a filter.
+        $this->assertNull($this->repository->lastQuery);
 
         // Exactly at the cap passes, so the boundary is a cap and not an off-by-one.
         $this->getJson('/api/memos?q='.str_repeat('a', ListMemosRequest::MAX_QUERY_LENGTH))
@@ -496,11 +503,11 @@ final class MemoEndpointsTest extends TestCase
         // be scripted.
         $this->getJson('/api/memos?q=dentist&limit=10')->assertOk();
 
-        $this->assertSame('dentist', $this->repository->lastQuery);
-        $this->assertSame(10, $this->repository->lastLimit);
+        $this->assertSame('dentist', $this->repository->lastQuery?->text);
+        $this->assertSame(10, $this->repository->lastQuery?->limit);
 
         $this->getJson('/api/memos?q=dentist')->assertOk();
-        $this->assertSame(ListMemosRequest::DEFAULT_LIMIT, $this->repository->lastLimit);
+        $this->assertSame(ListMemosRequest::DEFAULT_LIMIT, $this->repository->lastQuery?->limit);
 
         // A bad limit is still a 422 with a filter attached; the filter must not become a
         // way around the cap.

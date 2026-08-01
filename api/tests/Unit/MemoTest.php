@@ -57,8 +57,74 @@ final class MemoTest extends TestCase
             [
                 'id', 'source', 'status', 'transcript', 'title',
                 'summary', 'tags', 'duration_ms', 'last_error', 'created_at',
+                'collection_id', 'reminders',
             ],
             array_keys(Memo::fromRow($this->row())->toArray()),
+        );
+    }
+
+    public function test_reminders_arrive_as_a_json_array_and_become_objects(): void
+    {
+        // The aggregate hands over one jsonb array per memo rather than separate rows, so
+        // this is the shape that has to survive: soonest first, with delivered_at null while
+        // a reminder is still owed. That null is what the browser acts on -- it is the whole
+        // of "has this fired yet?" -- so it has to reach the response as null and not be
+        // dropped.
+        $memo = Memo::fromRow($this->row([
+            'reminders' => '[{"id":"019fb500-0d71-7011-b678-0cb4004dc2a7",'
+                .'"remind_at":"2026-08-02T09:00:00.000Z","note":"ring the dentist",'
+                .'"delivered_at":null}]',
+        ]));
+
+        $this->assertCount(1, $memo->reminders);
+        $this->assertSame('ring the dentist', $memo->reminders[0]->note);
+        $this->assertNull($memo->reminders[0]->deliveredAt);
+
+        $this->assertSame(
+            [[
+                'id' => '019fb500-0d71-7011-b678-0cb4004dc2a7',
+                'remind_at' => '2026-08-02T09:00:00.000Z',
+                'note' => 'ring the dentist',
+                'delivered_at' => null,
+            ]],
+            $memo->toArray()['reminders'],
+        );
+    }
+
+    public function test_no_reminders_is_an_empty_list_rather_than_null(): void
+    {
+        // What the coalesce in MemoRepository::COLUMNS guarantees, and what most memos look
+        // like. jsonb_agg over no rows is NULL, so without that coalesce this field would
+        // arrive null and every reader would need a check before iterating.
+        $this->assertSame([], Memo::fromRow($this->row())->reminders);
+        $this->assertSame([], Memo::fromRow($this->row())->toArray()['reminders']);
+    }
+
+    public function test_a_reminder_missing_a_key_fails_loudly(): void
+    {
+        // The aggregate and Reminder::fromJson have to agree. Reading an absent key off an
+        // array is a warning and a null, so without the check the response would carry
+        // `"id": ""` -- a reminder that can never be acknowledged or deleted, because
+        // nothing can name it.
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('delivered_at');
+
+        Memo::fromRow($this->row([
+            'reminders' => '[{"id":"019fb500-0d71-7011-b678-0cb4004dc2a7",'
+                .'"remind_at":"2026-08-02T09:00:00.000Z","note":null}]',
+        ]));
+    }
+
+    public function test_a_filed_memo_reports_its_collection(): void
+    {
+        $memo = Memo::fromRow($this->row([
+            'collection_id' => '019fb4f0-0d71-7011-b678-0cb4004dc2a7',
+        ]));
+
+        $this->assertSame('019fb4f0-0d71-7011-b678-0cb4004dc2a7', $memo->collectionId);
+        $this->assertSame(
+            '019fb4f0-0d71-7011-b678-0cb4004dc2a7',
+            $memo->toArray()['collection_id'],
         );
     }
 
@@ -182,6 +248,16 @@ final class MemoTest extends TestCase
             // created_at so that ORDER BY in the list query cannot bind to it -- see
             // MemoRepository::COLUMNS.
             'created_at_iso' => '2026-07-31T09:00:00.000Z',
+
+            // Null is a fast memo -- one recorded without stopping to file it -- and is what
+            // every memo starts as. insert() does not take this column at all.
+            'collection_id' => null,
+
+            // A jsonb array, as the aggregate in MemoRepository::COLUMNS produces it, and
+            // `[]` rather than NULL for a memo with no reminders. That coalesce is what lets
+            // every reader iterate without a null check, so the default here is the one the
+            // query guarantees.
+            'reminders' => '[]',
         ], $overrides);
     }
 }

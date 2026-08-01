@@ -6,6 +6,7 @@ namespace App\Http\Controllers;
 
 use App\Http\Requests\ListMemosRequest;
 use App\Http\Requests\StoreMemoRequest;
+use App\Http\Requests\UpdateMemoRequest;
 use App\Services\Memos\Memo;
 use App\Services\Memos\MemoService;
 use Illuminate\Http\JsonResponse;
@@ -21,13 +22,18 @@ use Symfony\Component\HttpFoundation\Response;
  * of anything the frontend already read. The two keys are named rather than a shared
  * "data" so that a response tells you which route produced it.
  *
- * No 4xx handling here. Validation failures are raised by the FormRequests and
+ * Almost no 4xx handling here. Validation failures are raised by the FormRequests and
  * rendered as 422 JSON by bootstrap/app.php's unconditional shouldRenderJsonWhen,
  * and a database that is down is a 500 -- MEMO-17 owns failure UX, and inventing a
  * second, different answer for it here would be the thing that task then has to
  * undo. An unwritable audio volume takes the same 500, and deliberately: a rejected
  * recording is something the person recording can fix and a volume they cannot mount
  * is not, which is the distinction App\Exceptions\StorageException exists to draw.
+ *
+ * The one exception is update()'s 404, and it is here rather than in the service because
+ * "no row matched" is not an error at any layer below HTTP -- an UPDATE that changes
+ * nothing is a perfectly ordinary statement. Turning that into a status code is precisely
+ * this class's job.
  */
 final class MemoController extends Controller
 {
@@ -58,11 +64,42 @@ final class MemoController extends Controller
         return response()->json(['memo' => $memo->toArray()], Response::HTTP_CREATED);
     }
 
+    /**
+     * Move a memo into a collection, or back out of one.
+     *
+     * Answers with the whole memo rather than with an acknowledgement, which is the same
+     * choice store() makes and for a stronger reason here: the frontend reconciles its list
+     * by id (MEMO-18), so a route that returns the row in its new state needs no follow-up
+     * GET and cannot leave the client holding a memo whose `collection_id` disagrees with
+     * the database.
+     *
+     * 200 rather than 201 -- nothing was created -- and 404 when the memo does not exist or
+     * when the collection named does not. The service cannot tell those two apart and
+     * deliberately does not try; the message names both, because the client has the same
+     * one thing to do about either.
+     *
+     * $memo arrives as a string rather than as a model. There is no Eloquent in this
+     * project, so there is no implicit route binding to lean on -- the uuid shape is
+     * enforced by `whereUuid` on the route, and existence is answered by the UPDATE itself
+     * rather than by a SELECT that would only race it.
+     */
+    public function update(UpdateMemoRequest $request, string $memo): JsonResponse
+    {
+        $moved = $this->memos->moveToCollection($memo, $request->collectionId());
+
+        if ($moved === null) {
+            abort(
+                Response::HTTP_NOT_FOUND,
+                'That memo or collection no longer exists. Refresh and try again.',
+            );
+        }
+
+        return response()->json(['memo' => $moved->toArray()]);
+    }
+
     public function index(ListMemosRequest $request): JsonResponse
     {
-        $query = $request->searchQuery();
-
-        $memos = $this->memos->recent($query, $request->limit());
+        $memos = $this->memos->list($request->memoQuery());
 
         return response()
             ->json([
@@ -74,10 +111,24 @@ final class MemoController extends Controller
                 // The filter the rows came back for, echoed because the client cannot
                 // otherwise tell which query a response belongs to -- searching is
                 // debounced and polled, so a response can arrive after the box has moved
-                // on, and the frontend discards a stale one by comparing this. null when
-                // unfiltered, so the key is always present and always means the same
-                // thing; this is the room the envelope was added for.
-                'query' => $query,
+                // on, and the frontend captions the list from this rather than from what
+                // is currently typed. null when unfiltered, so the key is always present
+                // and always means the same thing; this is the room the envelope was added
+                // for.
+                'query' => $request->searchQuery(),
+
+                // The other three filters, echoed for the same reason and added as
+                // siblings rather than folded into `query`. `query` keeps its type and its
+                // meaning -- a string or null -- because the frontend already reads it,
+                // and turning it into an object would be a breaking change to buy tidiness.
+                //
+                // These are echoed as the client sent them rather than as the normalised
+                // instants the window was built from. The caption says "19 Jul - 23 Jul" in
+                // the reader's own timezone, and a UTC instant is not what it needs to say
+                // that; TimeWindow's normalisation is for comparing rows, not for display.
+                'from' => $request->validated()['from'] ?? null,
+                'to' => $request->validated()['to'] ?? null,
+                'collection' => $request->validated()['collection'] ?? null,
             ])
             // The list is polled every couple of seconds while anything is still
             // transcribing (MEMO-18), and the whole point of each tick is that the
