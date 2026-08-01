@@ -45,10 +45,7 @@ def main() -> int:
     log.configure(settings.log_level)
 
     try:
-        provider = stt.resolve(settings.stt_provider, settings)
-        # Not used by this task -- MEMO-14 wires the chain. Validated here so a typo
-        # in it is caught on the boot after the edit.
-        stt.require_known("STT_FALLBACK", settings.stt_fallback)
+        provider = stt.resolve_chain(settings)
     except ConfigError as error:
         logger.error("%s", error)
 
@@ -57,9 +54,21 @@ def main() -> int:
     shutdown = threading.Event()
     _install_signal_handlers(shutdown)
 
+    # The settings rather than `provider.name`, which is no longer the same thing:
+    # a chain names both of its members and a collapsed one names neither variable.
+    # What a reader of this line wants is what the *configuration* says, so that it
+    # can be compared against a .env -- which provider actually produced a given
+    # transcript is a property of that memo and is recorded on its row.
+    #
+    # `stt_model` is logged too, as of MEMO-14. It is inert on `fake` and the whole
+    # of the local provider's cost and quality, and nothing else in the logs would
+    # say which model a slow transcription was running.
     logger.info(
-        "ai-worker starting: stt_provider=%s audio_dir=%s max_audio=%.0fs poll=%.1fs",
-        provider.name,
+        "ai-worker starting: stt_provider=%s stt_fallback=%s stt_model=%s "
+        "audio_dir=%s max_audio=%.0fs poll=%.1fs",
+        settings.stt_provider,
+        settings.stt_fallback,
+        settings.stt_model,
         settings.audio_dir,
         settings.max_audio_seconds,
         settings.poll_seconds,

@@ -7,6 +7,7 @@ import pytest
 from memo_ai import stt
 from memo_ai.config import ConfigError, Settings
 from memo_ai.stt.fake import CANNED_TRANSCRIPT, FakeStt
+from memo_ai.stt.local import LocalWhisperStt
 from memo_ai.stt.unimplemented import UnimplementedStt
 
 SETTINGS = Settings.from_env({"DATABASE_URL": "postgresql://memo:memo@db:5432/memo"})
@@ -40,34 +41,49 @@ def test_fake_never_touches_the_filesystem():
     assert result.text == CANNED_TRANSCRIPT
 
 
-@pytest.mark.parametrize("name", ["local", "openai"])
-def test_a_declared_but_unimplemented_provider_resolves_and_fails_only_on_use(name):
-    # The split that keeps `docker compose up` converging on a clean checkout:
-    # `local` is the committed default in docker-compose.yml, .env.example and the
-    # README, so resolving it must not be a boot failure. It is a per-memo failure
-    # instead, and today it is unreachable -- only a memo with `transcript IS NULL`
-    # gets here, and only MEMO-11's upload endpoint creates one.
-    provider = stt.resolve(name, SETTINGS)
+def test_local_resolves_to_the_real_provider_and_carries_the_configured_model():
+    # The one thing `settings` was in resolve's signature for since MEMO-08.
+    provider = stt.resolve(
+        "local",
+        Settings.from_env(
+            {"DATABASE_URL": "postgresql://memo:memo@db:5432/memo", "STT_MODEL": "small"}
+        ),
+    )
+
+    assert isinstance(provider, LocalWhisperStt)
+    assert provider.model_size == "small"
+    # Resolve runs at boot on both replicas whether or not a voice memo ever
+    # arrives, so it must not fetch a weight. tests/test_local_stt.py proves that
+    # against a loader; this only checks the default is carried, not acted on.
+    assert stt.resolve("local", SETTINGS).model_size == "base"
+
+
+def test_a_declared_but_unbuilt_provider_resolves_and_fails_only_on_use():
+    # The split that keeps `docker compose up` converging: a name in the README's
+    # variable table must not be able to stop the worker starting. It is a
+    # per-memo failure instead, and SttUnavailable means the chain routes around
+    # it -- see tests/test_chain.py.
+    provider = stt.resolve("openai", SETTINGS)
 
     assert isinstance(provider, UnimplementedStt)
-    assert provider.name == name
+    assert provider.name == "openai"
 
     with pytest.raises(stt.SttUnavailable) as raised:
         provider.transcribe(Path("/data/audio/memo.webm"))
 
     # The message is what lands in `memos.last_error` and reaches the browser, so
     # it has to name the way out rather than just the problem.
-    assert "STT_PROVIDER=fake" in str(raised.value)
+    assert "STT_PROVIDER=local" in str(raised.value)
 
 
-def test_an_unimplemented_provider_is_not_silently_swapped_for_the_fake():
+def test_an_unbuilt_provider_is_not_silently_swapped_for_the_fake():
     # The worst available behaviour, stated as a test: substituting canned text for
-    # a configuration that asked for real transcription would pass MEMO-08's
-    # acceptance and lie in production.
-    assert stt.resolve("local", SETTINGS).name == "local"
+    # a configuration that asked for real transcription would pass every acceptance
+    # criterion and lie in production.
+    assert stt.resolve("openai", SETTINGS).name == "openai"
 
     with pytest.raises(stt.SttUnavailable):
-        stt.resolve("local", SETTINGS).transcribe(Path("/x.webm"))
+        stt.resolve("openai", SETTINGS).transcribe(Path("/x.webm"))
 
 
 def test_an_unknown_provider_refuses_to_start_and_lists_the_valid_names():

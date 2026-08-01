@@ -15,3 +15,21 @@
 # ai/Dockerfile has the reason the base image is slim anyway, and it is a different
 # package's problem.
 psycopg[binary]==3.3.4
+
+# The local speech-to-text path (MEMO-14). MIT, like CTranslate2 under it and the
+# Whisper weights it fetches -- no account, no key, no rate limit, and offline
+# after the first fetch.
+#
+# It is the expensive line in this file and the number is worth having in front of
+# whoever reads it next: 330 MB of site-packages, taking the ai image from 822 MB
+# to about 1.25 GB, measured on arm64. Four packages are most of it -- ctranslate2
+# (60 MB, the inference engine), PyAV and its bundled ffmpeg libraries (95 MB),
+# onnxruntime (50 MB, for the voice-activity filter) and numpy (66 MB).
+#
+# PyAV's copy of ffmpeg genuinely is a second one: ai/Dockerfile installs Debian's
+# for the `ffmpeg` and `ffprobe` binaries memo_ai/audio.py shells out to, and this
+# is the in-process decoder faster-whisper reads the normalized file with. Not
+# worth removing -- the alternative is feeding whisper raw samples this project
+# would then have to decode itself, to save a fraction of what the model weights
+# cost once MEMO-15 bakes them in.
+faster-whisper==1.2.1
