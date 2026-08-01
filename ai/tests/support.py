@@ -10,10 +10,14 @@ the code does when the fence loses. Whether the statements themselves are correc
 was settled against a real Postgres instead.
 """
 
+import tempfile
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
+from memo_ai.audio import AudioFormat, NormalizedAudio
 from memo_ai.memos import ClaimedMemo
 from memo_ai.stt.base import Transcript
 
@@ -55,21 +59,78 @@ class RecordingStt:
         return Transcript(text=self._text, provider=self.name, model="stub-1")
 
 
+@dataclass(frozen=True)
+class NormalizeCall:
+    """One recorded call to the stubbed ``audio.normalize``."""
+
+    source: Path
+    format: AudioFormat
+    max_seconds: float
+
+
+class RecordingNormalizer:
+    """
+    Stands in for ``audio.normalize``, so the pipeline tests need no ffmpeg.
+
+    What it preserves from the real thing is everything the pipeline can observe:
+    it yields a path *different* from the source, so a test can prove the provider
+    was handed the normalized copy rather than the original, and it deletes that
+    path on exit, so the cleanup contract is exercised rather than assumed.
+
+    ``duration_ms`` and ``error`` are public and settable, because most tests care
+    about exactly one of them and constructing a variant per case reads worse.
+    """
+
+    def __init__(self, duration_ms: int = 3_400) -> None:
+        self.calls: list[NormalizeCall] = []
+        self.yielded: list[Path] = []
+        self.duration_ms = duration_ms
+        self.error: Exception | None = None
+
+    @contextmanager
+    def __call__(self, source: Path, fmt: AudioFormat, max_seconds: float):
+        self.calls.append(NormalizeCall(source, fmt, max_seconds))
+
+        if self.error is not None:
+            raise self.error
+
+        with tempfile.TemporaryDirectory(prefix="memo-test-normalize-") as scratch:
+            path = Path(scratch) / f"normalized{fmt.suffix}"
+            path.write_bytes(b"normalized audio")
+            self.yielded.append(path)
+
+            yield NormalizedAudio(path=path, duration_ms=self.duration_ms, format=fmt)
+
+
 class FakeQueue:
-    """Stands in for MemoQueue, recording what the pipeline chose to write."""
+    """
+    Stands in for MemoQueue, recording what the pipeline chose to write.
+
+    ``durations`` is kept beside the two lists rather than added to their tuples,
+    so that the assertions about *which* write happened stay readable in tests
+    that do not care about the length. The tests that do care read it by index.
+    """
 
     def __init__(self, fence_holds: bool = True) -> None:
         self.finished: list[tuple[ClaimedMemo, Transcript | None]] = []
         self.failed: list[tuple[ClaimedMemo, str]] = []
+        self.durations: list[int | None] = []
         self._fence_holds = fence_holds
 
-    def finish_ready(self, memo: ClaimedMemo, transcript: Transcript | None) -> bool:
+    def finish_ready(
+        self,
+        memo: ClaimedMemo,
+        transcript: Transcript | None,
+        duration_ms: int | None = None,
+    ) -> bool:
         self.finished.append((memo, transcript))
+        self.durations.append(duration_ms)
 
         return self._fence_holds
 
-    def fail(self, memo: ClaimedMemo, error: str) -> bool:
+    def fail(self, memo: ClaimedMemo, error: str, duration_ms: int | None = None) -> bool:
         self.failed.append((memo, error))
+        self.durations.append(duration_ms)
 
         return self._fence_holds
 

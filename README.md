@@ -35,14 +35,18 @@ the API has stored it, and the transcript fills in when the worker gets to it.
 is no delete yet.
 
 The elapsed timer next to the button is there so you know the length before you
-send it. Nothing enforces a duration at the moment; the `MAX_AUDIO_SECONDS` cap
-below is applied in the worker and arrives with MEMO-13.
+send it. A recording longer than `MAX_AUDIO_SECONDS` (10 minutes) is **accepted,
+stored, and then failed by the worker** rather than refused at the door — the memo
+appears in the list and turns into a failure naming both its length and the limit.
+That is not a compromise, it is the only place the check can happen: the duration
+is not known until the worker has re-encoded the file. The next section explains
+why.
 
-What _is_ enforced is size: a recording over `MAX_AUDIO_BYTES` (12 MiB) is refused
-with a 413 naming the limit, and nothing is stored. The recorder asks for 48 kbps, so
-that is about **34 minutes** — comfortably past the 10-minute duration cap, which is
-the limit meant to stop a long memo, and which says so in words about length rather
-than megabytes.
+What _is_ enforced at the door is size: a recording over `MAX_AUDIO_BYTES` (12
+MiB) is refused with a 413 naming the limit, and nothing is stored. The recorder
+asks for 48 kbps, so that is about **34 minutes** — comfortably past the 10-minute
+duration cap, which is the limit meant to stop a long memo, and which says so in
+words about length rather than megabytes.
 
 Left to the browser's own default it would not be. Measured through the app in
 Chromium: the default is 128 kbps, 153 kbps once the WebM container is counted, which
@@ -65,13 +69,53 @@ are: Chrome and Edge produce WebM, Safari MP4, Firefox Ogg — including when
 Firefox's own `MediaRecorder` says it is producing WebM ([Mozilla bug
 1501308](https://bugzilla.mozilla.org/show_bug.cgi?id=1501308)). The API
 identifies the file from its bytes rather than from anything the browser
-claims, and MEMO-13 normalizes it before transcription.
+claims, and the worker normalizes it before transcription.
 
 That identification is also what decides whether an upload is accepted at all:
 anything that is not one of the containers the app can transcribe is refused
 with a 422 naming what the file turned out to be. Renaming a document to
 `.webm` does not get it past this, and neither does the `Content-Type` the
 request carries.
+
+### Normalization, and where the duration comes from
+
+Before transcription the worker runs every recording through ffmpeg to 16 kHz
+mono, then measures the result with ffprobe. Both binaries live in the `ai`
+image; the PHP image has neither.
+
+This is not a cost saving, and it is worth saying so because it looks like one.
+Hosted transcription is billed per minute of audio _duration_, so resampling
+changes the bill by exactly zero. It is there for two other reasons:
+
+- **One decode path.** Chrome WebM, Firefox Ogg and Safari MP4 stop being three
+  problems after this step.
+- **A duration you can trust.** This is the load-bearing one. Chrome streams its
+  WebM to a sink it cannot seek back into, so it never returns to fill in the
+  duration — the file arrives with no Duration element and `ffprobe` answers
+  `N/A`, not a number. Measured across the three browsers, Chrome is the only one
+  that does this: Firefox's Ogg and Safari's MP4 both carry a duration. That does
+  not help, because nothing upstream knows which browser sent a given file — and
+  Safari's number is 39 ms longer than its own audio, from AAC encoder delay. So
+  the source duration is either missing or slightly wrong, and the one measured
+  after normalization is neither. That is why `MAX_AUDIO_SECONDS` is enforced in
+  the worker and cannot be enforced at the API edge, and why a memo over the cap
+  fails after being stored rather than being refused with a 413 like an oversized
+  one.
+
+The output is Opus at 24 kbps, not WAV, and that matters more than it sounds.
+16 kHz mono WAV of a ten-minute memo — the longest this app accepts — is 19.2 MB,
+which is 77 percent of OpenAI's 25 MB request limit. The app uploaded that same
+memo in about 3.7 MB, so normalizing to WAV would mean carrying roughly five times
+what the user actually recorded, and most of the request budget, for a format
+nothing downstream asked for. Opus is a fraction of either. WAV is kept as an
+option for a provider that decodes in-process, which is what MEMO-14's local
+whisper will want.
+
+One consequence worth knowing before you go looking for a bug: an Opus stream
+always reports `48000` as its sample rate, whatever it was encoded from — the
+format fixes the decoder's rate. The 16 kHz is real (everything above 8 kHz is
+gone, and the file is a fraction of the size), but `ffprobe` will not say `16000`
+unless you ask for the WAV output.
 
 ## Searching
 
@@ -126,7 +170,7 @@ reference and contains no real credentials.
 | `ANTHROPIC_API_KEY` | _(empty)_ | Optional. Enables Claude enrichment |
 | `ENRICH_MODEL` | `claude-opus-5` | Claude model for title/summary/tags/category |
 | `MAX_AUDIO_BYTES` | `12582912` | Upload byte cap for the API edge (12 MiB). Anything larger is a 413. Raising it above `upload_max_filesize` (16 MiB, in `api/conf.d/uploads.ini`) silently breaks uploads instead of widening them — `/api/health` reports both numbers and flags the mismatch |
-| `MAX_AUDIO_SECONDS` | `600` | Duration cap enforced in the worker after normalization |
+| `MAX_AUDIO_SECONDS` | `600` | Duration cap, enforced in the worker after normalization because that is the first point a duration exists. A memo over it is stored and then failed, not refused. Zero or negative is refused at boot |
 | `WORKER_POLL_SECONDS` | `1.0` | How long an `ai-worker` replica waits after finding the queue empty. Bounds how long a new memo sits in `queued`, not how fast the queue drains |
 | `AUDIO_DIR` | `/data/audio` | Audio path inside the containers, on the shared `audio` volume. Changing it needs a rebuild with a matching `--build-arg AUDIO_DIR` — see the note in `.env.example` |
 
@@ -204,6 +248,15 @@ the install does not persist. `--user 0:0` because the worker runs as a non-root
 user that cannot write into site-packages. No database is needed: the tests that
 would need one are the claim and the fence, and those are verified against a real
 Postgres instead — `ai/memo_ai/memos.py` records what those runs showed.
+
+ffmpeg _is_ needed by `tests/test_audio.py`, which normalizes real files rather
+than mocking the transcode. Run from the `ai` image as above it is present; run on
+a bare host without it, those tests skip and the rest of the suite still passes.
+
+`tests/test_fixtures.py` is the three-browser acceptance check and needs genuine
+recordings in `ai/tests/fixtures/`, since no synthesized file reproduces the
+missing-duration defect. It skips and names what is missing until they are there —
+`ai/tests/fixtures/README.md` has the capture instructions.
 
 _TODO (MEMO-26): running the api tests, running a service outside Docker, applying
 a new migration._

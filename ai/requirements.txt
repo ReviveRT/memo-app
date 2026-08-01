@@ -3,9 +3,10 @@
 # against, on an image that is otherwise reproducible.
 #
 # psycopg 3, not psycopg2, and the [binary] extra rather than the pure-python
-# build. The extra ships a wheel with libpq compiled in, which is what keeps this
-# image free of `libpq-dev`, gcc and an apt layer -- there is no `apt-get` in
-# ai/Dockerfile at all, and that is why.
+# build. The extra ships a wheel with libpq compiled in, which is what keeps
+# `libpq-dev` and gcc out of the image. There is an apt layer in ai/Dockerfile as
+# of MEMO-13, but it installs ffmpeg and nothing else -- no compiler and no
+# `-dev` package reaches this image on the driver's account.
 #
 # What this does *not* decide is glibc versus musl, and the first version of this
 # comment claimed it did. Checked against PyPI instead of asserted: psycopg-binary

@@ -8,7 +8,7 @@ import threading
 
 import psycopg
 
-from memo_ai import db, log, pipeline, stt
+from memo_ai import audio, db, log, pipeline, stt
 from memo_ai.config import ConfigError, Settings
 from memo_ai.memos import MemoQueue
 
@@ -58,11 +58,24 @@ def main() -> int:
     _install_signal_handlers(shutdown)
 
     logger.info(
-        "ai-worker starting: stt_provider=%s audio_dir=%s poll=%.1fs",
+        "ai-worker starting: stt_provider=%s audio_dir=%s max_audio=%.0fs poll=%.1fs",
         provider.name,
         settings.audio_dir,
+        settings.max_audio_seconds,
         settings.poll_seconds,
     )
+
+    # A warning, not a refusal. Text memos never reach ffmpeg, so a worker without
+    # it still drains half the queue -- and MEMO-08's rule, set by UnimplementedStt,
+    # is that a missing capability fails the memo that needs it rather than the boot
+    # that might not. `restart: unless-stopped` would turn the alternative into a
+    # restart loop that takes text memos down too. Logged at boot anyway, because the
+    # per-memo message is only seen by whoever recorded that memo.
+    if not audio.ffmpeg_available():
+        logger.warning(
+            "ffmpeg or ffprobe is not on PATH -- voice memos will fail until it is. "
+            "The image built by ai/Dockerfile has both."
+        )
 
     _run(settings, provider, shutdown)
 
@@ -100,7 +113,13 @@ def _run(settings: Settings, provider: stt.SttProvider, shutdown: threading.Even
                         memo.source,
                         memo.attempts,
                     )
-                    pipeline.run_job(queue, memo, provider, settings.audio_dir)
+                    pipeline.run_job(
+                        queue,
+                        memo,
+                        provider,
+                        settings.audio_dir,
+                        settings.max_audio_seconds,
+                    )
 
                     # No sleep on the success path, on purpose: after a claim that
                     # found work the queue is more likely than usual to hold more,
@@ -160,10 +179,14 @@ def _install_signal_handlers(shutdown: threading.Event) -> None:
     the documented one either. The Compose spec gives `stop_grace_period` a default
     of 10s; measured on Compose v5.0.2, an unset grace period SIGKILLs a
     handler-less container after **1.2s**, while an explicit `stop_grace_period: 10s`
-    takes 10.2s. Since a job today finishes in about 4 ms either number is ample, but
-    a 1.2s window would silently stop being ample the moment MEMO-14 makes
-    transcription take seconds -- so docker-compose.yml now sets the value rather
-    than inheriting it, and says why at the line.
+    takes 10.2s. That gap was worth setting the value explicitly rather than
+    inheriting it, and docker-compose.yml says so at the line.
+
+    It stopped being academic with MEMO-13. A job used to be a claim and a fake
+    provider call -- about 4 ms -- and it now runs ffmpeg first: roughly 300 ms for
+    a few seconds of audio, and 11.2 s measured on the longest recording the byte
+    cap can admit. The inherited ~1.2s window would already be too short for a
+    long memo; the explicit 30s is not.
 
     A SIGKILL still leaves the row in `processing`, and so does any job that outlives
     whatever that grace period is. Those are the reaper's cases, and the reason it is

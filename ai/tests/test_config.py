@@ -13,6 +13,7 @@ import pytest
 from memo_ai import stt
 from memo_ai.config import (
     DEFAULT_AUDIO_DIR,
+    DEFAULT_MAX_AUDIO_SECONDS,
     DEFAULT_POLL_SECONDS,
     DEFAULT_STT_FALLBACK,
     DEFAULT_STT_MODEL,
@@ -33,6 +34,7 @@ def test_only_database_url_is_required():
     assert settings.stt_provider == DEFAULT_STT_PROVIDER
     assert settings.stt_fallback == DEFAULT_STT_FALLBACK
     assert settings.stt_model == DEFAULT_STT_MODEL
+    assert settings.max_audio_seconds == DEFAULT_MAX_AUDIO_SECONDS
     assert settings.poll_seconds == DEFAULT_POLL_SECONDS
 
 
@@ -43,6 +45,7 @@ def test_only_database_url_is_required():
         ("STT_PROVIDER", "stt_provider", DEFAULT_STT_PROVIDER),
         ("STT_FALLBACK", "stt_fallback", DEFAULT_STT_FALLBACK),
         ("STT_MODEL", "stt_model", DEFAULT_STT_MODEL),
+        ("MAX_AUDIO_SECONDS", "max_audio_seconds", DEFAULT_MAX_AUDIO_SECONDS),
         ("WORKER_POLL_SECONDS", "poll_seconds", DEFAULT_POLL_SECONDS),
         ("LOG_LEVEL", "log_level", "INFO"),
     ],
@@ -98,6 +101,23 @@ def test_a_non_positive_poll_interval_is_refused(value):
 
 def test_a_valid_poll_interval_is_parsed_as_a_float():
     assert Settings.from_env(MINIMAL | {"WORKER_POLL_SECONDS": "0.25"}).poll_seconds == 0.25
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc"])
+def test_a_duration_cap_that_is_zero_negative_or_unparseable_is_refused(value):
+    # Same rule as the poll interval and the same reason to refuse rather than
+    # clamp, with a different consequence: MAX_AUDIO_SECONDS=0 is not a strict cap,
+    # it is a configuration under which every voice memo fails on length and the
+    # only clue is a `last_error` reading "over the 0:00 limit".
+    with pytest.raises(ConfigError, match="MAX_AUDIO_SECONDS"):
+        Settings.from_env(MINIMAL | {"MAX_AUDIO_SECONDS": value})
+
+
+def test_a_valid_duration_cap_is_parsed_as_a_float():
+    # Fractional values are legal, and the tests use them: a cap in whole seconds
+    # would make every "too long" case a real multi-second recording.
+    assert Settings.from_env(MINIMAL | {"MAX_AUDIO_SECONDS": "600"}).max_audio_seconds == 600.0
+    assert Settings.from_env(MINIMAL | {"MAX_AUDIO_SECONDS": "1.5"}).max_audio_seconds == 1.5
 
 
 def test_log_level_is_case_insensitive():

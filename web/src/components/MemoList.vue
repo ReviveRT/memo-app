@@ -9,9 +9,15 @@
  * visible now rather than being described in a comment somewhere.
  *
  * `duration_ms` and the failure UX are the two exceptions, left out rather than
- * guarded: duration is written by the worker's ffprobe pass (MEMO-13) and is null on
- * every row until then, voice memos included, and a failed memo needs the retry action
- * next to the reason (MEMO-17). Half of either now would be UI those tasks have to undo.
+ * guarded. The reason differs for each now that MEMO-13 has landed: `duration_ms` is
+ * no longer null — the worker's ffprobe pass populates it on every voice memo, and on
+ * failed ones too — so it is simply not rendered yet, and no task has claimed showing
+ * it. A failed memo still needs its retry action next to the reason (MEMO-17), and half
+ * of that now would be UI that task has to undo.
+ *
+ * So this is the one field where the data is ahead of the interface. Whoever adds it
+ * has the column already populated and `m:ss` in MemoRecorder.vue's `formatElapsed` to
+ * match; nothing has to change on the API or worker side.
  *
  * "No transcript yet." was written for a text memo that could not reach it, and MEMO-10
  * is what gives it a case: a voice memo is inserted with a null transcript and carries

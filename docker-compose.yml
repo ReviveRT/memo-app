@@ -305,10 +305,20 @@ services:
     #
     # That matters because the worker handles SIGTERM specifically so the job in
     # flight finishes and writes its result (memo_ai/worker/__main__.py) -- and with
-    # ~1s of grace that guarantee holds only while a job takes milliseconds, which is
-    # true of the fake provider and stops being true at MEMO-14. Today's jobs finish
-    # in about 4 ms, so this costs nothing and is purely for the version of the
-    # worker that transcribes for real.
+    # ~1s of grace that guarantee holds only while a job takes milliseconds.
+    #
+    # This comment used to say jobs finish in about 4 ms, which was true when the
+    # worker only claimed a row and called a fake provider. MEMO-13 put ffmpeg in
+    # front of that, so the number is now a real one: about 300 ms for a few
+    # seconds of audio, and 11.2 s measured on a 34-minute input -- which is the
+    # longest recording MAX_AUDIO_BYTES can admit at the bitrate the recorder asks
+    # for. So 30s still covers the worst legitimate job, with margin, and it is no
+    # longer covering it by three orders of magnitude.
+    #
+    # The case it does not cover is a pathological file that runs ffmpeg to its own
+    # 120 s ceiling (NORMALIZE_TIMEOUT_SECONDS in memo_ai/audio.py). That job is
+    # SIGKILLed mid-work and its row is left in `processing` -- which is a reaper
+    # case, and the reaper is MEMO-16's.
     #
     # 30s rather than MAX_AUDIO_SECONDS: a `docker compose down` that hangs for ten
     # minutes is not a better outcome than a reaped row, and reaping is what MEMO-16

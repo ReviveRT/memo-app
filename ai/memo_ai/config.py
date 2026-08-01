@@ -39,6 +39,14 @@ DEFAULT_STT_FALLBACK = "local"
 DEFAULT_STT_MODEL = "base"
 DEFAULT_AUDIO_DIR = "/data/audio"
 
+# Ten minutes, mirroring docker-compose.yml and .env.example. Enforced in the
+# worker rather than at the API edge because it cannot be enforced there: the cap
+# is a duration, and the duration of a browser recording is not known until
+# ffmpeg has rewritten it (memo_ai/audio.py has the measurement). What the API
+# caps instead is bytes -- a different limit, refusing a different thing, and the
+# README explains why both exist.
+DEFAULT_MAX_AUDIO_SECONDS = 600.0
+
 # WORKER_POLL_SECONDS is mirrored in docker-compose.yml and .env.example like every
 # other variable; LOG_LEVEL is deliberately not, because logging verbosity is a
 # thing you set for one debugging session with `docker compose run` rather than a
@@ -79,6 +87,7 @@ class Settings:
     stt_provider: str
     stt_fallback: str
     stt_model: str
+    max_audio_seconds: float
     poll_seconds: float
     log_level: str
 
@@ -101,6 +110,13 @@ class Settings:
             stt_provider=_string(source, "STT_PROVIDER", DEFAULT_STT_PROVIDER),
             stt_fallback=_string(source, "STT_FALLBACK", DEFAULT_STT_FALLBACK),
             stt_model=_string(source, "STT_MODEL", DEFAULT_STT_MODEL),
+            # Float rather than int, and refused at zero for the same reason the
+            # poll interval is: `MAX_AUDIO_SECONDS=0` is not a strict cap, it is a
+            # configuration under which every voice memo fails and no text says
+            # why. Fractional values are legal and are what the tests use.
+            max_audio_seconds=_positive_float(
+                source, "MAX_AUDIO_SECONDS", DEFAULT_MAX_AUDIO_SECONDS
+            ),
             poll_seconds=_positive_float(source, "WORKER_POLL_SECONDS", DEFAULT_POLL_SECONDS),
             log_level=_log_level(source, "LOG_LEVEL", DEFAULT_LOG_LEVEL),
         )

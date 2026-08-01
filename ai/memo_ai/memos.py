@@ -129,7 +129,8 @@ _FINISH_READY = """
        SET status = 'ready',
            transcript = COALESCE(%(transcript)s, transcript),
            stt_provider = COALESCE(%(stt_provider)s, stt_provider),
-           stt_model = COALESCE(%(stt_model)s, stt_model)
+           stt_model = COALESCE(%(stt_model)s, stt_model),
+           duration_ms = COALESCE(%(duration_ms)s, duration_ms)
      WHERE id = %(id)s
        AND locked_at = %(locked_at)s
 """
@@ -147,10 +148,18 @@ _FINISH_READY = """
 #
 # Consistent with MEMO-16's rule that `failed` means "no transcript": the only
 # failure this task can produce is a transcription failure.
+#
+# `duration_ms` is written here too, COALESCEd the same way, and that is MEMO-13's
+# addition rather than an oversight corrected. A memo refused for being too long
+# is refused *by* a duration, and a row carrying that refusal in `last_error`
+# beside an empty length would be missing the one number the sentence is about.
+# COALESCE because most failures never get far enough to measure anything, and a
+# bare assignment would then null out a duration an earlier attempt had recorded.
 _FAIL = """
     UPDATE memos
        SET status = 'failed',
-           last_error = %(last_error)s
+           last_error = %(last_error)s,
+           duration_ms = COALESCE(%(duration_ms)s, duration_ms)
      WHERE id = %(id)s
        AND locked_at = %(locked_at)s
 """
@@ -188,7 +197,12 @@ class MemoQueue:
 
             return cursor.fetchone()
 
-    def finish_ready(self, memo: ClaimedMemo, transcript: Transcript | None) -> bool:
+    def finish_ready(
+        self,
+        memo: ClaimedMemo,
+        transcript: Transcript | None,
+        duration_ms: int | None = None,
+    ) -> bool:
         """Commit the result and move the row to ``ready``. False if the fence lost."""
         return self._fenced(
             _FINISH_READY,
@@ -198,12 +212,15 @@ class MemoQueue:
                 "transcript": None if transcript is None else transcript.text,
                 "stt_provider": None if transcript is None else transcript.provider,
                 "stt_model": None if transcript is None else transcript.model,
+                # None for a text memo, which has no audio and so no length. That
+                # is the same NULL the row was inserted with, and COALESCE keeps it.
+                "duration_ms": duration_ms,
             },
             memo,
             "finish",
         )
 
-    def fail(self, memo: ClaimedMemo, error: str) -> bool:
+    def fail(self, memo: ClaimedMemo, error: str, duration_ms: int | None = None) -> bool:
         """Record a terminal failure. False if the fence lost."""
         return self._fenced(
             _FAIL,
@@ -211,6 +228,7 @@ class MemoQueue:
                 "id": memo.id,
                 "locked_at": memo.locked_at,
                 "last_error": _truncate(error),
+                "duration_ms": duration_ms,
             },
             memo,
             "fail",

@@ -94,13 +94,31 @@ in. Both identities were checked container-to-container on a fresh volume — sa
 uid, and group-only at uid 12345 — and the modes they depend on are pinned by
 `api/tests/Unit/SharedAudioVolumeTest.php`.
 
-**One thing MEMO-13 should know.** A file the *worker* creates on this volume comes
-out `0644` under the default umask, not `0664`. Nothing today cares: MEMO-08's
-worker only ever reads and unlinks, and unlink is permitted by the directory rather
-than by the file. MEMO-13 is the task that changes that — it writes a normalized
-copy back to the volume — and a copy the API later has to *modify* wants
-`umask(0o002)` or an explicit `chmod`, for the same reason `LocalAudioStorage` sets
-its own modes by hand.
+**One thing MEMO-13 should know — and what MEMO-13 did with it.** A file the
+*worker* creates on this volume comes out `0644` under the default umask, not
+`0664`. Nothing today cares: the worker only ever reads and unlinks, and unlink is
+permitted by the directory rather than by the file.
+
+This paragraph used to predict that MEMO-13 would change that by writing a
+normalized copy back to the volume. It does not, and the prediction is left here
+rather than deleted because the reasoning against it is the useful part.
+Normalization writes to a temporary directory on the container's own writable
+layer and deletes it when the job ends (`ai/memo_ai/audio.py`). Three reasons, in
+order of weight:
+
+- The normalized file is a transient *input to transcription*, and nothing reads
+  it afterwards. MEMO-23 serves playback from the original, which is the user's
+  actual recording rather than a 24 kbps re-encode of it — MEMO-11 chose the
+  upload bitrate on exactly that basis, to avoid stacking two lossy passes on the
+  only copy.
+- Keeping it would grow the volume by roughly a fifth per memo, permanently, for
+  bytes nothing will open again.
+- It keeps the worker a reader-and-unlinker on this volume, which is the property
+  the whole uid/gid contract above is written around. A container that also
+  *creates* files here is the one that has to care about the umask.
+
+So the `0644` fact stands and is still worth knowing — it just applies to whoever
+first writes a durable file here, and that is not this task.
 
 **How the mode gets onto the volume.** `api/Dockerfile` creates `AUDIO_DIR` in
 the image with the right owner and mode, and Docker copies a named volume's mount
