@@ -8,7 +8,7 @@ import threading
 
 import psycopg
 
-from memo_ai import db, log, pipeline, stt
+from memo_ai import audio, db, log, pipeline, stt
 from memo_ai.config import ConfigError, Settings
 from memo_ai.memos import MemoQueue
 
@@ -58,11 +58,24 @@ def main() -> int:
     _install_signal_handlers(shutdown)
 
     logger.info(
-        "ai-worker starting: stt_provider=%s audio_dir=%s poll=%.1fs",
+        "ai-worker starting: stt_provider=%s audio_dir=%s max_audio=%.0fs poll=%.1fs",
         provider.name,
         settings.audio_dir,
+        settings.max_audio_seconds,
         settings.poll_seconds,
     )
+
+    # A warning, not a refusal. Text memos never reach ffmpeg, so a worker without
+    # it still drains half the queue -- and MEMO-08's rule, set by UnimplementedStt,
+    # is that a missing capability fails the memo that needs it rather than the boot
+    # that might not. `restart: unless-stopped` would turn the alternative into a
+    # restart loop that takes text memos down too. Logged at boot anyway, because the
+    # per-memo message is only seen by whoever recorded that memo.
+    if not audio.ffmpeg_available():
+        logger.warning(
+            "ffmpeg or ffprobe is not on PATH -- voice memos will fail until it is. "
+            "The image built by ai/Dockerfile has both."
+        )
 
     _run(settings, provider, shutdown)
 
@@ -100,7 +113,13 @@ def _run(settings: Settings, provider: stt.SttProvider, shutdown: threading.Even
                         memo.source,
                         memo.attempts,
                     )
-                    pipeline.run_job(queue, memo, provider, settings.audio_dir)
+                    pipeline.run_job(
+                        queue,
+                        memo,
+                        provider,
+                        settings.audio_dir,
+                        settings.max_audio_seconds,
+                    )
 
                     # No sleep on the success path, on purpose: after a claim that
                     # found work the queue is more likely than usual to hold more,

@@ -58,6 +58,8 @@ def test_a_memo_with_no_new_transcript_passes_nulls_so_coalesce_keeps_the_row():
     assert connection.last_params["transcript"] is None
     assert connection.last_params["stt_provider"] is None
     assert connection.last_params["stt_model"] is None
+    # Four now, since MEMO-13. A text memo has no audio and so no length.
+    assert connection.last_params["duration_ms"] is None
 
 
 def test_a_transcript_is_written_with_the_provider_that_actually_produced_it():
@@ -71,6 +73,34 @@ def test_a_transcript_is_written_with_the_provider_that_actually_produced_it():
     assert connection.last_params["transcript"] == "spoken words"
     assert connection.last_params["stt_provider"] == "local"
     assert connection.last_params["stt_model"] == "base"
+
+
+def test_the_measured_duration_is_written_beside_the_transcript():
+    connection = FakeConnection(rowcount=1)
+
+    MemoQueue(connection).finish_ready(claimed_memo(), None, duration_ms=7_314)
+
+    assert connection.last_params["duration_ms"] == 7_314
+    assert "duration_ms = COALESCE" in connection.last_sql
+
+
+def test_a_failure_can_carry_a_duration_and_coalesces_when_it_cannot():
+    # MEMO-13's addition to the failure write. A memo refused for being too long is
+    # refused *by* a duration, and the row would otherwise carry that sentence in
+    # `last_error` beside a blank length. COALESCE because most failures never get
+    # far enough to measure anything, and a bare assignment would then erase a
+    # duration an earlier attempt had recorded.
+    connection = FakeConnection(rowcount=1)
+    queue = MemoQueue(connection)
+
+    queue.fail(claimed_memo(), "This recording is 11:04 long...", duration_ms=664_200)
+
+    assert connection.last_params["duration_ms"] == 664_200
+
+    queue.fail(claimed_memo(), "Something else went wrong.")
+
+    assert connection.last_params["duration_ms"] is None
+    assert "duration_ms = COALESCE" in connection.last_sql
 
 
 def test_a_write_that_matches_no_rows_reports_failure_rather_than_success():
