@@ -343,12 +343,9 @@ Whisper was trained on both punctuated and unpunctuated transcripts, and which
 style you get is a property of the audio rather than a setting you can pick. When
 it goes the wrong way there is nothing subtle about it. A real 89-second memo
 recorded into this app came back as 1204 characters of lowercase words with **not
-one comma in them**, while every short memo from the same session was punctuated
-correctly:
-
-> database is running from yet another work free and nothing is running from main
-> also that earlier 200 i trusted was misleading let me see what it actually
-> returns and critically confirms your 38 memos are …
+one comma in them** — a single unbroken run reading `database is running from yet
+another …` and never stopping — while every short memo from the same session was
+punctuated correctly.
 
 The fix is an `initial_prompt`. Whisper receives it as though it were the
 transcript of the audio immediately preceding this one, so a primer that is
