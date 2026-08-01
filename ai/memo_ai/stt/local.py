@@ -19,35 +19,44 @@ will do no better), with a message written here rather than borrowed from a
 library. ``last_error`` reaches the browser; ``memo_ai/audio.py`` applies the same
 rule to ffmpeg's stderr and ``stt/base.py`` states it.
 
-**It cannot pin a replica indefinitely.** Two bounds, and they are different
-shapes because the two risks are:
+**It cannot pin a replica indefinitely.** Two bounds, both of the same shape,
+because both guard C++ that cannot be interrupted: run it on a daemon thread and
+stop *waiting* at the deadline. :class:`_BackgroundCall` is that shape.
 
-  * *The download.* A cold cache pulls ~145 MB from HuggingFace. It runs on a
-    daemon thread, and a memo that waits longer than
-    :data:`MODEL_LOAD_TIMEOUT_SECONDS` gives up while the thread keeps going --
-    so the job fails fast with a readable reason and the *next* memo finds the
-    model warm, instead of one memo occupying a replica for the length of a bad
-    connection. MEMO-15 bakes the weights into the image and makes this the rare
-    path; until then it is the first voice memo after every clean build.
-  * *The decode.* Bounded by a deadline scaled to the audio's own length. See
-    :func:`_deadline_seconds`.
+  * *The download.* A cold cache pulls 1.6 GB from HuggingFace. A memo that waits
+    longer than :data:`MODEL_LOAD_TIMEOUT_SECONDS` gives up while the thread keeps
+    going, so the job fails with a readable reason and the *next* memo finds the
+    model warm -- instead of one memo occupying a replica for the length of a bad
+    connection. :meth:`LocalWhisperStt.prefetch` normally spends this at boot.
+  * *The decode.* A deadline scaled to the audio's own length; see
+    :func:`_deadline_seconds`, and :meth:`LocalWhisperStt._decode` for why it has
+    to be a thread rather than a check inside the loop.
 
-Measured on this machine (arm64, Docker Desktop, ``base``/int8, default beam size,
-through the running stack): a five-second browser recording becomes a `ready` row
-2.0 s after it is claimed, ffmpeg included. The worst 600-second input tried -- a
-deliberately pathological one, the same five seconds looped for ten minutes, which
-is the shape whisper repeats itself on -- took 125 s, or 0.21x realtime. So the
-longest memo ``MAX_AUDIO_SECONDS`` admits is bounded at roughly two minutes rather
-than the seconds a short one takes.
+**Short memos are decoded in series and long ones in batches**, which is a
+speed/accuracy trade taken only where it pays. :data:`BATCH_ABOVE_SECONDS` has the
+measurements on both sides of it.
 
-The first voice memo after a clean build pays for the model as well: 9.2 s
-end-to-end including the download, against 2.0 s for the next one. A cached model
-loads in under half a second.
+Measured uncontended on this machine (arm64, Docker Desktop, ``large-v3-turbo``
+at int8, the default four CTranslate2 threads):
+
+  ==================== ========== ========== ===============
+  audio                in series  batched    what runs
+  ==================== ========== ========== ===============
+  3.1 s (real memo)      8.0 s      8.4 s    series
+  13.1 s (real memo)     8.7 s      9.1 s    series
+  120 s                143.0 s     27.5 s    batched
+  600 s (projected)    ~10 min     ~2 min    batched
+  ==================== ========== ========== ===============
+
+So an ordinary memo is a few seconds and the longest one
+``MAX_AUDIO_SECONDS`` admits is a couple of minutes. Peak resident is 1.65 GB per
+replica in series and 2.4 GB when a long memo batches, which is why the README
+puts memory next to the model table.
 """
 
 import logging
 import threading
-import time
+import wave
 from collections.abc import Callable
 from pathlib import Path
 
@@ -61,12 +70,6 @@ log = logging.getLogger(__name__)
 # faster and a third of the memory -- and memory is the shared resource here,
 # since docker-compose.yml runs two replicas of this image.
 COMPUTE_TYPE = "int8"
-
-# `cpu_threads` is deliberately not passed. CTranslate2's default is 4 threads,
-# not "every core" -- checked in faster_whisper.transcribe's own signature docs
-# rather than assumed -- so two replicas come to 8, which is already the right
-# shape for the `replicas: 2` in docker-compose.yml. Pinning a number here would
-# hardcode that replica count into the Python, where it is not visible.
 
 # How long one memo waits for the model before giving up on it.
 #
@@ -110,6 +113,49 @@ DEADLINE_FLOOR_SECONDS = 120.0
 # filter's job here is to answer "is there any speech in this at all" and to
 # drop long dead air -- not to tighten around words.
 VAD_SPEECH_PAD_MS = 1000
+
+# How many VAD-cut chunks the encoder runs at once, once batching is used at all.
+#
+# Eight rather than sixteen, which is the counterintuitive half: the larger batch
+# was *slower* at both thread counts tried (31.6 s against 27.5 s on a
+# two-minute recording) and no cheaper in memory, so there is nothing to buy by
+# raising it.
+BATCH_SIZE = 8
+
+# Below this much audio, decode in series instead. Batching is a speed/accuracy
+# trade and this is the line where the trade starts being worth taking.
+#
+# The speed is real and large, but only on long audio: a two-minute recording
+# takes 143 s in series and 27.5 s batched, 0.97x realtime against 0.23x. On
+# anything short it buys nothing at all -- batching works by running several
+# 30-second windows through the encoder at once, and a thirteen-second memo is one
+# window. Measured on the five real recordings available: 8.7 s against 9.1 s,
+# 8.0 s against 8.4 s. Within noise, sometimes slower.
+#
+# The accuracy cost is not noise, and it is not a maybe. Each chunk is decoded
+# independently, so whisper loses the running context that keeps its formatting
+# consistent, and the same clips come back measurably worse -- checked three times
+# each, byte-identical within a mode and always different between them:
+#
+#   "...need this to be write down at 12 p.m."   ->  "...to be right down at..."
+#   "1, 2, 3, 4, 5, 6, 7, 8, 9, 10"              ->  "one two three four five..."
+#
+# Numerals and punctuation are worth keeping in a column that gets full-text
+# searched, and "write" is the word that was said.
+#
+# So: series for the memos people actually record, where it is both more accurate
+# and no slower, and batching only past the point where series decoding starts
+# costing minutes. Two minutes of audio is that point -- 143 s of waiting -- and
+# past it the arithmetic inverts, because a ten-minute memo is ten minutes in
+# series against two batched, and nobody trades eight minutes for a comma.
+BATCH_ABOVE_SECONDS = 120.0
+
+# `cpu_threads` is still deliberately not passed, and this is now measured rather
+# than argued. CTranslate2 defaults to 4. Raising it to 8 bought 10 percent on a
+# 120-second memo (24.9 s against 27.5 s), made *short* memos slower (4.2 s
+# against 3.9 s), and cost 890 MB of peak resident -- which on two replicas is 1.8
+# GB for a tenth of the long-memo case. Batching already extracts the parallelism
+# that raising this was meant to.
 
 # Plain ASCII, like every other sentence that can reach `memos.last_error` --
 # memo_ai/audio.py's four are, and the one non-ASCII character anywhere near this
@@ -216,11 +262,10 @@ class LocalWhisperStt:
         self._loader = loader or _load_whisper_model
         self._lock = threading.Lock()
         self._model: object | None = None
-        self._load: "_BackgroundLoad | None" = None
+        self._load: "_BackgroundCall | None" = None
 
     def transcribe(self, source: Path) -> Transcript:
         model = self._ready_model()
-        started = time.monotonic()
 
         try:
             # vad_filter is off by default in faster-whisper and is switched on
@@ -258,17 +303,25 @@ class LocalWhisperStt:
             # measured here. The two settings did produce different text on that
             # file; which is *better* is not something a character count answers,
             # so the library's tuned default stands.
-            segments, info = model.transcribe(
-                str(source),
-                language=self.language,
-                vad_filter=True,
-                vad_parameters={"speech_pad_ms": VAD_SPEECH_PAD_MS},
-            )
+            options = {
+                "language": self.language,
+                "vad_filter": True,
+                "vad_parameters": {"speech_pad_ms": VAD_SPEECH_PAD_MS},
+            }
+            seconds = _wav_seconds(source)
+
+            if seconds is not None and seconds >= BATCH_ABOVE_SECONDS:
+                # `model` is the batched pipeline; `model.model` is the plain one
+                # underneath it. See BATCH_ABOVE_SECONDS for why only long audio
+                # takes this path.
+                segments, info = model.transcribe(str(source), batch_size=BATCH_SIZE, **options)
+            else:
+                segments, info = model.model.transcribe(str(source), **options)
 
             if info.duration <= 0:
                 raise SttError(_EMPTY)
 
-            text = self._decode(segments, started, info.duration)
+            text = self._decode(segments, info.duration)
         except SttError:
             raise
         except MemoryError:
@@ -344,42 +397,54 @@ class LocalWhisperStt:
                     self.model_size,
                     COMPUTE_TYPE,
                 )
-                self._load = _BackgroundLoad(self._loader, self.model_size)
-
-    def _decode(self, segments, started: float, audio_seconds: float) -> str:
-        """
-        Drain the segment generator, giving up if it runs past the deadline.
-
-        The generator is where the model actually runs: ``transcribe()`` returns
-        after decoding the audio, running the VAD and identifying the language,
-        and every segment after that is pulled lazily. Measured on a 600-second
-        file, the call came back in 5.0 s and the first segment arrived at 10.1 s
-        of a job that ran to 125 s at the shipped beam size. So iterating is the
-        only place a deadline can be enforced without a thread to kill, and the
-        cost of enforcing it there is that a stop happens up to one segment late.
-
-        What that leaves unbounded is the eager half. It is linear in the length
-        of the audio rather than in how hard the audio is, and the length is
-        already capped by ``MAX_AUDIO_SECONDS``, so it is the wrong half to worry
-        about -- the runaway case is a decode loop, and that is this one.
-        """
-        deadline = started + _deadline_seconds(audio_seconds)
-        parts: list[str] = []
-
-        for segment in segments:
-            if time.monotonic() >= deadline:
-                log.warning(
-                    "whisper exceeded its %.0fs deadline on %.0fs of audio after %d segments",
-                    deadline - started,
-                    audio_seconds,
-                    len(parts),
+                self._load = _BackgroundCall(
+                    lambda: self._loader(self.model_size), name="whisper-model-load"
                 )
 
-                raise SttError(_TOO_SLOW)
+    def _decode(self, segments, audio_seconds: float) -> str:
+        """
+        Drain the segment generator on a thread, and give up on it at the deadline.
 
-            parts.append(segment.text)
+        Draining is where the model actually runs. ``transcribe()`` returns almost
+        at once -- 0.39 s on a 120-second recording -- having decoded the audio,
+        cut it at silence and identified the language; pulling the first segment
+        is what does the remaining 27 s of work.
 
-        return "".join(parts).strip()
+        That timing is why this is a thread rather than a check inside the loop. A
+        per-segment check was the first version, and against the *batched*
+        pipeline it stops preempting anything: every segment materialises together
+        on the first ``next()``, so by the time the loop could look at the clock
+        the work is already paid for. A deadline that can only report is not a
+        deadline.
+
+        The thread is abandoned rather than stopped, because CTranslate2 runs in
+        C++ and there is nothing to cancel. That is only worth doing if the next
+        memo can still get on with its life, which was checked rather than
+        assumed: two transcriptions on one model from two threads ran genuinely
+        concurrently -- 27.5 s of overlap against 15.0 s solo -- so they share the
+        cores rather than queueing. An abandoned runaway makes the replica slower
+        until it finishes; it does not make it stuck, and it does finish, because
+        batching decodes independent windows and cannot carry a repetition loop
+        across them the way long-form sequential decoding can.
+        """
+        drain = _BackgroundCall(lambda: "".join(s.text for s in segments).strip())
+        deadline = _deadline_seconds(audio_seconds)
+
+        if not drain.wait(deadline):
+            log.warning(
+                "whisper exceeded its %.0fs deadline on %.0fs of audio",
+                deadline,
+                audio_seconds,
+            )
+
+            raise SttError(_TOO_SLOW)
+
+        if drain.error is not None:
+            # Raised in this thread so the caller's except clauses can classify it
+            # -- a PyAV failure that happened over there is the same failure.
+            raise drain.error
+
+        return drain.result
 
     def _ready_model(self):
         """
@@ -400,7 +465,7 @@ class LocalWhisperStt:
         -- still holding the old handle -- wipes that new one on its way out. The
         memo after it would start a third load while the second was still
         running, and on a cold cache each of those is 142 MB. Asking
-        ``_BackgroundLoad`` whether it failed, in one place, under the lock,
+        ``_BackgroundCall`` whether it failed, in one place, under the lock,
         means no caller has to reason about whether what it is holding is still
         current.
         """
@@ -410,7 +475,9 @@ class LocalWhisperStt:
 
             if self._load is None or self._load.failed:
                 log.info("loading whisper model %r (%s)", self.model_size, COMPUTE_TYPE)
-                self._load = _BackgroundLoad(self._loader, self.model_size)
+                self._load = _BackgroundCall(
+                    lambda: self._loader(self.model_size), name="whisper-model-load"
+                )
 
             pending = self._load
 
@@ -437,45 +504,44 @@ class LocalWhisperStt:
             raise SttUnavailable(_LOAD_FAILED.format(model=self.model_size))
 
         with self._lock:
-            self._model = pending.model
+            self._model = pending.result
 
-        return pending.model
+        return pending.result
 
 
-class _BackgroundLoad:
+class _BackgroundCall:
     """
-    One model load on a daemon thread, with the outcome readable from outside.
+    One callable on a daemon thread, with the outcome readable from outside.
+
+    Two things in this file need the same shape -- loading the model, and draining
+    the segment generator -- and both need it for the same reason: the work is C++
+    that cannot be interrupted, so the only way to bound it is to stop *waiting*
+    for it and let it finish unattended.
 
     A bare ``threading.Thread`` rather than ``concurrent.futures``, and the reason
-    is shutdown. ``ThreadPoolExecutor`` registers an ``atexit`` hook that joins
-    its workers, so a load this class has already given up waiting for would
-    block the interpreter from exiting -- which is precisely the hang that
-    ``MODEL_LOAD_TIMEOUT_SECONDS`` exists to prevent, moved from one memo to
-    ``docker compose down``. A daemon thread is abandoned at exit instead.
+    is shutdown. ``ThreadPoolExecutor`` registers an ``atexit`` hook that joins its
+    workers, so a call this class has already given up waiting for would block the
+    interpreter from exiting -- which is precisely the hang the timeouts exist to
+    prevent, moved from one memo to ``docker compose down``. A daemon thread is
+    abandoned at exit instead.
     """
 
-    def __init__(self, loader: ModelLoader, model_size: str) -> None:
-        self.model: object | None = None
+    def __init__(self, work: Callable[[], object], name: str = "whisper") -> None:
+        self.result: object | None = None
         self.error: BaseException | None = None
         self._done = threading.Event()
 
-        thread = threading.Thread(
-            target=self._run,
-            args=(loader, model_size),
-            name="whisper-model-load",
-            daemon=True,
-        )
-        thread.start()
+        threading.Thread(target=self._run, args=(work,), name=name, daemon=True).start()
 
-    def _run(self, loader: ModelLoader, model_size: str) -> None:
+    def _run(self, work: Callable[[], object]) -> None:
         try:
-            self.model = loader(model_size)
+            self.result = work()
         except BaseException as error:  # noqa: BLE001 -- reported to the waiter, not swallowed
             self.error = error
         finally:
-            # In the finally, so a loader that raises still releases whoever is
-            # waiting on it. Without this a failed load reads exactly like a slow
-            # one, for the full timeout, on every memo.
+            # In the finally, so work that raises still releases whoever is waiting
+            # on it. Without this a failed call reads exactly like a slow one, for
+            # the full timeout, every time.
             self._done.set()
 
     def wait(self, timeout: float) -> bool:
@@ -486,9 +552,9 @@ class _BackgroundLoad:
         """
         Finished, and finished badly. Both halves matter.
 
-        A load still in flight is not failed, which is what stops a memo that
-        timed out waiting from causing the next one to start a second download of
-        the same weights.
+        A call still in flight is not failed, which is what stops a memo that timed
+        out waiting on a model download from causing the next one to start a second
+        download of the same weights.
         """
         return self._done.is_set() and self.error is not None
 
@@ -518,12 +584,49 @@ def _load_whisper_model(model_size: str):
     reasoned about: on a fresh volume they issued their HEAD requests within the
     same second and were both transcribing four seconds later. It is safe because
     huggingface_hub locks around the shared cache -- there is a ``.locks``
-    directory beside the snapshot to prove it -- and the volume came out 142 MB,
-    one copy.
-    """
-    from faster_whisper import WhisperModel
+    directory beside the snapshot to prove it -- and the volume came out one copy.
 
-    return WhisperModel(model_size, device="cpu", compute_type=COMPUTE_TYPE)
+    A :class:`BatchedInferencePipeline` rather than the bare model, which is what
+    makes :data:`BATCH_SIZE` mean anything. It is a wrapper with the same
+    ``transcribe`` shape -- same arguments, same ``(segments, info)`` back, same
+    exceptions out of PyAV, all checked -- so nothing above this line knows the
+    difference.
+    """
+    from faster_whisper import BatchedInferencePipeline, WhisperModel
+
+    return BatchedInferencePipeline(
+        model=WhisperModel(model_size, device="cpu", compute_type=COMPUTE_TYPE)
+    )
+
+
+def _wav_seconds(source: Path) -> float | None:
+    """
+    How long a WAV is, from its header, or ``None`` for anything else.
+
+    Needed before the model is called, which is the whole difficulty:
+    :data:`BATCH_ABOVE_SECONDS` has to choose a decode path, and the duration
+    whisper reports only arrives afterwards. ``memos.duration_ms`` has the same
+    number and the pipeline already holds it, but it reaches a provider through
+    ``transcribe(audio)`` and widening that signature would touch every provider
+    and every test double to serve one branch in this file.
+
+    ``wave`` from the standard library, so it costs a header read and no
+    dependency. It works because this provider *asks* for WAV -- see
+    ``audio_format`` -- and the answer is exact for PCM rather than estimated.
+
+    ``None`` for anything that is not a WAV, which is the fallback chain handing
+    this provider the Opus a different primary asked for. Unknown length means
+    the series path, and that is the right way round: it is the more accurate one,
+    and it is only slow on long audio, which is exactly the case this could not
+    identify.
+    """
+    try:
+        with wave.open(str(source), "rb") as handle:
+            rate = handle.getframerate()
+
+            return handle.getnframes() / rate if rate else None
+    except (OSError, wave.Error):
+        return None
 
 
 def _deadline_seconds(audio_seconds: float) -> float:
@@ -534,10 +637,9 @@ def _deadline_seconds(audio_seconds: float) -> float:
     Four, because the slowest configuration this project documents is
     ``STT_MODEL=medium`` on a CPU, which lands around realtime -- so the factor is
     headroom over the worst *supported* setup rather than over the measured one.
-    Against the measurement it is enormous: ``base`` ran at 0.06x realtime here,
-    and 0.21x on a deliberately pathological input, so this fires on genuine
-    runaway decoding and on nothing else. Deliberately generous, the same way
-    ``NORMALIZE_TIMEOUT_SECONDS`` is.
+    Against the measurement it is enormous: the shipped model batched runs at
+    0.23x realtime, so this fires on genuine runaway decoding and on nothing else.
+    Deliberately generous, the same way ``NORMALIZE_TIMEOUT_SECONDS`` is.
 
     The floor covers short memos, where the job is mostly fixed overhead and four
     times a five-second recording would be a deadline of twenty seconds.

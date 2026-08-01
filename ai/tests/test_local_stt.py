@@ -12,6 +12,7 @@ real recordings.
 
 import threading
 import time
+import wave
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,8 @@ import pytest
 from memo_ai import audio
 from memo_ai.stt.base import SttError, SttUnavailable
 from memo_ai.stt.local import (
+    BATCH_ABOVE_SECONDS,
+    BATCH_SIZE,
     DEADLINE_FLOOR_SECONDS,
     VAD_SPEECH_PAD_MS,
     LocalWhisperStt,
@@ -41,11 +44,15 @@ class StubInfo:
 
 class StubModel:
     """
-    Stands in for ``WhisperModel``, yielding segments lazily like the real one.
+    Stands in for the ``BatchedInferencePipeline`` the loader really returns.
 
-    Lazy matters: the deadline is enforced *between* segments, so a generator that
-    materialised its list up front would make the deadline test pass without
-    exercising anything. ``pause`` is what a slow decode looks like from here.
+    ``model`` points back at itself, mirroring the real pipeline's reference to the
+    plain ``WhisperModel`` underneath it. That is what lets one stub record both
+    decode paths, and ``calls`` says which ran: only the batched one passes
+    ``batch_size``.
+
+    Segments are yielded lazily so ``pause`` can stand in for a slow decode, which
+    is what the deadline test needs to see.
     """
 
     def __init__(self, texts=("hello ", "world"), duration=5.0, pause=0.0, raises=None) -> None:
@@ -54,6 +61,10 @@ class StubModel:
         self._duration = duration
         self._pause = pause
         self._raises = raises
+
+    @property
+    def model(self):
+        return self
 
     def transcribe(self, path, **kwargs):
         self.calls.append((path, kwargs))
@@ -106,6 +117,50 @@ def test_it_asks_for_wav_and_switches_the_voice_filter_on():
             "vad_parameters": {"speech_pad_ms": VAD_SPEECH_PAD_MS},
         },
     )
+
+
+def test_a_short_memo_is_decoded_in_series(tmp_path):
+    # No `batch_size`, which is how the series path identifies itself. Short memos
+    # are the common case and batching makes them *worse* without making them
+    # faster -- see BATCH_ABOVE_SECONDS.
+    model = StubModel()
+    provider(model).transcribe(_silent_wav(tmp_path, seconds=10))
+
+    assert "batch_size" not in model.calls[0][1]
+
+
+def test_a_long_memo_is_decoded_in_batches(tmp_path):
+    model = StubModel()
+    provider(model).transcribe(_silent_wav(tmp_path, seconds=int(BATCH_ABOVE_SECONDS) + 1))
+
+    assert model.calls[0][1]["batch_size"] == BATCH_SIZE
+
+
+def test_audio_that_is_not_wav_takes_the_series_path(tmp_path):
+    # The fallback chain hands this provider whatever the *primary* asked for, so
+    # a `local` behind an Opus-wanting primary cannot have its length read from a
+    # WAV header. Unknown length means series, which is the accurate path -- the
+    # right way to be wrong.
+    opus = tmp_path / "n.opus"
+    opus.write_bytes(b"OggS\x00\x02" + b"\x00" * 64)
+
+    model = StubModel()
+    provider(model).transcribe(opus)
+
+    assert "batch_size" not in model.calls[0][1]
+
+
+def _silent_wav(directory, seconds: int):
+    """A real WAV header of a given length, so _wav_seconds has something to read."""
+    path = directory / f"{seconds}s.wav"
+
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(16_000)
+        handle.writeframes(b"\x00\x00" * 16_000 * seconds)
+
+    return path
 
 
 def test_a_configured_language_is_passed_through_and_absence_means_detect():
@@ -331,19 +386,41 @@ def test_callers_waiting_on_one_failed_load_start_one_retry_between_them():
 
 def test_a_runaway_decode_is_stopped_by_the_deadline(monkeypatch):
     # A hundredth of a second of audio, so four times it is under the floor and the
-    # floor is the deadline: 0.05s, against segments that take 0.04s each. The
-    # second one is what trips it, which is also the property being checked --
-    # the generator is drained lazily, so the stop happens partway through rather
-    # than after the whole thing has already run.
+    # floor is the deadline: 0.05s, against a drain that takes 4 x 0.04s.
+    #
+    # The stop has to happen while the drain is still running, which is the whole
+    # point of doing it on a thread: against the batched pipeline every segment
+    # materialises on the first next(), so a check inside the loop would only ever
+    # report work already paid for.
     monkeypatch.setattr("memo_ai.stt.local.DEADLINE_FLOOR_SECONDS", 0.05)
+
+    started = time.monotonic()
 
     with pytest.raises(SttError) as raised:
         provider(texts=("a", "b", "c", "d"), duration=0.01, pause=0.04).transcribe(AUDIO)
 
+    # Returned at the deadline rather than after the drain finished -- 0.05s
+    # against the 0.16s the segments take. Generous on the upper bound, because
+    # what would break this is waiting for the work, not a slow machine.
+    assert time.monotonic() - started < 0.14
     assert "took too long" in str(raised.value)
     # Terminal, not unavailable. The deadline has already spent the job's time
     # budget, and walking to a fallback would spend it again.
     assert not isinstance(raised.value, SttUnavailable)
+
+
+def test_an_error_raised_while_draining_is_still_classified():
+    # The drain happens on another thread now, so an exception from the decoder
+    # has to be carried back and re-raised here -- otherwise every PyAV failure
+    # would arrive as the generic "unexpected worker error" instead of the
+    # sentence that explains it.
+    class Exploding(StubModel):
+        def _segments(self):
+            raise ValueError("Invalid data found when processing input")
+            yield  # pragma: no cover -- makes this a generator
+
+    with pytest.raises(SttError, match="prepared copy"):
+        provider(Exploding()).transcribe(AUDIO)
 
 
 def test_the_deadline_scales_with_the_audio_and_has_a_floor():

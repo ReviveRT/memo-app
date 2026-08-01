@@ -283,10 +283,11 @@ services:
       STT_PROVIDER: ${STT_PROVIDER:-local}
       STT_FALLBACK: ${STT_FALLBACK:-local}
       # The whole of what transcription costs here, which is CPU time, disk and
-      # RAM rather than money. `large-v3-turbo` is 1.6 GB on disk and about 1.1 GB
-      # resident per replica — with `replicas: 2` below, budget accordingly, and
-      # drop to `base` (142 MB, 302 MB resident) on a small machine. The README
-      # has the accuracy each one actually delivers, measured rather than quoted.
+      # RAM rather than money. `large-v3-turbo` is 1.6 GB on disk and 1.65 GB
+      # resident per replica, peaking at 2.4 GB while a memo over two minutes long
+      # decodes in batches — with `replicas: 2` below, budget for both. Drop to
+      # `base` (142 MB) on a small machine, or run one replica. The README has the
+      # accuracy each one actually delivers, measured rather than quoted.
       STT_MODEL: ${STT_MODEL:-large-v3-turbo}
       # Empty means detect it per recording, which is what lets one stack take
       # memos in more than one language. Naming it is worth about 30% of the job

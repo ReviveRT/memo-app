@@ -202,21 +202,65 @@ about 30% faster and removes a misdetection risk that is real on short clips.
 `STT_MODEL` is the accuracy lever and it matters more than it looks. Measured on a
 real recording of _"I would like to place an order"_, spoken in an Indian accent:
 
-| `STT_MODEL` | Disk | Speed | 10-min memo | RAM per replica | Transcribed it as |
-| --- | --- | --- | --- | --- | --- |
-| `base` | 142 MB | 0.31× realtime | ~3 min | 302 MB | "I would like to **blaze a door there**" |
-| `small` | 464 MB | 0.76× realtime | ~8 min | ~600 MB | "I would like to **blaze an order**" |
-| `medium` | 1.5 GB | 2.14× realtime | ~21 min | ~2.2 GB | correct |
-| **`large-v3-turbo`** _(default)_ | 1.6 GB | 0.64× realtime | ~6 min | 1.1 GB | correct |
+| `STT_MODEL` | Disk | Transcribed it as |
+| --- | --- | --- |
+| `base` | 142 MB | "I would like to **blaze a door there**" |
+| `small` | 464 MB | "I would like to **blaze an order**" |
+| `medium` | 1.5 GB | correct |
+| **`large-v3-turbo`** _(default)_ | 1.6 GB | correct |
 
 turbo is not the slow choice despite being the largest. It pairs a `large-v3`
-encoder with a four-layer decoder, so it beats `small` on speed and is more than
-three times faster than the `medium` it out-transcribes — a ten-minute memo is six
-minutes rather than twenty-one.
+encoder with a four-layer decoder, so it beats `small` on speed and is three times
+faster than the `medium` it out-transcribes.
 
-What it costs is disk and memory. With `replicas: 2` that is about 2.2 GB resident
-for transcription alone, so on a machine with little to spare set `STT_MODEL=base`
-and accept the errors above, or leave turbo and drop the worker to one replica.
+### Speed
+
+A memo of a few seconds transcribes in a few seconds. Anything over two minutes of
+audio switches to **batched** decoding — the recording is cut at silence and the
+encoder runs several of those windows at once instead of walking them in series —
+which is worth four to five times on long audio. Measured on an idle machine with
+the shipped model:
+
+| Recording | In series | Batched | What runs |
+| --- | --- | --- | --- |
+| 3 seconds | 8.0 s | 8.4 s | series |
+| 13 seconds | 8.7 s | 9.1 s | series |
+| 2 minutes | 143 s (0.97× realtime) | **27.5 s (0.23× realtime)** | batched |
+| 10 minutes _(the cap)_ | ~10 min | **~2 min** | batched |
+
+Batching is not used below that threshold because it does not help and it does
+hurt. Short memos are a single window, so there is nothing to run in parallel —
+and because each window is decoded independently, whisper loses the running
+context that keeps its formatting consistent. The same clips come back
+measurably worse, reproducibly:
+
+```
+"...need this to be write down at 12 p.m."  →  "...to be right down at..."
+"1, 2, 3, 4, 5, 6, 7, 8, 9, 10"             →  "one two three four five..."
+```
+
+Numerals and punctuation are worth keeping in a column that gets full-text
+searched. Past two minutes the arithmetic inverts — nobody trades eight minutes of
+waiting for a comma — so the threshold is where it is.
+
+One further thing you can do: **`STT_LANGUAGE=en`** if you only dictate in one
+language. Detection is a whole extra encoder pass, worth about 27% on a short
+memo, and it is the one lever that costs nothing.
+
+Raising CTranslate2's thread count is *not* worth it: it was tried, and bought 10%
+on a long memo while making short memos slower and costing 890 MB per replica.
+
+The floor on a short memo is the encoder, and nothing here moves it. If a
+three-second memo taking a few seconds is too slow, the only lever left is a
+smaller model — and the table above says what that costs.
+
+### What it costs to run
+
+Memory, mostly, and the two decisions compound: turbo is 1.1 GB resident, and
+batching takes the peak to **2.4 GB per replica**. With `replicas: 2` that is
+about 4.8 GB before anything else in the stack, which is most of a default Docker
+Desktop VM. If that is too tight, `STT_MODEL=base` or one worker replica are the
+two levers, in that order.
 
 Things that did **not** help, tried on the same recording so you need not: a
 domain `initial_prompt`, `beam_size=10`, greedy decoding, loudness-normalizing the
