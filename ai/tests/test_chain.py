@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from memo_ai import audio, stt
+from memo_ai.config import ConfigError, Settings
 from memo_ai.stt.base import SttError, SttUnavailable, Transcript
 from memo_ai.stt.chain import FallbackStt
 from memo_ai.stt.fake import FakeStt
@@ -33,9 +34,7 @@ class Stub:
         return Transcript(text=f"from {self.name}", provider=self.name, model="stub-1")
 
 
-def settings(provider: str, fallback: str) -> object:
-    from memo_ai.config import Settings
-
+def settings(provider: str, fallback: str) -> Settings:
     return Settings.from_env(
         {
             "DATABASE_URL": "postgresql://memo:memo@db:5432/memo",
@@ -145,7 +144,8 @@ def test_the_documented_openai_setting_falls_through_rather_than_dead_ending():
 
 
 def test_a_typo_in_the_fallback_is_still_a_boot_failure():
-    from memo_ai.config import ConfigError
-
+    # And it names STT_FALLBACK, not STT_PROVIDER. Reaching `resolve` with a
+    # fallback name would report the typo against the wrong variable, and sending
+    # somebody to check the wrong line of their .env is worse than saying nothing.
     with pytest.raises(ConfigError, match="STT_FALLBACK"):
         stt.resolve_chain(settings("local", "fak"))

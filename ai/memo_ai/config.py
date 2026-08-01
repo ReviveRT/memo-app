@@ -31,11 +31,22 @@ from pathlib import Path
 
 # Mirrors docker-compose.yml. `local` rather than `fake`, deliberately: the
 # committed default must mean "real transcription" everywhere, so that a
-# misconfigured deployment cannot silently serve canned text. `local` is not
-# implemented until MEMO-14 -- see memo_ai/stt/unimplemented.py for what it does
-# in the meantime, and why that is a per-memo failure rather than a boot failure.
+# misconfigured deployment cannot silently serve canned text. As of MEMO-14 it
+# does -- memo_ai/stt/local.py is faster-whisper, and it needs no key, no account
+# and no network once the weights are cached.
 DEFAULT_STT_PROVIDER = "local"
+
+# Equal to the provider above, which memo_ai/stt/__init__.py collapses to a single
+# provider rather than a chain that would call the same one twice on every
+# failure. They only differ if somebody sets one of them.
 DEFAULT_STT_FALLBACK = "local"
+
+# Whisper size for the local provider: tiny | base | small | medium. Not validated
+# here, and that is the same rule the provider name does not follow: this one's
+# valid set belongs to faster-whisper and changes with it, so checking it would
+# mean importing the library into config parsing -- a second of startup, on every
+# boot, to catch a typo that memo_ai/stt/local.py reports on the first voice memo
+# with the library's own list in the log.
 DEFAULT_STT_MODEL = "base"
 DEFAULT_AUDIO_DIR = "/data/audio"
 

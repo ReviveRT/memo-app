@@ -192,6 +192,61 @@ def test_a_second_memo_during_a_slow_load_does_not_start_a_second_one(monkeypatc
     assert starts == ["base"]
 
 
+def test_callers_waiting_on_one_failed_load_start_one_retry_between_them():
+    # Three callers, one load, one retry -- not three of each. On a cold cache
+    # every extra load is another 142 MB and another copy of the model in memory,
+    # and the shape that produces them is a waiter that retires a load it no
+    # longer owns. Nothing here writes to that handle but the one block that
+    # decides, which is what makes the count below hold.
+    #
+    # Timing-shaped, unavoidably: the barrier gets all three callers to the same
+    # instruction and the sleep covers the few after it, before the load is
+    # allowed to fail. Generous by two orders of magnitude against what those
+    # instructions take.
+    release = threading.Event()
+    gathered = threading.Barrier(3)
+    starts = []
+    errors = []
+
+    def loader(size):
+        starts.append(size)
+        release.wait(5)
+
+        raise RuntimeError("cold cache, no network")
+
+    local = LocalWhisperStt("base", loader=loader)
+
+    def call():
+        gathered.wait(5)
+
+        try:
+            local.transcribe(AUDIO)
+        except Exception as error:  # noqa: BLE001 -- collected and asserted below
+            errors.append(error)
+
+    threads = [threading.Thread(target=call) for _ in range(3)]
+
+    for thread in threads:
+        thread.start()
+
+    time.sleep(0.2)
+    release.set()
+
+    for thread in threads:
+        thread.join(5)
+
+    assert starts == ["base"]
+    assert len(errors) == 3
+    assert all(isinstance(error, SttUnavailable) for error in errors)
+
+    # And the failure is not cached: the next memo gets exactly one fresh attempt.
+    # `release` is still set, so this one fails immediately rather than blocking.
+    with pytest.raises(SttUnavailable):
+        local.transcribe(AUDIO)
+
+    assert starts == ["base", "base"]
+
+
 def test_a_runaway_decode_is_stopped_by_the_deadline(monkeypatch):
     # A hundredth of a second of audio, so four times it is under the floor and the
     # floor is the deadline: 0.05s, against segments that take 0.04s each. The
@@ -250,14 +305,22 @@ def test_running_out_of_memory_is_unavailable_rather_than_the_memos_fault():
         provider(StubModel(raises=MemoryError())).transcribe(AUDIO)
 
 
-def test_an_engine_failure_is_unavailable_and_names_the_likely_knob():
+def test_an_engine_failure_is_unavailable_and_does_not_blame_the_recording():
+    # CTranslate2 reports allocation failures as RuntimeError from C++ with
+    # `bad_alloc` in the text, so those get the memory sentence and its knob.
     with pytest.raises(SttUnavailable, match="out of memory"):
         provider(StubModel(raises=RuntimeError("std::bad_alloc"))).transcribe(AUDIO)
 
+    # Everything else the engine can fail at is still not the audio's fault. The
+    # first version of this branch reused the unreadable-file sentence, which
+    # would have sent somebody off to re-record over a server misconfiguration.
     with pytest.raises(SttUnavailable) as raised:
         provider(StubModel(raises=RuntimeError("unsupported compute type"))).transcribe(AUDIO)
 
-    assert "out of memory" not in str(raised.value)
+    message = str(raised.value)
+
+    assert "out of memory" not in message
+    assert "nothing is wrong with the recording" in message
 
 
 def test_no_library_message_reaches_the_row():

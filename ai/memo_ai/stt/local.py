@@ -80,9 +80,13 @@ MODEL_LOAD_TIMEOUT_SECONDS = 120.0
 DEADLINE_REALTIME_FACTOR = 4.0
 DEADLINE_FLOOR_SECONDS = 120.0
 
+# Plain ASCII, like every other sentence that can reach `memos.last_error` --
+# memo_ai/audio.py's four are, and the one non-ASCII character anywhere near this
+# column is the ellipsis MemoQueue._truncate appends. One column, one UI, one
+# character set worth reasoning about.
 _STILL_LOADING = (
     "The local transcription model is still being downloaded. Recordings will "
-    "transcribe once it is ready — try this one again in a minute."
+    "transcribe once it is ready. Try this one again in a minute."
 )
 
 _LOAD_FAILED = (
@@ -95,6 +99,16 @@ _OUT_OF_MEMORY = (
     "STT_MODEL, or fewer ai-worker replicas, would leave it more room."
 )
 
+# For an engine fault that is not an allocation -- a compute type this CPU cannot
+# run, a half-written model directory. Its own sentence rather than _UNREADABLE
+# below, which was the first version of this and blamed the wrong thing: none of
+# these are properties of the recording, and telling somebody their audio could
+# not be read would send them to re-record over a server problem.
+_ENGINE_FAILURE = (
+    "The local transcription engine failed on this recording. The ai-worker logs "
+    "say why; nothing is wrong with the recording itself."
+)
+
 # Distinct from memo_ai/audio.py's _UNDECODABLE, and the difference is worth
 # keeping: ffmpeg already accepted this audio and rewrote it, so a file the
 # decoder here cannot open is a fault in the normalized copy rather than in
@@ -104,7 +118,7 @@ _UNREADABLE = (
     "Retrying the memo will make a fresh one."
 )
 
-_EMPTY = "This recording is empty — there is no audio in it to transcribe."
+_EMPTY = "This recording is empty. There is no audio in it to transcribe."
 
 # Three causes, not two, and the third was found rather than predicted. A Chrome
 # recording truncated to its first 4 KB does not fail in memo_ai/audio.py the way a
@@ -200,7 +214,10 @@ class LocalWhisperStt:
         except SttError:
             raise
         except MemoryError:
-            log.warning("memo audio %s: whisper ran out of memory", source.name)
+            # The model size is the lever, so it is the thing worth logging: an
+            # OOM under `medium` on two replicas is a different conversation from
+            # one under `tiny`.
+            log.warning("whisper ran out of memory on %s under model %r", source, self.model_size)
 
             raise SttUnavailable(_OUT_OF_MEMORY) from None
         except RuntimeError as error:
@@ -209,9 +226,12 @@ class LocalWhisperStt:
             # as RuntimeError from C++. Unavailable rather than a plain error:
             # none of it is a property of this recording, so another provider is
             # worth trying and so is this one on the next memo.
-            log.warning("memo audio %s: whisper engine failure: %s", source.name, error)
+            log.warning("whisper engine failure: %s: %s", type(error).__name__, error)
 
-            raise SttUnavailable(_OUT_OF_MEMORY if _is_allocation(error) else _UNREADABLE) from None
+            if _is_allocation(error):
+                raise SttUnavailable(_OUT_OF_MEMORY) from None
+
+            raise SttUnavailable(_ENGINE_FAILURE) from None
         except (OSError, ValueError) as error:
             # The decoder is PyAV, and it reports a missing file as a builtin
             # FileNotFoundError and undecodable bytes as a subclass of ValueError
@@ -220,11 +240,11 @@ class LocalWhisperStt:
             # happen: memo_ai/pipeline.py checked the original exists and ffmpeg
             # wrote this copy. If one does, the normalized temporary file is the
             # broken thing, not the upload.
-            log.warning(
-                "memo audio %s: whisper could not read the normalized copy: %s",
-                source.name,
-                error,
-            )
+            #
+            # The path is logged in full rather than by name: every one of these
+            # files is called `normalized.wav`, so the name alone identifies
+            # nothing, while the temporary directory in the path is per-job.
+            log.warning("whisper could not read %s: %s", source, error)
 
             raise SttError(_UNREADABLE) from None
 
@@ -277,45 +297,56 @@ class LocalWhisperStt:
         more than one. The lock is never held across the wait itself -- that
         would turn a slow download into a queue of blocked callers, each waiting
         the full timeout in turn instead of all of them watching the same load.
+
+        **Only the block below decides whether a load is needed, and a waiter
+        never retires one.** That is the whole reason this reads the way it does.
+        The obvious version has each caller clear ``self._load`` when its load
+        turns out to have failed, and it is wrong as soon as there are two
+        callers: they wake one after the other, so the first clears the handle
+        and raises, a third caller starts a *fresh* load, and the second waiter
+        -- still holding the old handle -- wipes that new one on its way out. The
+        memo after it would start a third load while the second was still
+        running, and on a cold cache each of those is 142 MB. Asking
+        ``_BackgroundLoad`` whether it failed, in one place, under the lock,
+        means no caller has to reason about whether what it is holding is still
+        current.
         """
         with self._lock:
             if self._model is not None:
                 return self._model
 
-            if self._load is None:
+            if self._load is None or self._load.failed:
                 log.info("loading whisper model %r (%s)", self.model_size, COMPUTE_TYPE)
                 self._load = _BackgroundLoad(self._loader, self.model_size)
 
             pending = self._load
 
         if not pending.wait(MODEL_LOAD_TIMEOUT_SECONDS):
-            # Left running on purpose. The thread is a daemon, so it cannot hold
-            # up shutdown, and a download that needed longer than this memo could
-            # wait is still worth finishing -- the next memo, or MEMO-16's retry
-            # of this one, finds it done.
+            # Left running on purpose, and left as `self._load` so the next memo
+            # waits on this one rather than starting a second. The thread is a
+            # daemon, so it cannot hold up shutdown, and a download that needed
+            # longer than this memo could wait is still worth finishing -- the
+            # next memo, or MEMO-16's retry of this one, finds it done.
             raise SttUnavailable(_STILL_LOADING)
 
+        if pending.error is not None:
+            # Not cleared here. It is left in place carrying its failure, and the
+            # block above starts a fresh attempt for whoever comes next -- because
+            # a load failure is as likely to be a transient fetch as a permanent
+            # misconfiguration, and caching it would make the first kind permanent.
+            log.warning(
+                "loading whisper model %r failed: %s: %s",
+                self.model_size,
+                type(pending.error).__name__,
+                pending.error,
+            )
+
+            raise SttUnavailable(_LOAD_FAILED.format(model=self.model_size))
+
         with self._lock:
-            if pending.error is not None:
-                # Cleared, so the next memo starts a fresh attempt. A load failure
-                # is as likely to be a transient fetch as a permanent
-                # misconfiguration, and caching the failure would make the first
-                # kind permanent.
-                self._load = None
-
-                log.warning(
-                    "loading whisper model %r failed: %s: %s",
-                    self.model_size,
-                    type(pending.error).__name__,
-                    pending.error,
-                )
-
-                raise SttUnavailable(_LOAD_FAILED.format(model=self.model_size))
-
             self._model = pending.model
-            self._load = None
 
-            return self._model
+        return pending.model
 
 
 class _BackgroundLoad:
@@ -356,6 +387,17 @@ class _BackgroundLoad:
 
     def wait(self, timeout: float) -> bool:
         return self._done.wait(timeout)
+
+    @property
+    def failed(self) -> bool:
+        """
+        Finished, and finished badly. Both halves matter.
+
+        A load still in flight is not failed, which is what stops a memo that
+        timed out waiting from causing the next one to start a second download of
+        the same weights.
+        """
+        return self._done.is_set() and self.error is not None
 
 
 def _load_whisper_model(model_size: str):
@@ -410,6 +452,14 @@ def _deadline_seconds(audio_seconds: float) -> float:
     Scaled to the audio rather than fixed, because a fixed ceiling that is safe
     for a ten-minute memo is useless on a five-second one -- and it is the short
     memo taking minutes that means something is wrong.
+
+    Scaling on a number from the file is only safe because that number is already
+    bounded before this is called. ``audio_seconds`` is whisper's own read of the
+    file, and ``audio.normalize`` measured the same file with ffprobe and raised
+    ``AudioTooLong`` above ``MAX_AUDIO_SECONDS`` -- two decoders from the same
+    project, on a file one of them wrote, agreeing to within a frame. So there is
+    no input for which this returns an absurd deadline, and no need for a second
+    ceiling on top to catch one.
     """
     return max(DEADLINE_FLOOR_SECONDS, audio_seconds * DEADLINE_REALTIME_FACTOR)
 

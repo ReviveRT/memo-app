@@ -13,10 +13,12 @@
 # It is not psycopg: psycopg-binary publishes musllinux_1_2 wheels alongside the
 # manylinux ones, so alpine would install the driver from a wheel perfectly well --
 # checked against PyPI after an earlier version of this comment claimed otherwise.
-# The constraint is `ctranslate2`, which faster-whisper runs on and which MEMO-14
-# adds: 4.8.1 ships manylinux wheels and *zero* musllinux ones. On alpine that is a
-# C++ build from source inside the image. Committing to glibc now costs nothing and
-# saves discovering it two tasks later, on the task that also bakes model weights.
+# The constraint is `ctranslate2`, which faster-whisper runs on: 4.8.1 ships
+# manylinux wheels and *zero* musllinux ones. On alpine that is a C++ build from
+# source inside the image. MEMO-14 has since added it and resolved exactly that
+# version, so the prediction this comment made is settled rather than pending --
+# committing to glibc early cost nothing and saved discovering it on the task that
+# also bakes model weights.
 FROM python:3.12-slim
 
 # PYTHONUNBUFFERED because stdout to a pipe is block-buffered, so the last log
@@ -101,17 +103,26 @@ ARG CACHE_DIR=/cache
 #  1. ${CACHE_DIR} has to exist *in the image* and be owned by `memo`, because
 #     Docker seeds an empty named volume from its mount point -- uid, gid and mode
 #     copied out of the image. Without this line `whisper-cache` comes up
-#     root:root and the non-root worker cannot write a model into it, which
-#     surfaces in MEMO-15 as a download that fails on every boot.
+#     root:root and the non-root worker cannot write a model into it.
+#
+#     Load-bearing as of MEMO-14 rather than in advance of MEMO-15, which is what
+#     this comment used to say: the local provider fetches its weights on the
+#     first voice memo, so an unwritable /cache is a failure on the first
+#     recording of every clean build. Confirmed working from the other side --
+#     a fresh volume came up `drwxr-xr-x memo memo` and both replicas wrote one
+#     shared 142 MB copy of `Systran/faster-whisper-base` into it.
 #
 #     Only /cache, not /cache/huggingface. Docker copies the mount point's
 #     *contents* into an empty volume too, and there is no reason to pre-populate
 #     it with an empty directory the library creates for itself.
 #
 #  2. /home/memo, because the base image points HOME at /root, which uid 10001
-#     cannot read. Nothing in the worker writes to HOME today; a python library
-#     that decides to cache something there is the ordinary way that changes, and
-#     the failure would be an unexplained EACCES from inside a dependency.
+#     cannot read. This stopped being hypothetical with MEMO-14 too, and was run
+#     rather than reasoned about: huggingface_hub caches under HOME when HF_HOME
+#     is unset, which is exactly what a bare `docker run` of this image without
+#     compose does. That run transcribes a fixture and leaves 142M in
+#     /home/memo/.cache as uid 10001. Without this line the first voice memo
+#     would die on an unexplained EACCES from inside a dependency.
 #
 # And one directory this image must NOT create: ${AUDIO_DIR}. An image with no
 # such path leaves an already-seeded volume alone, which is what lets the api image
