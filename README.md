@@ -228,6 +228,24 @@ the shipped model:
 | 2 minutes | 143 s (0.97× realtime) | **27.5 s (0.23× realtime)** | batched |
 | 10 minutes _(the cap)_ | ~10 min | **~2 min** | batched |
 
+Short memos get their speed somewhere else, and it is the larger factor of the
+two. Working out what language a recording is in costs a **whole extra encoder
+pass** over the first 30-second window — on a model whose encoder is the entire
+bill for a short memo, that simply doubles the job. So the question is put to
+`tiny` instead, which answers in 0.21 s against turbo's 4.44 s and, on every real
+recording tested, reached the same verdict. Measured end to end on real
+recordings, one at a time:
+
+| Recording | Detecting on the big model | **Detecting on `tiny`** |
+| --- | --- | --- |
+| 3 seconds | 9.5 s | **5.1 s** |
+| 13 seconds | 9.0 s | **5.2 s** |
+
+Nothing is given up for it: the language is still detected per recording, so a
+stack nobody configured still transcribes Russian as Russian. If `tiny` is unsure
+the guess is thrown away and the big model works it out itself, paying the old
+cost on that memo alone.
+
 Batching is not used below that threshold because it does not help and it does
 hurt. Short memos are a single window, so there is nothing to run in parallel —
 and because each window is decoded independently, whisper loses the running
@@ -243,16 +261,18 @@ Numerals and punctuation are worth keeping in a column that gets full-text
 searched. Past two minutes the arithmetic inverts — nobody trades eight minutes of
 waiting for a comma — so the threshold is where it is.
 
-One further thing you can do: **`STT_LANGUAGE=en`** if you only dictate in one
-language. Detection is a whole extra encoder pass, worth about 27% on a short
-memo, and it is the one lever that costs nothing.
+**`STT_LANGUAGE=en`** is still worth setting if you only ever dictate in one
+language, but it is now a small win rather than a large one — it skips `tiny`'s
+0.2 s and, more usefully, removes any chance of a wrong guess. Language detection
+is unreliable on short or accented audio whatever model does it.
 
 Raising CTranslate2's thread count is *not* worth it: it was tried, and bought 10%
 on a long memo while making short memos slower and costing 890 MB per replica.
 
-The floor on a short memo is the encoder, and nothing here moves it. If a
-three-second memo taking a few seconds is too slow, the only lever left is a
-smaller model — and the table above says what that costs.
+The floor on a short memo is one pass of the large-v3 encoder, and whisper pads
+every input to 30 seconds before running it — so three seconds of audio costs what
+thirty would. That is the architecture, not a setting. The only lever left below
+~5 s is a smaller model, and the table above says what that costs.
 
 ### What it costs to run
 

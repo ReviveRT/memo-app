@@ -36,6 +36,10 @@ stop *waiting* at the deadline. :class:`_BackgroundCall` is that shape.
 speed/accuracy trade taken only where it pays. :data:`BATCH_ABOVE_SECONDS` has the
 measurements on both sides of it.
 
+**The language is guessed by a model that costs nothing**, and handed to the one
+that does. Detection is a whole extra encoder pass, so letting the big model do it
+doubles a short memo; :data:`DETECT_MODEL` runs it on ``tiny`` instead.
+
 Measured uncontended on this machine (arm64, Docker Desktop, ``large-v3-turbo``
 at int8, the default four CTranslate2 threads):
 
@@ -48,16 +52,21 @@ at int8, the default four CTranslate2 threads):
   600 s (projected)    ~10 min     ~2 min    batched
   ==================== ========== ========== ===============
 
-So an ordinary memo is a few seconds and the longest one
-``MAX_AUDIO_SECONDS`` admits is a couple of minutes. Peak resident is 1.65 GB per
-replica in series and 2.4 GB when a long memo batches, which is why the README
-puts memory next to the model table.
+Those are the transcription alone, with the language already known. End to end
+through the running stack -- ffmpeg, the cheap detector, the poll interval and the
+database included -- a three-second memo is a `ready` row in 5.1 s and a
+thirteen-second one in 5.2 s, against 9.5 s and 9.0 s before the detector was
+split out.
+
+Peak resident is 1.65 GB per replica in series and 2.4 GB when a long memo
+batches; ``tiny`` adds 75 MB of weights and no measurable memory.
 """
 
 import logging
 import threading
 import wave
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from memo_ai import audio
@@ -150,6 +159,37 @@ BATCH_SIZE = 8
 # series against two batched, and nobody trades eight minutes for a comma.
 BATCH_ABOVE_SECONDS = 120.0
 
+# The model that decides what language a recording is in, when STT_LANGUAGE has
+# not already said.
+#
+# Detection is not a cheap add-on to transcription -- it is a whole extra encoder
+# pass over the first 30-second window, and on a model whose encoder is the entire
+# cost it simply doubles the job. Measured on the shipped model: 8.39 s for a
+# three-second memo detecting, 4.09 s with the language given. Nothing else in
+# this file is worth a factor of two.
+#
+# So the pass is run on `tiny` instead, and the answer handed to the real model.
+# `tiny` is 75 MB and answers in 0.21 s against turbo's 4.44 s -- 21 times cheaper
+# -- and on every real recording available it reached the *same verdict as turbo*,
+# including the Russian one. `small` did not, which is the useful counter-example:
+# it called an English recording Finnish at 0.74 confidence, so this is not simply
+# "bigger detector, better answer" and the pick is empirical rather than obvious.
+#
+# The honest limits: five recordings, two languages. This makes a wrong language
+# somewhat likelier than letting turbo decide, and a wrong language ruins a
+# transcript rather than degrading it. DETECT_MIN_CONFIDENCE is the valve.
+DETECT_MODEL = "tiny"
+
+# Below this, discard `tiny`'s answer and let the real model detect for itself --
+# paying the old double cost on that memo and only that memo.
+#
+# Low, because the evidence says confidence is a weak proxy for correctness rather
+# than a good one: `tiny` was right at 0.69 on one recording, and `small` was wrong
+# at 0.74 on another. A threshold tight enough to have caught `small`'s mistake
+# would also have thrown away two correct answers. So this catches the flagrantly
+# unsure case and makes no claim beyond that.
+DETECT_MIN_CONFIDENCE = 0.5
+
 # `cpu_threads` is still deliberately not passed, and this is now measured rather
 # than argued. CTranslate2 defaults to 4. Raising it to 8 bought 10 percent on a
 # 120-second memo (24.9 s against 27.5 s), made *short* memos slower (4.2 s
@@ -217,7 +257,49 @@ _TOO_SLOW = (
 # every path in this file -- load timeout, load failure, OOM, silence, a runaway
 # decode -- without a 145 MB download or a second of inference. The real one is
 # _load_whisper_model below.
-ModelLoader = Callable[[str], object]
+ModelLoader = Callable[[str, "str | None"], "_Engines"]
+
+
+@dataclass(frozen=True)
+class _Engines:
+    """
+    What one load produces: the model that transcribes, and the one that guesses
+    the language for it.
+
+    Both come out of a single :class:`_BackgroundCall`, rather than two, because
+    the second is 75 MB beside the first's 1.6 GB -- not worth a second slot of
+    load state, a second timeout, or a second thing that can be half-ready when a
+    memo arrives.
+    """
+
+    transcriber: object
+
+    # None when STT_LANGUAGE is set, because then there is nothing to detect and
+    # no reason to hold a second model resident. Also None on a provider built
+    # before a language was known, which cannot happen -- the language is a
+    # constructor argument.
+    detector: "_LanguageDetector | None"
+
+
+class _LanguageDetector:
+    """
+    ``tiny``, used for one question and never asked to transcribe.
+
+    A class rather than a bare model because ``detect_language`` wants decoded
+    samples rather than a path -- it hands its argument straight to the feature
+    extractor -- and the decoder that produces them is a faster-whisper import.
+    Keeping both behind this object is what lets everything above it stay
+    unaware that faster-whisper exists, and lets the tests substitute five lines.
+    """
+
+    def __init__(self, model: object, decode: Callable[[str], object]) -> None:
+        self._model = model
+        self._decode = decode
+
+    def detect(self, source: Path) -> tuple[str, float]:
+        language, probability, _ = self._model.detect_language(self._decode(str(source)))
+
+        return language, probability
 
 
 class LocalWhisperStt:
@@ -265,7 +347,7 @@ class LocalWhisperStt:
         self._load: "_BackgroundCall | None" = None
 
     def transcribe(self, source: Path) -> Transcript:
-        model = self._ready_model()
+        engines = self._ready_model()
 
         try:
             # vad_filter is off by default in faster-whisper and is switched on
@@ -304,19 +386,22 @@ class LocalWhisperStt:
             # file; which is *better* is not something a character count answers,
             # so the library's tuned default stands.
             options = {
-                "language": self.language,
+                "language": self.language or _detected(engines.detector, source),
                 "vad_filter": True,
                 "vad_parameters": {"speech_pad_ms": VAD_SPEECH_PAD_MS},
             }
             seconds = _wav_seconds(source)
+            transcriber = engines.transcriber
 
             if seconds is not None and seconds >= BATCH_ABOVE_SECONDS:
-                # `model` is the batched pipeline; `model.model` is the plain one
+                # `transcriber` is the batched pipeline; `.model` is the plain one
                 # underneath it. See BATCH_ABOVE_SECONDS for why only long audio
                 # takes this path.
-                segments, info = model.transcribe(str(source), batch_size=BATCH_SIZE, **options)
+                segments, info = transcriber.transcribe(
+                    str(source), batch_size=BATCH_SIZE, **options
+                )
             else:
-                segments, info = model.model.transcribe(str(source), **options)
+                segments, info = transcriber.model.transcribe(str(source), **options)
 
             if info.duration <= 0:
                 raise SttError(_EMPTY)
@@ -398,7 +483,7 @@ class LocalWhisperStt:
                     COMPUTE_TYPE,
                 )
                 self._load = _BackgroundCall(
-                    lambda: self._loader(self.model_size), name="whisper-model-load"
+                    lambda: self._loader(self.model_size, self.language), name="whisper-model-load"
                 )
 
     def _decode(self, segments, audio_seconds: float) -> str:
@@ -476,7 +561,7 @@ class LocalWhisperStt:
             if self._load is None or self._load.failed:
                 log.info("loading whisper model %r (%s)", self.model_size, COMPUTE_TYPE)
                 self._load = _BackgroundCall(
-                    lambda: self._loader(self.model_size), name="whisper-model-load"
+                    lambda: self._loader(self.model_size, self.language), name="whisper-model-load"
                 )
 
             pending = self._load
@@ -559,7 +644,7 @@ class _BackgroundCall:
         return self._done.is_set() and self.error is not None
 
 
-def _load_whisper_model(model_size: str):
+def _load_whisper_model(model_size: str, language: str | None) -> "_Engines":
     """
     Build the real model. The only place this package imports faster-whisper.
 
@@ -589,14 +674,70 @@ def _load_whisper_model(model_size: str):
     A :class:`BatchedInferencePipeline` rather than the bare model, which is what
     makes :data:`BATCH_SIZE` mean anything. It is a wrapper with the same
     ``transcribe`` shape -- same arguments, same ``(segments, info)`` back, same
-    exceptions out of PyAV, all checked -- so nothing above this line knows the
-    difference.
+    exceptions out of PyAV, all checked -- and ``.model`` is the plain one
+    underneath, for the series path.
+
+    The ``tiny`` detector is built alongside it unless ``language`` already says
+    what to expect, in which case there is nothing to detect and no reason to keep
+    a second model resident. :data:`DETECT_MODEL` has what it is for and what it
+    saves.
     """
     from faster_whisper import BatchedInferencePipeline, WhisperModel
+    from faster_whisper.audio import decode_audio
 
-    return BatchedInferencePipeline(
-        model=WhisperModel(model_size, device="cpu", compute_type=COMPUTE_TYPE)
+    def build(size: str) -> object:
+        return WhisperModel(size, device="cpu", compute_type=COMPUTE_TYPE)
+
+    detector = None
+
+    if language is None:
+        detector = _LanguageDetector(build(DETECT_MODEL), decode_audio)
+
+    return _Engines(
+        transcriber=BatchedInferencePipeline(model=build(model_size)),
+        detector=detector,
     )
+
+
+def _detected(detector: "_LanguageDetector | None", source: Path) -> str | None:
+    """
+    What language to tell the real model, or ``None`` to let it work that out.
+
+    ``None`` on three paths, and all three end in the same place -- the model
+    detects for itself, at the cost this function exists to avoid:
+
+      * no detector, which means ``STT_LANGUAGE`` is set and there is nothing to
+        decide (that path never reaches here);
+      * the guess came back under :data:`DETECT_MIN_CONFIDENCE`;
+      * the detector raised. A failure to guess a language is not a reason to
+        fail a memo, so it is logged and the slower path is taken.
+    """
+    if detector is None:
+        return None
+
+    try:
+        language, probability = detector.detect(source)
+    except Exception:
+        # Broad on purpose. Everything this can raise -- a decode failure, a model
+        # fault -- is about to be raised again by the transcription itself, on the
+        # same file, where it is classified properly. Failing here would report it
+        # as a language problem.
+        log.warning("language detection failed; letting the model detect", exc_info=True)
+
+        return None
+
+    if probability < DETECT_MIN_CONFIDENCE:
+        log.info(
+            "language detection unsure (%s at %.2f), falling back to the full model",
+            language,
+            probability,
+        )
+
+        return None
+
+    log.debug("detected language %s at %.2f", language, probability)
+
+    return language
 
 
 def _wav_seconds(source: Path) -> float | None:

@@ -290,8 +290,10 @@ services:
       # accuracy each one actually delivers, measured rather than quoted.
       STT_MODEL: ${STT_MODEL:-large-v3-turbo}
       # Empty means detect it per recording, which is what lets one stack take
-      # memos in more than one language. Naming it is worth about 30% of the job
-      # and removes a real misdetection risk on short or accented audio.
+      # memos in more than one language. Detection runs on a `tiny` model rather
+      # than the big one — a whole encoder pass cheaper, which halves a short memo
+      # — so naming the language now saves only ~0.2s. Set it to remove the
+      # chance of a wrong guess, not for the speed.
       STT_LANGUAGE: ${STT_LANGUAGE:-}
       ENRICH_MODEL: ${ENRICH_MODEL:-claude-opus-5}
       # How long a replica waits after finding an empty queue. Only ever a sleep on

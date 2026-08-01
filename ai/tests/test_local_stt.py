@@ -23,9 +23,11 @@ from memo_ai.stt.local import (
     BATCH_ABOVE_SECONDS,
     BATCH_SIZE,
     DEADLINE_FLOOR_SECONDS,
+    DETECT_MIN_CONFIDENCE,
     VAD_SPEECH_PAD_MS,
     LocalWhisperStt,
     _deadline_seconds,
+    _Engines,
 )
 
 AUDIO = Path("/tmp/normalized.wav")
@@ -82,8 +84,47 @@ class StubModel:
             yield StubSegment(text)
 
 
-def provider(model=None, language=None, **kwargs) -> LocalWhisperStt:
-    return LocalWhisperStt("base", language, loader=lambda size: model or StubModel(**kwargs))
+class StubDetector:
+    """The language guesser in five lines. See _LanguageDetector for the real one."""
+
+    def __init__(self, language="en", probability=0.99, raises=None) -> None:
+        self.calls = 0
+        self._answer = (language, probability)
+        self._raises = raises
+
+    def detect(self, source):
+        self.calls += 1
+
+        if self._raises is not None:
+            raise self._raises
+
+        return self._answer
+
+
+def _engined(one_arg_loader):
+    """Adapt a `size -> model` stub to the real `(size, language) -> _Engines` shape."""
+
+    def loader(size, configured_language):
+        return _Engines(transcriber=one_arg_loader(size), detector=None)
+
+    return loader
+
+
+def provider(model=None, language=None, detector=None, **kwargs) -> LocalWhisperStt:
+    """
+    A provider whose loader hands back stubs.
+
+    ``detector`` mirrors the real loader: one is built only when no language was
+    configured, because a configured one leaves nothing to detect.
+    """
+
+    def loader(size, configured_language):
+        engines = model or StubModel(**kwargs)
+        guesser = None if configured_language else (detector or StubDetector())
+
+        return _Engines(transcriber=engines, detector=guesser)
+
+    return LocalWhisperStt("base", language, loader=loader)
 
 
 def test_it_transcribes_and_reports_the_model_that_did_it():
@@ -108,7 +149,9 @@ def test_it_asks_for_wav_and_switches_the_voice_filter_on():
     assert model.calls[0] == (
         str(AUDIO),
         {
-            "language": None,
+            # "en" because the stub detector guessed it -- the real one is `tiny`,
+            # and handing its answer over is what saves the second encoder pass.
+            "language": "en",
             "vad_filter": True,
             # Not the library's 400 ms. At that padding the filter clips the
             # onset of a word off a real recording -- VAD_SPEECH_PAD_MS has the
@@ -163,19 +206,47 @@ def _silent_wav(directory, seconds: int):
     return path
 
 
-def test_a_configured_language_is_passed_through_and_absence_means_detect():
-    # None rather than a default of "en", which is what keeps the Russian fixture
-    # transcribing as Russian on a stack nobody configured. memo_ai/config.py has
-    # what pinning it buys and why it is still not the default.
-    detecting = StubModel()
-    provider(detecting).transcribe(AUDIO)
+def test_a_configured_language_skips_detection_entirely():
+    # Nothing to detect, so no detector is built and none is consulted. That is
+    # also the cheapest path there is: one encoder pass, no guess.
+    model, detector = StubModel(), StubDetector()
+    provider(model, language="en", detector=detector).transcribe(AUDIO)
 
-    assert detecting.calls[0][1]["language"] is None
+    assert model.calls[0][1]["language"] == "en"
+    assert detector.calls == 0
 
-    pinned = StubModel()
-    provider(pinned, language="en").transcribe(AUDIO)
 
-    assert pinned.calls[0][1]["language"] == "en"
+def test_an_unconfigured_language_is_guessed_cheaply_and_handed_over():
+    # The whole point of the detector: `tiny` answers in 0.21s and the real model
+    # is told, instead of the real model spending a second full encoder pass
+    # working it out for itself. DETECT_MODEL has the numbers.
+    model, detector = StubModel(), StubDetector(language="ru", probability=0.98)
+    provider(model, detector=detector).transcribe(AUDIO)
+
+    assert detector.calls == 1
+    assert model.calls[0][1]["language"] == "ru"
+
+
+def test_an_unsure_guess_is_discarded_and_the_model_decides():
+    # None means "you work it out", which costs the extra pass on this memo and
+    # only this memo. A wrong language ruins a transcript, so an unsure guess is
+    # worth less than the time it saves.
+    model = StubModel()
+    unsure = StubDetector(language="cy", probability=DETECT_MIN_CONFIDENCE - 0.01)
+    provider(model, detector=unsure).transcribe(AUDIO)
+
+    assert model.calls[0][1]["language"] is None
+
+
+def test_a_detector_that_raises_does_not_fail_the_memo():
+    # Whatever broke is about to break again in the transcription itself, on the
+    # same file, where it gets classified properly. Reporting it here would call a
+    # decode failure a language problem.
+    model = StubModel()
+    broken = StubDetector(raises=RuntimeError("detector exploded"))
+
+    assert provider(model, detector=broken).transcribe(AUDIO).text == "hello world"
+    assert model.calls[0][1]["language"] is None
 
 
 def test_the_model_is_loaded_once_and_kept():
@@ -186,7 +257,7 @@ def test_the_model_is_loaded_once_and_kept():
 
         return StubModel()
 
-    local = LocalWhisperStt("small", loader=loader)
+    local = LocalWhisperStt("small", loader=_engined(loader))
     local.transcribe(AUDIO)
     local.transcribe(AUDIO)
 
@@ -198,7 +269,7 @@ def test_constructing_a_provider_loads_nothing():
     # happens at boot on both replicas, and a bad STT_MODEL must not be able to
     # turn `restart: unless-stopped` into a restart loop.
     loads = []
-    LocalWhisperStt("base", loader=lambda size: loads.append(size) or StubModel())
+    LocalWhisperStt("base", loader=_engined(lambda size: loads.append(size) or StubModel()))
 
     assert loads == []
 
@@ -215,7 +286,7 @@ def test_prefetch_starts_the_load_without_waiting_for_a_memo():
 
         return StubModel(texts=("warmed",))
 
-    local = LocalWhisperStt("large-v3-turbo", loader=loader)
+    local = LocalWhisperStt("large-v3-turbo", loader=_engined(loader))
     local.prefetch()
 
     # Returned immediately, with the load still running behind it. Nothing raised
@@ -230,7 +301,7 @@ def test_prefetch_starts_the_load_without_waiting_for_a_memo():
 
 def test_prefetch_is_idempotent_and_does_not_disturb_a_loaded_model():
     loads = []
-    local = LocalWhisperStt("base", loader=lambda size: loads.append(size) or StubModel())
+    local = LocalWhisperStt("base", loader=_engined(lambda size: loads.append(size) or StubModel()))
 
     local.prefetch()
     local.prefetch()
@@ -247,7 +318,7 @@ def test_a_prefetch_that_fails_does_not_raise_and_leaves_the_memo_to_report_it()
     def loader(size):
         raise RuntimeError("cold cache, no network")
 
-    local = LocalWhisperStt("base", loader=loader)
+    local = LocalWhisperStt("base", loader=_engined(loader))
     local.prefetch()
 
     with pytest.raises(SttUnavailable, match="could not be loaded"):
@@ -265,7 +336,7 @@ def test_a_failed_load_is_unavailable_and_is_retried_on_the_next_memo():
 
         return StubModel(texts=("second time", ""))
 
-    local = LocalWhisperStt("base", loader=loader)
+    local = LocalWhisperStt("base", loader=_engined(loader))
 
     with pytest.raises(SttUnavailable) as raised:
         local.transcribe(AUDIO)
@@ -294,7 +365,7 @@ def test_a_slow_load_gives_up_without_abandoning_the_download(monkeypatch):
 
         return StubModel(texts=("arrived late",))
 
-    local = LocalWhisperStt("base", loader=loader)
+    local = LocalWhisperStt("base", loader=_engined(loader))
 
     with pytest.raises(SttUnavailable, match="still being downloaded"):
         local.transcribe(AUDIO)
@@ -318,7 +389,7 @@ def test_a_second_memo_during_a_slow_load_does_not_start_a_second_one(monkeypatc
 
         return StubModel()
 
-    local = LocalWhisperStt("base", loader=loader)
+    local = LocalWhisperStt("base", loader=_engined(loader))
 
     for _ in range(3):
         with pytest.raises(SttUnavailable):
@@ -351,7 +422,7 @@ def test_callers_waiting_on_one_failed_load_start_one_retry_between_them():
 
         raise RuntimeError("cold cache, no network")
 
-    local = LocalWhisperStt("base", loader=loader)
+    local = LocalWhisperStt("base", loader=_engined(loader))
 
     def call():
         gathered.wait(5)
