@@ -13,8 +13,12 @@ import pytest
 from memo_ai import stt
 from memo_ai.config import (
     DEFAULT_AUDIO_DIR,
+    DEFAULT_MAX_ATTEMPTS,
     DEFAULT_MAX_AUDIO_SECONDS,
     DEFAULT_POLL_SECONDS,
+    DEFAULT_REAP_AFTER_SECONDS,
+    DEFAULT_REAPER_INTERVAL_SECONDS,
+    DEFAULT_RETRY_BACKOFF_SECONDS,
     DEFAULT_STT_FALLBACK,
     DEFAULT_STT_MODEL,
     DEFAULT_STT_PROVIDER,
@@ -36,6 +40,10 @@ def test_only_database_url_is_required():
     assert settings.stt_model == DEFAULT_STT_MODEL
     assert settings.max_audio_seconds == DEFAULT_MAX_AUDIO_SECONDS
     assert settings.poll_seconds == DEFAULT_POLL_SECONDS
+    assert settings.max_attempts == DEFAULT_MAX_ATTEMPTS
+    assert settings.retry_backoff_seconds == DEFAULT_RETRY_BACKOFF_SECONDS
+    assert settings.reap_after_seconds == DEFAULT_REAP_AFTER_SECONDS
+    assert settings.reaper_interval_seconds == DEFAULT_REAPER_INTERVAL_SECONDS
 
 
 @pytest.mark.parametrize(
@@ -47,6 +55,10 @@ def test_only_database_url_is_required():
         ("STT_MODEL", "stt_model", DEFAULT_STT_MODEL),
         ("MAX_AUDIO_SECONDS", "max_audio_seconds", DEFAULT_MAX_AUDIO_SECONDS),
         ("WORKER_POLL_SECONDS", "poll_seconds", DEFAULT_POLL_SECONDS),
+        ("MAX_ATTEMPTS", "max_attempts", DEFAULT_MAX_ATTEMPTS),
+        ("RETRY_BACKOFF_SECONDS", "retry_backoff_seconds", DEFAULT_RETRY_BACKOFF_SECONDS),
+        ("REAP_AFTER_SECONDS", "reap_after_seconds", DEFAULT_REAP_AFTER_SECONDS),
+        ("REAPER_INTERVAL_SECONDS", "reaper_interval_seconds", DEFAULT_REAPER_INTERVAL_SECONDS),
         ("LOG_LEVEL", "log_level", "INFO"),
     ],
 )
@@ -118,6 +130,43 @@ def test_a_valid_duration_cap_is_parsed_as_a_float():
     # would make every "too long" case a real multi-second recording.
     assert Settings.from_env(MINIMAL | {"MAX_AUDIO_SECONDS": "600"}).max_audio_seconds == 600.0
     assert Settings.from_env(MINIMAL | {"MAX_AUDIO_SECONDS": "1.5"}).max_audio_seconds == 1.5
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc"])
+def test_an_attempt_count_that_is_zero_negative_or_unparseable_is_refused(value):
+    # MAX_ATTEMPTS=0 is the one worth spelling out: it is not "never retry", it is a
+    # configuration in which every memo is over the cap the moment it is claimed, so
+    # the reaper resolves each one terminally the first time it looks. A stack that
+    # transcribes nothing and blames the recordings.
+    with pytest.raises(ConfigError, match="MAX_ATTEMPTS"):
+        Settings.from_env(MINIMAL | {"MAX_ATTEMPTS": value})
+
+
+def test_a_fractional_attempt_count_is_refused_rather_than_rounded():
+    # int() rather than int(float()). A fractional attempt count is a
+    # misunderstanding of the setting, and rounding it teaches the misunderstanding.
+    with pytest.raises(ConfigError, match="whole number"):
+        Settings.from_env(MINIMAL | {"MAX_ATTEMPTS": "3.5"})
+
+
+def test_a_valid_attempt_count_is_parsed_as_an_int():
+    settings = Settings.from_env(MINIMAL | {"MAX_ATTEMPTS": "5"})
+
+    assert settings.max_attempts == 5
+    assert isinstance(settings.max_attempts, int)
+
+
+@pytest.mark.parametrize(
+    "key", ["RETRY_BACKOFF_SECONDS", "REAP_AFTER_SECONDS", "REAPER_INTERVAL_SECONDS"]
+)
+@pytest.mark.parametrize("value", ["0", "-1", "abc"])
+def test_the_retry_and_reaper_intervals_are_refused_at_zero_or_below(key, value):
+    # Every one of the three is a duration that means something only when positive.
+    # REAP_AFTER_SECONDS=0 is the sharpest: a lease of zero reaps every claim on the
+    # next pass, so no job ever finishes and every memo cycles until its attempts
+    # run out.
+    with pytest.raises(ConfigError, match=key):
+        Settings.from_env(MINIMAL | {key: value})
 
 
 def test_log_level_is_case_insensitive():

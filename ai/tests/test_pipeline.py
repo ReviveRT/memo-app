@@ -14,8 +14,15 @@ from pathlib import Path
 import pytest
 
 from memo_ai import audio, pipeline
+from memo_ai.enrich import NO_ENRICHMENT, Enrichment, EnrichmentError
 from memo_ai.stt.base import SttError, SttUnavailable
-from tests.support import FakeQueue, RecordingNormalizer, RecordingStt, claimed_memo
+from tests.support import (
+    FakeQueue,
+    RecordingEnricher,
+    RecordingNormalizer,
+    RecordingStt,
+    claimed_memo,
+)
 
 MAX_SECONDS = 600.0
 
@@ -38,8 +45,8 @@ def normalizer(monkeypatch):
     return stub
 
 
-def run(queue, memo, provider, audio_dir, max_seconds=MAX_SECONDS):
-    pipeline.run_job(queue, memo, provider, audio_dir, max_seconds)
+def run(queue, memo, provider, audio_dir, max_seconds=MAX_SECONDS, enricher=NO_ENRICHMENT):
+    pipeline.run_job(queue, memo, provider, audio_dir, max_seconds, enricher)
 
 
 def test_a_text_memo_is_not_normalized_or_transcribed_and_goes_straight_to_ready(
@@ -50,6 +57,9 @@ def test_a_text_memo_is_not_normalized_or_transcribed_and_goes_straight_to_ready
     # column. A text memo arrives with the typed text already in place (MEMO-06),
     # so it never reaches ffmpeg -- which is what lets a worker with no ffmpeg
     # still drain half the queue.
+    #
+    # It also skips the first commit entirely: there is no transcript to commit
+    # that is not already on the row.
     provider = RecordingStt()
     queue = FakeQueue()
     memo = claimed_memo(source="text", transcript="the typed text", audio_path=None)
@@ -59,9 +69,8 @@ def test_a_text_memo_is_not_normalized_or_transcribed_and_goes_straight_to_ready
     assert provider.calls == []
     assert normalizer.calls == []
     assert queue.failed == []
-    assert queue.finished == [(memo, None)]
-    # No audio, so no length. The same NULL the row was inserted with.
-    assert queue.durations == [None]
+    assert queue.committed == []
+    assert queue.finished == [(memo, None, None)]
 
 
 def test_a_voice_memo_is_normalized_from_audio_dir_joined_to_the_key(audio_dir, normalizer):
@@ -87,13 +96,12 @@ def test_the_provider_is_handed_the_normalized_copy_not_the_original(audio_dir, 
     assert given != audio_dir / "2026/07/31/memo.webm"
     assert given.suffix == audio.OPUS.suffix
 
-    _, transcript = queue.finished[0]
+    _, transcript = queue.committed[0]
 
-    assert transcript is not None
     assert transcript.text == "spoken words"
 
 
-def test_the_measured_duration_is_written_with_the_transcript(audio_dir, normalizer):
+def test_the_measured_duration_is_committed_with_the_transcript(audio_dir, normalizer):
     normalizer.duration_ms = 7_314
     queue = FakeQueue()
 
@@ -129,6 +137,9 @@ def test_a_provider_gets_opus_unless_it_asks_for_something_else(audio_dir, norma
 def test_audio_over_the_cap_fails_before_the_provider_is_called(audio_dir, normalizer):
     # The reason the cap is checked here rather than after transcription: a memo
     # that is too long must not cost a hosted request or a model load.
+    #
+    # Not retryable either, and that is the clearest case of it: two more attempts
+    # would re-measure the same file and reach the same refusal.
     normalizer.error = audio.AudioTooLong("This recording is 11:04 long...", 664_200)
     provider = RecordingStt()
     queue = FakeQueue()
@@ -138,6 +149,7 @@ def test_audio_over_the_cap_fails_before_the_provider_is_called(audio_dir, norma
     assert provider.calls == []
     assert queue.finished == []
     assert queue.failed[0][1] == "This recording is 11:04 long..."
+    assert queue.failed[0][2] is False
     # The number the sentence is about, on the row beside it.
     assert queue.durations == [664_200]
 
@@ -212,14 +224,213 @@ def test_an_unclassified_failure_is_logged_but_not_copied_onto_the_row(audio_dir
 
 def test_a_database_failure_while_writing_the_result_is_not_swallowed(audio_dir, normalizer):
     # The row is left in `processing` on purpose: a result that could not be
-    # written is precisely the case MEMO-16's reaper exists for. Marking the memo
-    # done on the strength of a write that did not happen is the alternative.
+    # written is precisely the case the reaper exists for. Marking the memo done on
+    # the strength of a write that did not happen is the alternative.
     class ExplodingQueue(FakeQueue):
-        def finish_ready(self, memo, transcript, duration_ms=None):
+        def commit_transcript(self, memo, transcript, duration_ms=None):
             raise ConnectionError("the connection is closed")
 
     with pytest.raises(ConnectionError):
         run(ExplodingQueue(), claimed_memo(), RecordingStt(), audio_dir)
+
+
+# ---------------------------------------------------------------------------
+# Which failures are worth another attempt
+# ---------------------------------------------------------------------------
+
+
+def test_a_provider_that_cannot_run_here_is_retryable(audio_dir, normalizer):
+    # The reason SttUnavailable is a separate subclass at all. It means "not here,
+    # not now" -- a model still downloading, a load that ran out of memory under
+    # two replicas -- and both of those resolve on their own.
+    queue = FakeQueue()
+    provider = RecordingStt(error=SttUnavailable("The model is still loading."))
+
+    run(queue, claimed_memo(), provider, audio_dir)
+
+    assert queue.failed[0][2] is True
+
+
+def test_audio_that_produced_no_transcript_is_not_retryable(audio_dir, normalizer):
+    # Every provider in the chain is fed the same normalized file, so a file that
+    # produced no transcript once will produce none again. This is also MEMO-16's
+    # corrupt-file acceptance: one attempt, a readable sentence, no hanging.
+    queue = FakeQueue()
+    provider = RecordingStt(error=SttError("This recording contains no speech."))
+
+    run(queue, claimed_memo(), provider, audio_dir)
+
+    assert queue.failed[0][1] == "This recording contains no speech."
+    assert queue.failed[0][2] is False
+
+
+def test_an_undecodable_file_is_not_retryable(audio_dir, normalizer):
+    # AudioError, raised by ffmpeg failing rather than by a provider. Terminal for
+    # the same reason: same file, same tools, same answer.
+    normalizer.error = audio.AudioError("This recording could not be decoded.")
+    queue = FakeQueue()
+
+    run(queue, claimed_memo(), RecordingStt(), audio_dir)
+
+    assert queue.failed[0][2] is False
+
+
+def test_an_unclassified_failure_is_retryable(audio_dir, normalizer):
+    # The asymmetry against the classified failures is deliberate: an exception
+    # nobody classified is one nobody has shown to be deterministic, and three
+    # attempts cost a poison memo two minutes of queue time.
+    queue = FakeQueue()
+
+    run(queue, claimed_memo(), RecordingStt(error=RuntimeError("boom")), audio_dir)
+
+    assert queue.failed[0][2] is True
+
+
+# ---------------------------------------------------------------------------
+# The two commit points
+# ---------------------------------------------------------------------------
+
+
+def test_the_transcript_is_committed_before_enrichment_runs(audio_dir, normalizer):
+    # The ordering is the whole mechanism. Enrichment is what happens *after* the
+    # transcript is safe, so that a crash in between loses the summary and never
+    # the words.
+    queue = FakeQueue()
+    enricher = RecordingEnricher(Enrichment(title="A title"))
+    order = []
+
+    queue_commit = queue.commit_transcript
+
+    def record_commit(*args, **kwargs):
+        order.append("commit")
+
+        return queue_commit(*args, **kwargs)
+
+    queue.commit_transcript = record_commit
+    original_enrich = enricher.enrich
+
+    def record_enrich(transcript):
+        order.append("enrich")
+
+        return original_enrich(transcript)
+
+    enricher.enrich = record_enrich
+
+    run(queue, claimed_memo(), RecordingStt(), audio_dir, enricher=enricher)
+
+    assert order == ["commit", "enrich"]
+
+
+def test_a_job_that_lost_the_fence_on_the_transcript_stops_there(audio_dir, normalizer):
+    # A lost fence means another worker owns the row now. Enriching and publishing
+    # against their claim is exactly what fencing exists to prevent, so the job
+    # must not carry on to the second commit.
+    queue = FakeQueue(transcript_fence_holds=False)
+    enricher = RecordingEnricher(Enrichment(title="A title"))
+
+    run(queue, claimed_memo(), RecordingStt(), audio_dir, enricher=enricher)
+
+    assert queue.committed
+    assert enricher.calls == []
+    assert queue.finished == []
+
+
+def test_a_resumed_memo_is_enriched_from_the_transcript_already_on_the_row(audio_dir, normalizer):
+    # The crash-in-the-gap case, and the reason the transcript commit pays for
+    # itself. The row already has its text, so the provider is never called again
+    # -- on a hosted provider that is the difference between one bill and two -- and
+    # the enricher is handed the committed text rather than nothing.
+    provider = RecordingStt()
+    enricher = RecordingEnricher(Enrichment(title="A title"))
+    queue = FakeQueue()
+
+    run(
+        queue,
+        claimed_memo(transcript="words committed by an earlier attempt"),
+        provider,
+        audio_dir,
+        enricher=enricher,
+    )
+
+    assert provider.calls == []
+    assert queue.committed == []
+    assert enricher.calls == ["words committed by an earlier attempt"]
+    assert queue.finished[0][1] == Enrichment(title="A title")
+
+
+# ---------------------------------------------------------------------------
+# Enrichment may not fail a memo
+# ---------------------------------------------------------------------------
+
+
+def test_a_classified_enrichment_failure_still_publishes_the_memo(audio_dir, normalizer):
+    # MEMO-16's third acceptance. `failed` means no transcript, and this row has
+    # one -- so it reaches `ready` carrying the reason its summary is missing.
+    queue = FakeQueue()
+    enricher = RecordingEnricher(error=EnrichmentError("The model returned nothing usable."))
+
+    run(queue, claimed_memo(), RecordingStt(), audio_dir, enricher=enricher)
+
+    assert queue.failed == []
+    assert queue.committed
+    assert queue.finished[0][1] is None
+    assert queue.finished[0][2] == "The model returned nothing usable."
+
+
+def test_an_unclassified_enrichment_failure_is_not_copied_onto_the_row(audio_dir, normalizer):
+    # Same rule as the transcription half: `enrichment_error` is a column the API
+    # can project, so only sentences this project wrote go in it.
+    queue = FakeQueue()
+    secret = 'connection to server at "db" (172.18.0.2), port 5432 failed'
+    enricher = RecordingEnricher(error=RuntimeError(secret))
+
+    run(queue, claimed_memo(), RecordingStt(), audio_dir, enricher=enricher)
+
+    assert queue.finished[0][2] == pipeline.UNEXPECTED_ENRICHMENT_ERROR
+    assert secret not in queue.finished[0][2]
+
+
+def test_no_enricher_configured_is_a_clean_publish_rather_than_an_error(audio_dir, normalizer):
+    # The shipped configuration until MEMO-21. The memo is ready, its transcript is
+    # committed, and nothing claims enrichment was attempted or that it failed.
+    queue = FakeQueue()
+
+    run(queue, claimed_memo(), RecordingStt(), audio_dir)
+
+    assert queue.finished[0][1] is None
+    assert queue.finished[0][2] is None
+
+
+# ---------------------------------------------------------------------------
+# The reaper's lease
+# ---------------------------------------------------------------------------
+
+
+def test_the_job_budget_covers_every_deadline_a_healthy_job_can_spend():
+    # The number the lease has to exceed, summed from the timeouts rather than
+    # estimated: 30s + 120s + 30s of ffprobe/ffmpeg, 300s of model load, and a
+    # decode deadline of four times the audio.
+    assert pipeline.job_budget_seconds(600.0) == 30 + 120 + 30 + 300 + 2400
+
+
+def test_the_job_budget_grows_with_the_duration_cap():
+    # Which is the reason it is computed rather than written down: raising
+    # MAX_AUDIO_SECONDS invalidates a lease that was correct when it was chosen.
+    assert pipeline.job_budget_seconds(1200.0) > pipeline.job_budget_seconds(600.0)
+
+
+def test_the_job_budget_has_a_floor_for_short_recordings():
+    # local.py's decode deadline floors at two minutes, so a five-second memo does
+    # not get a twenty-second one. The budget inherits that.
+    assert pipeline.job_budget_seconds(5.0) == 30 + 120 + 30 + 300 + 120
+
+
+def test_the_shipped_lease_clears_the_shipped_budget():
+    # The one constraint on REAP_AFTER_SECONDS, asserted rather than left to the
+    # comment that derives it: below the budget, the reaper requeues healthy jobs.
+    from memo_ai.config import DEFAULT_MAX_AUDIO_SECONDS, DEFAULT_REAP_AFTER_SECONDS
+
+    assert DEFAULT_REAP_AFTER_SECONDS > pipeline.job_budget_seconds(DEFAULT_MAX_AUDIO_SECONDS)
 
 
 @pytest.mark.parametrize("key", ["../../etc/passwd", "/etc/passwd", "a/../../b", ""])

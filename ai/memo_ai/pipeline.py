@@ -5,17 +5,31 @@ Everything slow lives here, and nothing here holds a transaction open -- that
 separation is the design, not an implementation detail. memo_ai/db.py has the
 experiment behind it.
 
-Three steps now that MEMO-13 has landed: normalize, measure, transcribe. The
-order is the point. The duration comes off the *normalized* file, and it is
-checked against ``MAX_AUDIO_SECONDS`` before a provider is called, so a memo that
-is too long costs one ffmpeg run and nothing else -- no hosted request, no model
-load. memo_ai/audio.py has the reason the duration cannot be read off the
-original instead.
+Four steps: normalize, measure, transcribe, enrich. The order is the point. The
+duration comes off the *normalized* file, and it is checked against
+``MAX_AUDIO_SECONDS`` before a provider is called, so a memo that is too long costs
+one ffmpeg run and nothing else -- no hosted request, no model load.
+memo_ai/audio.py has the reason the duration cannot be read off the original
+instead.
 
-The shape is deliberately the one MEMO-16 grows into: it commits once at the end
-today, and MEMO-16 splits that into two commits (transcript first, still
-``processing``; then enrichment and ``ready``) without moving anything else.
-MEMO-21 adds the enrichment call in the gap between them.
+**The job commits twice, and the row is ``processing`` in between.** That is
+MEMO-16's shape and it is what makes the two halves fail independently:
+
+  1. transcription succeeds -> the transcript, its provider, model, duration and
+     cost are committed. Nothing about the status changes.
+  2. enrichment finishes, however it finished -> the memo becomes ``ready``, with
+     a title either way.
+
+The asymmetry is the design. A transcript is the memo and must never be lost; a
+title and a summary are conveniences and must never cost one. So ``failed`` is
+reachable only from step 1, and only after the attempts are used up -- an
+enrichment that raises lands in ``enrichment_error`` on a ``ready`` row.
+
+The property that pays for the split is on the *re-claim*. ``owed_audio`` below
+tests ``transcript IS NULL`` to decide whether transcription is owed, so a job that
+died in the gap between the two commits resumes at step 2 and never calls the
+provider again. On a hosted provider that is the difference between one bill and
+two for the same memo.
 """
 
 import logging
@@ -25,8 +39,10 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
 from memo_ai import audio
+from memo_ai.enrich import NO_ENRICHMENT, Enricher, Enrichment, EnrichmentError
 from memo_ai.memos import ClaimedMemo, MemoQueue
-from memo_ai.stt.base import SttError, SttProvider
+from memo_ai.stt import local
+from memo_ai.stt.base import SttError, SttProvider, SttUnavailable
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +58,14 @@ log = logging.getLogger(__name__)
 # memo_ai/audio.py for the same rule applied to ffmpeg's stderr.
 UNEXPECTED_ERROR = "Unexpected worker error. See the ai-worker logs for details."
 
+# The same rule for the second half of the job. Kept separate from the sentence
+# above because the two land in different columns and mean different things to a
+# reader: this one appears on a memo that is `ready` and has its transcript.
+UNEXPECTED_ENRICHMENT_ERROR = (
+    "The transcript is complete, but generating a title and summary failed "
+    "unexpectedly. See the ai-worker logs for details."
+)
+
 
 def run_job(
     queue: MemoQueue,
@@ -49,17 +73,23 @@ def run_job(
     provider: SttProvider,
     audio_dir: Path,
     max_audio_seconds: float,
+    enricher: Enricher = NO_ENRICHMENT,
 ) -> None:
     """
-    Do the work the claim promised, then write exactly one result.
+    Do the work the claim promised, committing the transcript before enriching it.
 
     The ``try`` covers the audio work and the transcription and nothing else,
-    which is deliberate. Both writes below are outside it, so a database failure
+    which is deliberate. Every write below is outside it, so a database failure
     while recording a result propagates to the loop, which reconnects -- and
-    leaves the row in ``processing`` for MEMO-16's reaper, because a result that
-    could not be written is exactly the case the reaper exists for. Swallowing it
-    here would instead mark the memo done on the strength of a write that did not
+    leaves the row in ``processing`` for the reaper, because a result that could
+    not be written is exactly the case the reaper exists for. Swallowing it here
+    would instead mark the memo done on the strength of a write that did not
     happen.
+
+    Enrichment has its own containment (:func:`_enriched`) rather than sharing
+    this one, and that is the difference between the two stages expressed in
+    control flow: a failure up here returns without publishing the memo, and a
+    failure down there is a value that the publishing write carries.
     """
     started = time.monotonic()
 
@@ -77,33 +107,151 @@ def run_job(
         # Before AudioError and SttError, which it subclasses. It is the one
         # failure that carries its own duration, because the duration is what
         # caused it, and the generic handler below would drop that.
+        #
+        # Not retryable, and this is the clearest case of it: two more attempts
+        # would re-measure the same file and reach the same refusal, three minutes
+        # later, having told the user nothing new.
         log.info("memo %s: refused for length: %s", memo.id, error)
-        queue.fail(memo, str(error), error.duration_ms)
+        queue.fail_or_retry(memo, str(error), retryable=False, duration_ms=error.duration_ms)
+
+        return
+    except SttUnavailable as error:
+        # Retryable, and the reason this subclass exists at all: it means "this
+        # provider cannot run *here, now*" -- a model still downloading, a load
+        # that ran out of memory under two replicas -- rather than "this audio has
+        # no words in it". Both of those resolve on their own, and the backoff is
+        # sized so three attempts span long enough for a 1.6 GB fetch to land.
+        log.warning("memo %s: provider unavailable: %s", memo.id, error)
+        queue.fail_or_retry(memo, str(error), retryable=True, duration_ms=duration_ms)
 
         return
     except SttError as error:
-        # Classified, so the message is safe and useful on the row.
+        # Classified, so the message is safe and useful on the row -- and terminal.
+        # Every provider in the chain is fed the same normalized file, so a file
+        # that produced no transcript once will produce none again; memo_ai/stt/
+        # chain.py declines to walk the fallback for the same reason and
+        # AudioError's docstring states it. This is also the corrupt-file case in
+        # MEMO-16's acceptance: one attempt, a readable sentence, no hanging.
         log.warning("memo %s: no transcript: %s", memo.id, error)
-        queue.fail(memo, str(error), duration_ms)
+        queue.fail_or_retry(memo, str(error), retryable=False, duration_ms=duration_ms)
 
         return
     except Exception:
+        # Retryable, unlike the classified failures above, and the asymmetry is on
+        # purpose: an exception nobody classified is one nobody has shown to be
+        # deterministic, and the cheap assumption is that it might not be. Three
+        # attempts cost a poison memo two minutes of queue time and buy a genuinely
+        # transient fault its recovery.
+        #
         # log.exception, so the traceback is in the container logs even though the
         # row only carries the generic sentence above.
         log.exception("memo %s: unexpected error while transcribing", memo.id)
-        queue.fail(memo, UNEXPECTED_ERROR, duration_ms)
+        queue.fail_or_retry(memo, UNEXPECTED_ERROR, retryable=True, duration_ms=duration_ms)
 
         return
 
-    if queue.finish_ready(memo, transcript, duration_ms):
+    # Commit 1. Skipped when nothing was transcribed -- a text memo, or a job
+    # resuming after an earlier attempt already committed one.
+    if transcript is not None and not queue.commit_transcript(memo, transcript, duration_ms):
+        # The fence lost, so this worker no longer owns the row. Returning rather
+        # than carrying on is the whole point of checking: enriching and publishing
+        # against someone else's claim is exactly what fencing prevents.
+        return
+
+    # Whichever text is now on the row: the one just produced, or the one an
+    # earlier attempt committed. The enricher is owed the memo's transcript, not
+    # this job's output, and for a resumed job those differ.
+    text = memo.transcript if transcript is None else transcript.text
+    enrichment, enrichment_error = _enriched(enricher, memo, text)
+
+    # Commit 2. Runs on both enrichment outcomes -- that is the rule.
+    if queue.finish_ready(memo, enrichment, enrichment_error):
         log.info(
-            "memo %s ready in %.0fms (attempt %d, %s%s)",
+            "memo %s ready in %.0fms (attempt %d, %s%s%s)",
             memo.id,
             (time.monotonic() - started) * 1000,
             memo.attempts,
             "transcribed" if transcript else "transcript already present",
             "" if duration_ms is None else f", {duration_ms}ms of audio",
+            "" if enrichment_error is None else ", enrichment failed",
         )
+
+
+def _enriched(
+    enricher: Enricher,
+    memo: ClaimedMemo,
+    transcript: str | None,
+) -> tuple[Enrichment | None, str | None]:
+    """
+    Run the enricher and turn whatever it did into two values the row can hold.
+
+    Never raises. That is the contract this function exists to provide, and it is
+    why the caller can put its result straight into the publishing write: there is
+    no enrichment outcome that stops a transcribed memo reaching ``ready``.
+
+    The classification mirrors the transcription half exactly -- a classified
+    ``EnrichmentError`` puts its own sentence on the row, and anything else gets a
+    written one while the traceback goes to the log. ``enrichment_error`` is a
+    column the API can project, so the same rule applies: only messages this
+    project wrote for a person to read.
+    """
+    if transcript is None:
+        # Not reachable from either commit path: a memo arrives here having just
+        # been transcribed, or carrying the transcript that let it skip
+        # transcription. Handled rather than asserted because the alternative is
+        # handing None to an enricher that will call a string method on it.
+        return None, None
+
+    try:
+        return enricher.enrich(transcript), None
+    except EnrichmentError as error:
+        log.warning("memo %s: enrichment failed: %s", memo.id, error)
+
+        return None, str(error)
+    except Exception:
+        log.exception("memo %s: unexpected error while enriching", memo.id)
+
+        return None, UNEXPECTED_ENRICHMENT_ERROR
+
+
+def job_budget_seconds(max_audio_seconds: float) -> float:
+    """
+    The longest one job can legitimately take, summed from the deadlines that bound it.
+
+    This is the number the reaper's lease has to exceed. It is derived rather than
+    estimated because every term in it is an explicit timeout somewhere in this
+    package, and because the sum moves: raising ``MAX_AUDIO_SECONDS`` lengthens the
+    decode deadline, so a lease chosen once against the old value silently starts
+    reaping healthy jobs. ``memo_ai/worker/__main__`` recomputes this at boot and
+    says so in the log rather than leaving that to whoever edits the ``.env``.
+
+    Worst case rather than typical, deliberately -- reaping a live job costs the
+    work it was doing, so the bound has to hold for the slowest run that is still
+    working correctly, not the median. At the shipped defaults that is 2,880s: 30s
+    of ffprobe on the upload, 120s of ffmpeg, 30s of ffprobe on the result, 300s
+    waiting for a model to load, and 2,400s of decode deadline for a ten-minute
+    recording. The real numbers are two orders of magnitude smaller.
+
+    The STT terms come from the ``local`` provider, which is the only configured
+    provider that can spend real time: ``fake`` is instant, and the hosted adapter
+    was deliberately left unwritten (memo_ai/stt/unimplemented.py). Reading one
+    provider's constants from here is a bound, not a call path -- the abstraction
+    is still intact -- but a provider with a longer one belongs in this sum, and
+    that is the note whoever writes it needs.
+    """
+    return (
+        # audio.normalize: probe the upload, transcode it, probe the result.
+        audio.PROBE_TIMEOUT_SECONDS
+        + audio.NORMALIZE_TIMEOUT_SECONDS
+        + audio.PROBE_TIMEOUT_SECONDS
+        # A cold cache pulls the weights before the first memo can be decoded.
+        + local.MODEL_LOAD_TIMEOUT_SECONDS
+        # The decode deadline, which local.py scales to the audio's own length.
+        + max(
+            local.DEADLINE_FLOOR_SECONDS,
+            max_audio_seconds * local.DEADLINE_REALTIME_FACTOR,
+        )
+    )
 
 
 @contextmanager
@@ -120,9 +268,14 @@ def owed_audio(
     is the reason this table needs no second status column and no job type. A text
     memo is inserted with the typed text already in ``transcript`` (MEMO-06) and so
     yields ``None`` here; a voice memo is inserted with NULL and so gets
-    normalized and transcribed. MEMO-16 leans on the same predicate for a stronger
-    property: a crash after a paid transcription never re-bills it, because on
-    re-claim the transcript is there.
+    normalized and transcribed.
+
+    The same predicate carries a second, stronger property now that the job commits
+    twice: a crash after transcription never re-transcribes, because the first
+    commit put the text on the row and a re-claim finds it there. That is what makes
+    the reaper safe to be aggressive with -- requeueing a half-finished job costs
+    the enrichment and never the transcript, and on a hosted provider never a
+    second bill.
 
     A context manager because what it yields is a temporary file. The normalized
     copy is deleted when the caller is done with it, and the original on the

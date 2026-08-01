@@ -5,12 +5,14 @@ import random
 import signal
 import sys
 import threading
+import time
 
 import psycopg
 
 from memo_ai import audio, db, log, pipeline, stt
 from memo_ai.config import ConfigError, Settings
-from memo_ai.memos import MemoQueue
+from memo_ai.enrich import NO_ENRICHMENT
+from memo_ai.memos import MemoQueue, Reaped, RetryPolicy
 
 logger = logging.getLogger("memo_ai.worker")
 
@@ -65,7 +67,7 @@ def main() -> int:
     # say which model a slow transcription was running.
     logger.info(
         "ai-worker starting: stt_provider=%s stt_fallback=%s stt_model=%s stt_language=%s "
-        "audio_dir=%s max_audio=%.0fs poll=%.1fs",
+        "audio_dir=%s max_audio=%.0fs poll=%.1fs attempts=%d backoff=%.0fs lease=%.0fs",
         settings.stt_provider,
         settings.stt_fallback,
         settings.stt_model,
@@ -73,7 +75,12 @@ def main() -> int:
         settings.audio_dir,
         settings.max_audio_seconds,
         settings.poll_seconds,
+        settings.max_attempts,
+        settings.retry_backoff_seconds,
+        settings.reap_after_seconds,
     )
+
+    _warn_if_lease_is_too_short(settings)
 
     # Start fetching the model now rather than on the first voice memo. Optional
     # on the protocol, so only a provider that has something to warm does
@@ -107,6 +114,43 @@ def main() -> int:
     return 0
 
 
+def _warn_if_lease_is_too_short(settings: Settings) -> None:
+    """
+    Compare the configured lease against what a job can actually take, and say so.
+
+    ``REAP_AFTER_SECONDS`` has one hard constraint -- it must exceed the whole-job
+    deadline -- and getting it wrong is the quiet kind of wrong. A lease under the
+    budget does not error; it reaps healthy long jobs, which looks like
+    transcription being flaky on exactly the recordings that take longest, and the
+    row it leaves behind says it was "interrupted" with nothing to say by what.
+
+    Checked at boot rather than written into a comment because the budget is not a
+    constant: it scales with ``MAX_AUDIO_SECONDS``, so somebody raising the
+    duration cap invalidates a lease that was correct when it was chosen. This is
+    the line that tells them.
+
+    A warning and not a refusal. The stack still works with a short lease -- memos
+    are retried rather than lost, because the transcript commit means a reaped job
+    resumes rather than restarts -- and refusing to boot over a tuning number would
+    take the whole queue down, including the text memos that never come near any of
+    these deadlines.
+    """
+    budget = pipeline.job_budget_seconds(settings.max_audio_seconds)
+
+    if settings.reap_after_seconds > budget:
+        return
+
+    logger.warning(
+        "REAP_AFTER_SECONDS is %.0fs but one job can legitimately take up to %.0fs at "
+        "MAX_AUDIO_SECONDS=%.0f -- the reaper will requeue jobs that are still running. "
+        "Raise it above %.0fs, or lower MAX_AUDIO_SECONDS.",
+        settings.reap_after_seconds,
+        budget,
+        settings.max_audio_seconds,
+        budget,
+    )
+
+
 def _run(settings: Settings, provider: stt.SttProvider, shutdown: threading.Event) -> None:
     """
     Claim, work, write, repeat -- across as many connections as it takes.
@@ -116,13 +160,29 @@ def _run(settings: Settings, provider: stt.SttProvider, shutdown: threading.Even
     Docker's restart policy, which works but reads in the logs like the worker
     crashed.
     """
+    policy = RetryPolicy.from_settings(settings)
+
+    # Outside the connection loop, so a database that keeps dropping does not turn
+    # into a reaper that runs every two seconds. Zero means "the first pass is due
+    # now": a replica coming up after a crash should take back what the crash
+    # abandoned rather than wait out an interval first.
+    next_reap = 0.0
+
     while not shutdown.is_set():
         try:
             with db.connect(settings) as connection:
-                queue = MemoQueue(connection)
+                queue = MemoQueue(connection, policy)
                 logger.info("connected to postgres, polling for queued memos")
 
                 while not shutdown.is_set():
+                    # Before the claim rather than on the idle path, so a replica
+                    # that never finds an empty queue still reaps. A busy stack is
+                    # where an abandoned row is least likely to be noticed and most
+                    # likely to matter.
+                    if time.monotonic() >= next_reap:
+                        _reap(queue)
+                        next_reap = time.monotonic() + settings.reaper_interval_seconds
+
                     memo = queue.claim()
 
                     if memo is None:
@@ -131,10 +191,11 @@ def _run(settings: Settings, provider: stt.SttProvider, shutdown: threading.Even
                         continue
 
                     logger.info(
-                        "claimed memo %s (source=%s, attempt %d)",
+                        "claimed memo %s (source=%s, attempt %d of %d)",
                         memo.id,
                         memo.source,
                         memo.attempts,
+                        settings.max_attempts,
                     )
                     pipeline.run_job(
                         queue,
@@ -142,6 +203,10 @@ def _run(settings: Settings, provider: stt.SttProvider, shutdown: threading.Even
                         provider,
                         settings.audio_dir,
                         settings.max_audio_seconds,
+                        # The null enricher until MEMO-21. Passed explicitly rather
+                        # than left to the default so that the day it becomes a real
+                        # one, the change is on this line and not in a signature.
+                        NO_ENRICHMENT,
                     )
 
                     # No sleep on the success path, on purpose: after a claim that
@@ -175,6 +240,47 @@ def _run(settings: Settings, provider: stt.SttProvider, shutdown: threading.Even
             shutdown.wait(RECONNECT_SECONDS)
 
 
+def _reap(queue: MemoQueue) -> None:
+    """
+    One reaper pass, logged only when it found something.
+
+    Silent on the ordinary pass, which is every pass on a healthy stack. A line a
+    minute per replica saying nothing was abandoned would bury the one that says
+    something was -- and the ids are the point of that line, because they are what
+    somebody then looks up.
+    """
+    reaped: Reaped = queue.reap()
+
+    if not reaped:
+        return
+
+    if reaped.requeued:
+        logger.warning(
+            "reaped %d memo(s) whose claim expired, requeued for another attempt: %s",
+            len(reaped.requeued),
+            ", ".join(str(memo_id) for memo_id in reaped.requeued),
+        )
+
+    if reaped.failed:
+        logger.error(
+            "reaped %d memo(s) out of attempts with no transcript, marked failed: %s",
+            len(reaped.failed),
+            ", ".join(str(memo_id) for memo_id in reaped.failed),
+        )
+
+    if reaped.salvaged:
+        # A different level from the two above, because the outcome is different:
+        # nothing was lost. The transcript was committed before the interruptions
+        # and the memo is published with it -- only the title and summary are
+        # missing, which is what `enrichment_error` on the row now says.
+        logger.warning(
+            "reaped %d memo(s) out of attempts but already transcribed, published "
+            "without enrichment: %s",
+            len(reaped.salvaged),
+            ", ".join(str(memo_id) for memo_id in reaped.salvaged),
+        )
+
+
 def _install_signal_handlers(shutdown: threading.Event) -> None:
     """
     Turn SIGTERM and SIGINT into a flag the loop reads between jobs.
@@ -194,9 +300,10 @@ def _install_signal_handlers(shutdown: threading.Event) -> None:
 
     The first reason is what it does with the flag. Shutdown stops the worker
     *claiming*; the job already in flight runs to completion and writes its result.
-    That matters more before MEMO-16 than after: there is no reaper yet, so a memo
-    abandoned in `processing` is stuck for good, and a `docker compose down` in the
-    middle of one would be the ordinary way to produce that.
+    That is now an optimisation rather than the only thing standing between a memo
+    and permanent limbo -- the reaper takes back an abandoned claim after the lease
+    -- but it is the difference between a `docker compose down` costing nothing and
+    costing an hour of nothing happening to somebody's memo.
 
     How long that grace lasts is not this file's decision and turned out not to be
     the documented one either. The Compose spec gives `stop_grace_period` a default
