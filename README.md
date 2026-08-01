@@ -122,6 +122,48 @@ format fixes the decoder's rate. The 16 kHz is real (everything above 8 kHz is
 gone, and the file is a fraction of the size), but `ffprobe` will not say `16000`
 unless you ask for the WAV output.
 
+### What happens to a memo, and what happens when it goes wrong
+
+A memo is its own queue row: `POST /api/memos` writes it `queued`, a worker replica
+claims it, and the claim is what moves it to `processing`. There is no jobs table
+and nothing to reconcile after a crash.
+
+**The job commits twice.** When transcription succeeds, the transcript is written
+and the memo stays `processing`. Only the second commit publishes it as `ready`,
+with a title, and that second commit runs whether or not enrichment worked. The
+split buys two things:
+
+- **A transcript is never lost, and never paid for twice.** A worker killed between
+  the two commits leaves the text on the row, and the re-claim sees it and skips
+  straight to enrichment. On a hosted provider that is the difference between one
+  bill and two for the same recording.
+- **Enrichment cannot fail a memo.** A title and a summary are conveniences; the
+  words are the memo. So a failed enrichment lands in `enrichment_error` on a
+  `ready` row, and `failed` means one thing only: no transcript.
+
+**A memo is never untitled.** Until enrichment lands (MEMO-21), every memo's title
+is the first 60 characters of its transcript — computed in SQL, so it also applies
+to a memo published by the reaper.
+
+**Failures are retried only when retrying could help.** A recording ffmpeg cannot
+decode, or one over `MAX_AUDIO_SECONDS`, fails on the first attempt: the same file
+will not decode on the third, and two more attempts would spend 90 seconds to say
+the same thing. What is retried is a provider that cannot run *right now* — a model
+still downloading, a load that ran out of memory — and an error nobody classified,
+on the grounds that nobody has shown it to be deterministic either. Three attempts,
+30 seconds then 60, jittered.
+
+**A worker that dies takes nothing with it.** The attempt count is incremented by
+the claim rather than by the failure write, so it survives a `SIGKILL` — which is
+the only reason a memo that crashes its worker terminates at all. A claim held
+longer than `REAP_AFTER_SECONDS` is taken back by whichever replica notices, and
+the memo is requeued, or resolved if its attempts are gone: `failed` if it never
+produced a transcript, `ready` if it did. Because there are two replicas, every
+result write is conditional on still holding the claim it started with, so a reaped
+job and the original still running cannot both write.
+
+You can watch all of it in `docker compose logs -f ai-worker`.
+
 ## Searching
 
 The **Filter memos** box narrows the list as you type. Plain words are matched by
@@ -238,6 +280,10 @@ reference and contains no real credentials.
 | `MAX_AUDIO_BYTES` | `12582912` | Upload byte cap for the API edge (12 MiB). Anything larger is a 413. Raising it above `upload_max_filesize` (16 MiB, in `api/conf.d/uploads.ini`) silently breaks uploads instead of widening them — `/api/health` reports both numbers and flags the mismatch |
 | `MAX_AUDIO_SECONDS` | `600` | Duration cap, enforced in the worker after normalization because that is the first point a duration exists. A memo over it is stored and then failed, not refused. Zero or negative is refused at boot |
 | `WORKER_POLL_SECONDS` | `1.0` | How long an `ai-worker` replica waits after finding the queue empty. Bounds how long a new memo sits in `queued`, not how fast the queue drains |
+| `MAX_ATTEMPTS` | `3` | How many times a memo is attempted, counting the first. Only failures that might resolve on their own spend an attempt — see below |
+| `RETRY_BACKOFF_SECONDS` | `30` | Base of the exponential backoff between attempts, doubling and jittered ±20% |
+| `REAP_AFTER_SECONDS` | `3600` | How long a memo may sit in `processing` before a worker assumes the one that claimed it is gone. **Must exceed the longest a healthy job can take** (2,880s at the defaults). Raising `MAX_AUDIO_SECONDS` raises that ceiling; the worker recomputes it at boot and warns if the lease no longer clears it |
+| `REAPER_INTERVAL_SECONDS` | `60` | How often each replica looks for expired leases |
 | `AUDIO_DIR` | `/data/audio` | Audio path inside the containers, on the shared `audio` volume. Changing it needs a rebuild with a matching `--build-arg AUDIO_DIR` — see the note in `.env.example` |
 
 ### Transcription
