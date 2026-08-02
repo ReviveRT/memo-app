@@ -122,7 +122,8 @@ const BASE_R = 0.98
  * `filter` on the element. That is the same choice MemoBackdrop's BLUR_CSS_PX records, and the
  * reason there was measured: blurring the displayed element re-rasterises every displayed pixel
  * every frame, and it cost more than everything else on that page put together. Here it is two
- * passes over roughly sixteen thousand pixels.
+ * passes over a backing store MAX_BACKING holds to 192 square, so about 37 thousand pixels
+ * whatever size the sphere is drawn at.
  *
  * Bloom first and the crisp copy second, so the sharp arcs sit on top of their own light
  * rather than under it.
@@ -142,15 +143,70 @@ const BASE_R = 0.98
 const BLOOM = 0.115
 const SHARP_PX = 0.7
 
-/** Idle rotation and breathing, in Hz, and what a question in flight adds to each. */
+/** Idle rotation, and what a question in flight adds to it. */
 const IDLE_SPIN = 1
 const ACTIVE_SPIN = 2.4
-const IDLE_PULSE_HZ = 0.34
-const ACTIVE_PULSE_HZ = 0.85
 
-/** How far the breath swells the sphere, and how much it brightens it. */
+/**
+ * The breath: three oscillators rather than one, and this is the whole reason the sphere has
+ * no beginning and no end.
+ *
+ * **A single sine is a loop, and it is seen as one.** It was `sin(pulse)` at 0.34 Hz driving
+ * both the size and the brightness, which is a three-second cycle of exactly the same shape
+ * repeated for ever, applied to everything at once -- so the eye finds the period within a few
+ * seconds and the animation reads as a clip being replayed rather than as something alive.
+ *
+ * Three frequencies summed have no period the viewer will ever reach. They are deliberately
+ * not round and not in any simple ratio, for the reason MemoBackdrop gives about its own: two
+ * oscillators at a rational ratio return to the same relative phase every few cycles and the
+ * eye finds *that*. The arithmetic common period of these three is on the order of a quarter
+ * of an hour, which is not a number anybody stares at a button for.
+ *
+ * The fastest of them is about a three-second ripple, so the sphere still visibly pulses --
+ * what changes is that no two of those pulses are the same size as each other.
+ */
+const PULSE_HZ = [0.113, 0.187, 0.307]
+const PULSE_ACTIVE_HZ = [0.29, 0.43, 0.71]
+
+/** How much of the breath each oscillator carries. Sums to 1, so the total stays in [-1, 1]. */
+const PULSE_MIX = [0.42, 0.33, 0.25]
+
+/**
+ * How far the breath swells the sphere, and how much it brightens it.
+ *
+ * Read off *different* combinations of the same three oscillators -- see `breath` in draw().
+ * Sharing one number made the sphere grow and brighten in perfect lockstep, which is the other
+ * half of what made it read as a machine: a living thing is rarely at its biggest and its
+ * brightest in the same instant.
+ */
 const PULSE_SIZE = 0.055
 const PULSE_GLOW = 0.16
+
+/**
+ * How far each arc's own rate and shape wander, and how slowly relative to its rotation.
+ *
+ * **The second thing with a period, and less obvious than the breath.** An arc is a comet on a
+ * fixed ellipse at a fixed speed, so its head returns to the same point every few seconds --
+ * and once the eye has locked onto one of them, the whole sphere is a loop again however
+ * aperiodic the breath is.
+ *
+ * So each arc's angular rate is modulated by an oscillator of its own, which means no two of
+ * its revolutions take the same time; and the ellipse it travels on is itself slowly leaning
+ * and flattening, so the *path* is never quite the one it took last time round. The second is
+ * the one that really reads, and it is MemoBackdrop's finding about its blobs: a shape whose
+ * outline changes cannot be recognised as a repeat, where one that only moves can.
+ *
+ * The rate wander stays well inside ±1, so an arc never stalls or reverses -- a trail that
+ * backed up would read as a glitch rather than as drift. The ratios are the usual awkward
+ * numbers, and for the usual reason.
+ */
+const RATE_WANDER = 0.35
+const SHAPE_WANDER = 0.22
+const TILT_WANDER = 0.55
+
+const RATE_WANDER_RATIO = 0.29
+const SHAPE_WANDER_RATIO = 0.17
+const TILT_WANDER_RATIO = 0.11
 
 /** Brightness at rest, and what being open or busy adds. */
 const BASE_GLOW = 0.95
@@ -229,7 +285,14 @@ let scale = 1
  */
 const spin = ARCS.map((_, i) => i * 1.31)
 const specks = SPECKS.map((_, i) => i * 2.11)
-let pulse = 0
+
+/** The three breath phases, started apart so they do not all peak together on the first cycle. */
+const pulses = PULSE_HZ.map((_, i) => i * 1.73)
+
+/** Each arc's own wander: how fast it is going, how flat its ellipse is, and how it leans. */
+const rateWander = ARCS.map((_, i) => i * 0.87)
+const shapeWander = ARCS.map((_, i) => i * 1.93)
+const tiltWander = ARCS.map((_, i) => i * 2.41)
 
 /** How busy the orb currently reads as, 0 to 1. Chases `props.active`. See ENERGY_EASE. */
 let energy = 0
@@ -261,8 +324,14 @@ function ringPoint(a, r, tilt, squash) {
   ]
 }
 
-/** One arc: short strokes along a ring, brightest at the leading end. */
-function arc(spec, phase, radius, glow) {
+/**
+ * One arc: short strokes along a ring, brightest at the leading end.
+ *
+ * `tilt` and `squash` are passed rather than read off `spec`, because they are not constants
+ * any more -- the ring leans and flattens as it turns, which is what keeps one revolution from
+ * looking like the last. See TILT_WANDER.
+ */
+function arc(spec, phase, radius, glow, tilt, squash) {
   const head = `rgba(${spec.rgb[0]},${spec.rgb[1]},${spec.rgb[2]},`
 
   offCtx.lineWidth = Math.max(1, spec.w * radius)
@@ -286,8 +355,8 @@ function arc(spec, phase, radius, glow) {
     const from = phase + t * spec.span
     const to = phase + ((i + 1) / SEGMENTS) * spec.span
 
-    const [x1, y1] = ringPoint(from, spec.r * radius, spec.tilt, spec.squash)
-    const [x2, y2] = ringPoint(to, spec.r * radius, spec.tilt, spec.squash)
+    const [x1, y1] = ringPoint(from, spec.r * radius, tilt, squash)
+    const [x2, y2] = ringPoint(to, spec.r * radius, tilt, squash)
 
     offCtx.strokeStyle = head + (t * t * glow).toFixed(3) + ')'
     offCtx.beginPath()
@@ -298,7 +367,7 @@ function arc(spec, phase, radius, glow) {
 
   // The hot head. Without it every arc simply stops, and a trail with no source reads as a
   // gap in a ring rather than as something travelling along one.
-  const [hx, hy] = ringPoint(phase + spec.span, spec.r * radius, spec.tilt, spec.squash)
+  const [hx, hy] = ringPoint(phase + spec.span, spec.r * radius, tilt, squash)
   const dot = spec.w * radius * 1.6
 
   offCtx.fillStyle = blob(hx, hy, dot, spec.rgb, Math.min(1, glow * 1.1))
@@ -360,14 +429,28 @@ function advance(dt) {
   const rate = IDLE_SPIN + (ACTIVE_SPIN - IDLE_SPIN) * energy
 
   for (let i = 0; i < spin.length; i++) {
-    spin[i] += 2 * Math.PI * ARCS[i].speed * rate * dt
+    // Each arc's wander runs at a fraction of its own rotation, so a slow arc drifts slowly.
+    // Off the absolute speed, so the two arcs going the other way wander forwards like the
+    // rest -- a sine does not care, and a negative frequency here would read as a mistake.
+    const own = 2 * Math.PI * Math.abs(ARCS[i].speed) * rate * dt
+
+    rateWander[i] += own * RATE_WANDER_RATIO
+    shapeWander[i] += own * SHAPE_WANDER_RATIO
+    tiltWander[i] += own * TILT_WANDER_RATIO
+
+    // The wander multiplies the rate rather than being added to the angle, which is what makes
+    // it a change of pace rather than a wobble on top of a steady one.
+    spin[i] +=
+      2 * Math.PI * ARCS[i].speed * rate * (1 + RATE_WANDER * Math.sin(rateWander[i])) * dt
   }
 
   for (let i = 0; i < specks.length; i++) {
     specks[i] += 2 * Math.PI * SPECKS[i].speed * rate * dt
   }
 
-  pulse += 2 * Math.PI * (IDLE_PULSE_HZ + (ACTIVE_PULSE_HZ - IDLE_PULSE_HZ) * energy) * dt
+  for (let i = 0; i < pulses.length; i++) {
+    pulses[i] += 2 * Math.PI * (PULSE_HZ[i] + (PULSE_ACTIVE_HZ[i] - PULSE_HZ[i]) * energy) * dt
+  }
 }
 
 function draw() {
@@ -382,12 +465,27 @@ function draw() {
   // nothing has to be re-tuned when the widget is smaller on a phone. Short of the half-width,
   // because the bloom spreads and a sphere drawn to the edge would have its halo clipped.
   const radius = mid * 0.74
-  const swell = 1 + PULSE_SIZE * Math.sin(pulse)
+
+  /*
+   * The breath, read twice off the same three oscillators.
+   *
+   * `swell` and `shimmer` use the *same* phases in a different order and with the weights
+   * shuffled, which decorrelates them for the cost of nothing: the sphere is no longer at its
+   * biggest and its brightest in the same instant, and neither reading has a period. The
+   * offsets are there so the two do not start out agreeing either.
+   */
+  const s0 = Math.sin(pulses[0])
+  const s1 = Math.sin(pulses[1])
+  const s2 = Math.sin(pulses[2])
+
+  const swell = 1 + PULSE_SIZE * (PULSE_MIX[0] * s0 + PULSE_MIX[1] * s1 + PULSE_MIX[2] * s2)
+  const shimmer =
+    PULSE_MIX[2] * Math.sin(pulses[0] + 2.4) +
+    PULSE_MIX[0] * Math.sin(pulses[1] + 1.1) +
+    PULSE_MIX[1] * s2
+
   const glow =
-    BASE_GLOW +
-    PULSE_GLOW * Math.sin(pulse) +
-    (props.open ? OPEN_GLOW : 0) +
-    ACTIVE_GLOW * energy
+    BASE_GLOW + PULSE_GLOW * shimmer + (props.open ? OPEN_GLOW : 0) + ACTIVE_GLOW * energy
 
   ctx.setTransform(1, 0, 0, 1, 0, 0)
   ctx.filter = 'none'
@@ -428,7 +526,17 @@ function draw() {
   offCtx.fill()
 
   for (let i = 0; i < ARCS.length; i++) {
-    arc(ARCS[i], spin[i], r, Math.min(1, glow * 0.95))
+    // The ellipse this arc travels on, as it is *now*: leaning a little further one way than
+    // it was a moment ago, and a little flatter or rounder. See TILT_WANDER -- this is what
+    // stops a revolution being recognisable as a repeat of the last one.
+    arc(
+      ARCS[i],
+      spin[i],
+      r,
+      Math.min(1, glow * 0.95),
+      ARCS[i].tilt + TILT_WANDER * Math.sin(tiltWander[i]),
+      ARCS[i].squash * (1 + SHAPE_WANDER * Math.sin(shapeWander[i])),
+    )
   }
 
   // The core, over the arcs rather than under them: the inner rings pass in front of it in the
