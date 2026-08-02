@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted, onScopeDispose, ref } from 'vue'
-import AskPanel from '../components/AskPanel.vue'
+import AskWidget from '../components/AskWidget.vue'
 import CollectionDialog from '../components/CollectionDialog.vue'
 import CollectionGrid from '../components/CollectionGrid.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
@@ -190,16 +190,6 @@ onMounted(() => {
     </p>
 
     <!--
-      Below the two write paths and above the list, which is the order the screen is read in:
-      make a memo, ask about the memos, then browse them. Putting it first would place a
-      feature that needs memos to exist above the only two controls that create any.
-
-      `memos` is passed so a citation can open the card the strip is already holding -- see
-      AskPanel, and MemosView's `showMemo` for why it has to be that object and not a copy.
-    -->
-    <AskPanel :memos="memos" @open-memo="showMemo" />
-
-    <!--
       No "+ Add fast memo" button here any more.
 
       It was the brief's affordance for adding a memo to this list, and it never added one:
@@ -288,6 +278,23 @@ onMounted(() => {
     the order showModal() is called.
   -->
   <ConfirmDialog />
+
+  <!--
+    Ask, in the bottom right. Outside <main> like the dialogs above it, and for the same
+    reason: it floats over the page rather than sitting anywhere in it, so putting it inside
+    the landmark would misdescribe the document.
+
+    It used to be a section between the composer and the strip. What that cost was a band of
+    the page permanently given to an empty box, a memo list that jumped down whenever an
+    answer arrived, and a feature that could only be used from one scroll position -- see
+    AskWidget for the longer version.
+
+    `memos` is passed so a citation can open the card the strip is already holding rather than
+    fetching a second copy of it -- see `showMemo` for why it has to be that object.
+    Citations to memos the strip does *not* hold are fetched by id, which is what the widget
+    needs `GET /api/memos/{id}` for.
+  -->
+  <AskWidget :memos="memos" @open-memo="showMemo" />
 
   <div class="toasts">
     <MemoToasts />

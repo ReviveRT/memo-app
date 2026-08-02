@@ -545,6 +545,60 @@ final class MemoEndpointsTest extends TestCase
         );
     }
 
+    public function test_one_memo_can_be_fetched_by_id_in_the_shape_the_list_uses(): void
+    {
+        $this->repository->rows = [
+            $this->memo('019fb4ee-0d71-7011-b678-0cb4004dc2a7', 'the other one'),
+            $this->memo('019fb4ef-0d71-7011-b678-0cb4004dc2a7', 'call the dentist'),
+        ];
+
+        $this->getJson('/api/memos/019fb4ef-0d71-7011-b678-0cb4004dc2a7')
+            ->assertOk()
+            ->assertJsonPath('memo.id', '019fb4ef-0d71-7011-b678-0cb4004dc2a7')
+            ->assertJsonPath('memo.transcript', 'call the dentist')
+            // The same fields the list renders, because the client opens the card this
+            // returns with the same component it opens a listed memo with. A projection
+            // that dropped one of them would fail only for a memo fetched this way,
+            // which is the memo nothing on screen is holding.
+            ->assertJsonStructure([
+                'memo' => [
+                    'id', 'source', 'status', 'transcript', 'title',
+                    'summary', 'tags', 'duration_ms', 'last_error', 'created_at',
+                ],
+            ]);
+    }
+
+    public function test_fetching_a_memo_that_is_not_there_is_a_404_that_says_so(): void
+    {
+        // Rendered verbatim by the frontend, so it is a sentence rather than a status:
+        // the reader pressed a citation and the memo behind it has since been deleted.
+        $this->getJson('/api/memos/019fb4ef-0d71-7011-b678-0cb4004dc2a7')
+            ->assertNotFound()
+            ->assertJsonPath('message', 'That memo no longer exists.');
+    }
+
+    public function test_an_id_that_is_not_a_uuid_never_reaches_the_controller(): void
+    {
+        // whereUuid on the route. Without it the string reaches Postgres and comes back
+        // as a 500 from `invalid input syntax for type uuid` -- the same reason every
+        // other id-bearing route in api.php carries the constraint.
+        $this->getJson('/api/memos/not-a-uuid')->assertNotFound();
+    }
+
+    public function test_a_fetched_memo_is_never_cached(): void
+    {
+        // Weaker than the list's reason and the same answer: this row is rewritten by the
+        // worker while it transcribes and by the card this response opens.
+        $this->repository->rows = [$this->memo('019fb4ef-0d71-7011-b678-0cb4004dc2a7', 'call the dentist')];
+
+        $response = $this->getJson('/api/memos/019fb4ef-0d71-7011-b678-0cb4004dc2a7');
+
+        $this->assertStringContainsString(
+            'no-store',
+            (string) $response->headers->get('Cache-Control'),
+        );
+    }
+
     /**
      * The opening bytes of each container MediaRecorder actually produces, one per
      * browser, so the sniffing these tests are about has something real to sniff.

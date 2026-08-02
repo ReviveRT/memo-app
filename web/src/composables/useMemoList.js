@@ -72,9 +72,29 @@ const lists = new Set()
  *
  * @param {object} updated
  */
-export function applyMemoEverywhere(updated) {
+export function applyMemoEverywhere(updated, also = null) {
+  let landed = false
+
   for (const list of lists) {
-    list.applyUpdate(updated)
+    landed = list.applyUpdate(updated) || landed
+  }
+
+  /*
+   * The memo the caller is rendering, when no list turned out to be holding it.
+   *
+   * **Every memo on screen used to be in a list, and that is what stopped being true.** A
+   * citation in the ask widget opens a memo fetched by id -- one filed into a collection, or
+   * one the search box has filtered out -- so the detail card can now be rendering an object
+   * that belongs to nothing. Renaming it reached the database and left the card showing the
+   * old title.
+   *
+   * Only as a fallback, so the ordinary path is unchanged: when a list does hold the memo,
+   * `also` is that same object and merging again would be writing it to itself. The id check
+   * is not ceremony either -- it is what stops a caller that passed the wrong memo from
+   * quietly overwriting one memo's fields with another's.
+   */
+  if (!landed && also !== null && also.id === updated.id) {
+    mergeMemo(also, updated)
   }
 }
 
@@ -589,16 +609,15 @@ export function createMemoList({ collection = null } = {}) {
    * ignores it, which is what makes it safe to call on a list without first knowing whether
    * the memo is in it.
    *
-   * **It is not enough on its own, and that is worth knowing before relying on it.** Only the
-   * fast strip is handed updates this way (useMemos owns that one instance). A memo opened
-   * from inside a collection belongs to a different list, so the write path also merges into
-   * the object the caller is rendering -- see mergeMemo, and writeMemo for the bug that
-   * omission caused.
+   * **It is not enough on its own, and that is worth knowing before relying on it.** Every
+   * live list gets one of these through applyMemoEverywhere, and until the ask widget landed
+   * that covered every memo a card could be showing. A citation now opens a memo fetched by
+   * id, which is in no list at all, so applyMemoEverywhere falls back to merging into the
+   * object the caller is rendering -- and the return value below is how it knows to.
    *
    * @param {object} updated
-   * @returns {boolean} Whether this list held the memo. Nothing reads it today; it is here
-   *   because "did that land anywhere?" is the one question a caller might reasonably have of
-   *   a method that silently does nothing.
+   * @returns {boolean} Whether this list held the memo. applyMemoEverywhere reads it to decide
+   *   whether anything at all took the update, which is what its fallback turns on.
    */
   function applyUpdate(updated) {
     const existing = memos.value.find((memo) => memo.id === updated.id)
@@ -688,10 +707,12 @@ export function createMemoList({ collection = null } = {}) {
  * the list is the same one an open detail card is rendering through its `memo` prop.
  * Reassigning would update the list's slot and leave the card pointing at the old object.
  *
- * Module-private. It was briefly exported, when the fix for that bug was "have each caller
- * merge into whatever it is rendering" -- which worked and put the responsibility in the wrong
- * place. `applyMemoEverywhere` replaced it: callers no longer need to know which list holds
- * the memo, so nothing outside this file needs to merge.
+ * Module-private, and still is. It was briefly exported, when the fix for that bug was "have
+ * each caller merge into whatever it is rendering" -- which worked and put the responsibility
+ * in the wrong place. `applyMemoEverywhere` replaced it: callers no longer need to know which
+ * list holds the memo, so nothing outside this file needs to merge. A caller that is rendering
+ * a memo no list holds hands that object to `applyMemoEverywhere` instead of merging it
+ * itself, which keeps the rule intact rather than carving an exception into it.
  *
  * @param {object} target The object to bring up to date, mutated in place.
  * @param {object} source The memo as the API just returned it.

@@ -128,6 +128,24 @@ final class MemoService
     }
 
     /**
+     * One memo by id, or null when there is no such row.
+     *
+     * A pass-through like `list()` above, and here for the ask widget: a citation names a memo
+     * the answer was built from, and the screen holding the widget holds only the *unfiled*
+     * memos under whatever filter is active -- so a cited memo that has been filed into a
+     * collection is one the client has no copy of and no list request that would return it.
+     * Before this existed the widget could name that memo and not open it, which made the
+     * usefulness of a citation depend on where the memo happened to be filed.
+     *
+     * `find()` on the repository was already there for the reminder routes, so this adds a
+     * seam rather than a query.
+     */
+    public function find(string $memoId): ?Memo
+    {
+        return $this->repository->find($memoId);
+    }
+
+    /**
      * Which blob a memo's recording is, for the route that plays it back (MEMO-23).
      *
      * A pass-through, like `list()` above and for the same reason: the seam is worth keeping

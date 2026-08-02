@@ -103,6 +103,33 @@ function echoed(value) {
 }
 
 /**
+ * GET /api/memos/{id} -- one memo, by identity rather than by filter.
+ *
+ * **The only caller is a citation in the ask widget, and no filter would do instead.** Ask
+ * reads the whole table; the screen behind the widget holds the unfiled memos matching
+ * whatever is typed in the search box. So a cited memo can be one that is filed away in a
+ * collection, and `listMemos` cannot fetch it -- not with a wider filter and not with a bigger
+ * limit, because the question is "this memo" and every parameter that route takes answers
+ * "which memos".
+ *
+ * A 404 is an ordinary outcome rather than a broken link: the memo was there when the answer
+ * was written and has since been deleted, which two tabs make easy. `request` turns it into an
+ * Error carrying the API's own sentence, which is written to be read.
+ *
+ * @param {string} id
+ * @returns {Promise<object>} The memo.
+ */
+export async function getMemo(id) {
+  const body = await request(`/api/memos/${encodeURIComponent(id)}`)
+
+  if (!body?.memo) {
+    throw new Error('The API answered without that memo.')
+  }
+
+  return body.memo
+}
+
+/**
  * PATCH /api/memos/{id} -- file a memo into a collection, or take it back out.
  *
  * `collectionId` of null is the unfile, and it is sent as an explicit `null` rather than by
