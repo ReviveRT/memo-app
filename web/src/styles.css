@@ -361,7 +361,7 @@ h1,
   font-size: 0.85rem;
 
   /*
-   * A cap, because the longest option here is "Indonesia · Indonesian" and a select sizes
+   * A cap, because the longest option here is "Português · Portuguese" and a select sizes
    * itself to its widest one -- which on a narrow window pushes the hint onto its own line for
    * a control nobody has touched. The chosen value is short enough that this never clips it;
    * what it clips is the empty space the widest option was reserving.
