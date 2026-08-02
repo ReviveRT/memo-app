@@ -970,7 +970,7 @@ server so the browser sees one origin. No authentication — see Assumptions.
 | Method | Path | What it does |
 | --- | --- | --- |
 | `GET` | `/health` | Database round trip and upload limits; 503 when it fails |
-| `POST` | `/ask` | `{question}` — ask about the memos. Streams NDJSON; 503 when `ai-api` is not up. See below |
+| `POST` | `/ask` | `{question}` — ask about the memos. Streams NDJSON; 503 when `ai-api` is not up or its model is not ready. See below |
 | `GET` | `/memos` | The list, newest first. See the parameters below |
 | `POST` | `/memos` | Create one: JSON `{text}`, or `multipart/form-data` with `audio` |
 | `PATCH` | `/memos/{memo}` | `{collection_id}` — file it, or `null` to unfile. `{title}` — rename it, or `null` to clear. Either field, or both |

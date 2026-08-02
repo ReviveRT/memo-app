@@ -30,13 +30,15 @@ import json
 import logging
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
+from typing import Annotated
 
 import psycopg
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, StringConstraints
 
 from memo_ai import db
+from memo_ai.ask import model as ask_model
 from memo_ai.ask import service
 from memo_ai.ask.model import Model
 from memo_ai.config import Settings
@@ -69,9 +71,20 @@ class Question(BaseModel):
     produce a lexeme worth searching for, and rejecting it here is a clearer answer
     than the "that question has no words to search for" the service would otherwise
     give it.
+
+    ``strip_whitespace`` before the length rules, so the two runtimes agree about
+    what a question *is*. `AskRequest` trims in `prepareForValidation` for exactly
+    this reason -- without it here, a question of four spaces and one letter would
+    be refused by PHP and accepted by a direct caller, and the caps would be
+    measured against different strings on the two sides of the same contract.
     """
 
-    question: str = Field(min_length=2, max_length=MAX_QUESTION_CHARS)
+    question: Annotated[
+        str,
+        StringConstraints(
+            strip_whitespace=True, min_length=2, max_length=MAX_QUESTION_CHARS
+        ),
+    ]
 
 
 def create_app(settings: Settings, model: Model) -> FastAPI:
@@ -127,15 +140,30 @@ def create_app(settings: Settings, model: Model) -> FastAPI:
         )
 
     @app.post("/ask")
-    def ask(body: Question) -> StreamingResponse:
+    def ask(body: Question) -> Response:
         """
         Answer one question over the memos.
 
-        **Always 200, even when the answer is that there is no answer**, and the
-        status is committed before the first byte -- see memo_ai/ask/service.py for
-        why a failure that happens mid-answer arrives as an ``error`` event instead.
-        The one thing that can still be a 4xx is the body, and pydantic answers
-        that before this function runs.
+        **Two failures are a status code and everything else is an event**, and
+        which is which follows from when it can be known:
+
+          * the model is missing, still loading, or failed to load -- knowable here,
+            before a byte has gone out, and stable enough to act on. A 503, which is
+            what App\\Services\\Ask\\HttpAskBackend turns into a sentence naming this
+            container. The first version of this route streamed a 200 whose only
+            content was an apology, which made that branch on the PHP side dead code
+            and the README's account of this endpoint wrong.
+          * a malformed body -- a 422, answered by pydantic before this runs.
+          * anything after that: the deadline, a llama.cpp failure, a database that
+            went away mid-answer, or another question already holding the model. 200
+            is committed by then and cannot be revised, so those arrive as an
+            ``error`` event. memo_ai/ask/service.py has that half.
+
+        **The busy case is deliberately in the second group even though it looks
+        like the first.** Whether the model is free is only true at the instant it
+        is acquired -- checking here and streaming afterwards would be a race whose
+        losing side is a corrupt answer rather than a refused one, so the check
+        stays inside `Model.stream`, under the lock that also starts the generation.
 
         A connection per request rather than one held open. Two short statements
         per question against a service answering one question at a time is not a
@@ -144,6 +172,16 @@ def create_app(settings: Settings, model: Model) -> FastAPI:
         minutes apart. `role="ask"` is what keeps these apart from the workers'
         in `pg_stat_activity`.
         """
+        state = model.state
+
+        if state != "ready":
+            log.info("refusing a question: the model is %s", state)
+
+            return JSONResponse(
+                status_code=503,
+                content={"model": state, "message": ask_model.UNAVAILABLE[state]},
+            )
+
         return StreamingResponse(
             _lines(settings, model, body.question),
             media_type=NDJSON,
@@ -194,11 +232,11 @@ def _lines(settings: Settings, model: Model, question: str) -> Iterator[bytes]:
             ):
                 yield _line({"type": event.type, **event.payload})
     except psycopg.OperationalError as error:
-        # The one failure that can happen before any event has been emitted, and it
-        # still cannot be a status code: `_lines` is only called once the response
-        # has begun. So the database being unreachable is reported the same way a
-        # model failure is, which is also what makes it visible to a reader rather
-        # than arriving as a truncated stream.
+        # The one *expected* failure that can happen before any event has been
+        # emitted, and it still cannot be a status code: `_lines` is only called once
+        # the response has begun. So the database being unreachable is reported the
+        # same way a model failure is, which is also what makes it visible to a
+        # reader rather than arriving as a truncated stream.
         log.warning("postgres unavailable while answering: %s", error)
 
         yield _line(
@@ -206,6 +244,29 @@ def _lines(settings: Settings, model: Model, question: str) -> Iterator[bytes]:
                 "type": "error",
                 "message": "The memo database is not answering. Check that the db "
                 "container is up.",
+            }
+        )
+    except Exception:  # noqa: BLE001 -- reported to the client, logged in full here
+        # **Everything else, and the breadth is the point rather than a shrug.** A
+        # stream that simply stops is the one failure mode on this route that looks
+        # like a working one: the client has a half-written answer, no terminating
+        # event, and nothing to show for it. So an unexpected exception is turned
+        # into the vocabulary the client already understands, and the detail goes
+        # where detail belongs.
+        #
+        # `log.exception`, so the traceback is in `docker compose logs ai-api` --
+        # this is the only handler here that can be reached by a bug rather than by
+        # a condition, so it is the only one whose stack is worth anything.
+        #
+        # The sentence carries nothing about the internals, on the rule
+        # `ModelUnavailable` states: it reaches a browser through two proxies.
+        log.exception("unexpected failure while answering")
+
+        yield _line(
+            {
+                "type": "error",
+                "message": "Something went wrong while answering. The reason is in "
+                "the ai-api log: docker compose logs ai-api",
             }
         )
 

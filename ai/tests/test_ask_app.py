@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 
 from memo_ai import db
 from memo_ai.ask import app as ask_app
+from memo_ai.ask import model as ask_model
 from memo_ai.ask.app import MAX_QUESTION_CHARS, create_app
 from memo_ai.config import Settings
 from tests.support import FakeConnection, RecordingAskModel
@@ -164,12 +165,20 @@ def test_the_model_is_loaded_when_the_service_starts_rather_than_on_the_first_qu
         {},
         {"question": ""},
         {"question": "a"},
+        {"question": "   "},
+        {"question": " a "},
         {"question": "a" * (MAX_QUESTION_CHARS + 1)},
         {"question": 12},
         {"question": None},
     ],
 )
 def test_a_question_of_the_wrong_shape_is_refused_before_the_model_is_touched(database, body):
+    """
+    The whitespace rows are the interesting ones: they are refused because the field
+    is stripped *before* the length rules, which is what makes this agree with
+    `AskRequest::prepareForValidation` on the PHP side. Without the strip they would
+    be four and three characters and would sail through.
+    """
     model = RecordingAskModel()
 
     with client(model) as http:
@@ -177,6 +186,42 @@ def test_a_question_of_the_wrong_shape_is_refused_before_the_model_is_touched(da
 
     assert response.status_code == 422
     assert model.calls == []
+
+
+def test_a_question_is_stripped_before_it_reaches_retrieval(database):
+    with client(RecordingAskModel()) as http:
+        http.post("/ask", json={"question": "  what about the dentist \n"})
+
+    assert database["connection"].executed[0][1] == {"question": "what about the dentist"}
+
+
+@pytest.mark.parametrize("state", ["loading", "missing", "failed"])
+def test_a_model_that_cannot_answer_is_a_503_rather_than_a_200_full_of_apology(database, state):
+    """
+    **The regression this pins.** The first version of this route always streamed a
+    200, so "the model is still loading" arrived as an `error` event -- which made
+    HttpAskBackend's 503 branch on the PHP side dead code and the README's account
+    of this endpoint wrong. It is knowable before a byte goes out, so it is a status.
+    """
+    model = RecordingAskModel(state=state)
+
+    with client(model) as http:
+        response = http.post("/ask", json={"question": "what about the dentist"})
+
+    assert response.status_code == 503
+    assert response.json()["model"] == state
+    # The sentence is the same one `Model.stream` would raise, from one mapping.
+    assert response.json()["message"] == ask_model.UNAVAILABLE[state]
+    assert model.calls == []
+
+
+def test_a_bad_body_is_still_a_422_even_when_the_model_is_not_ready(database):
+    """
+    Validation runs before the handler, so the two refusals cannot mask each other.
+    Worth pinning because the readiness check reads like it comes first.
+    """
+    with client(RecordingAskModel(state="loading")) as http:
+        assert http.post("/ask", json={}).status_code == 422
 
 
 def test_a_database_that_is_not_answering_arrives_as_an_error_event(database):

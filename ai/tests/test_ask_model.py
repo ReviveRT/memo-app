@@ -194,6 +194,39 @@ def test_a_load_that_raises_is_reported_as_failed(tmp_path):
     assert "gguf" not in str(raised.value)
 
 
+def test_a_loaded_model_stays_ready_even_if_its_file_disappears(tmp_path):
+    """
+    **The order of the two checks in `state`, and the first version had it wrong.**
+
+    The weights are in memory and the file is not read again, so a rebuild under a
+    running stack -- which is the whole reason the path is re-checked at all -- must
+    not turn a working service into one that answers 503. `memo_ai/enrich/local.py`
+    puts the loaded-model check first for the same reason.
+    """
+    subject = model(tmp_path, llama=FakeLlama())
+    subject.start_loading()
+
+    for _ in range(500):
+        if subject.state == "ready":
+            break
+
+        time.sleep(0.01)
+
+    subject.model_path.unlink()
+
+    assert subject.state == "ready"
+    assert list(subject.stream(MESSAGES)) == ["Hello", " world"]
+
+
+def test_every_state_that_is_not_ready_has_a_sentence(tmp_path):
+    """
+    `/ask` looks the refusal up in this mapping rather than raising, so a state
+    added without one would be a KeyError inside a route rather than a 503.
+    """
+    assert set(ask_model.UNAVAILABLE) == {"missing", "loading", "failed"}
+    assert all(isinstance(text, str) and text for text in ask_model.UNAVAILABLE.values())
+
+
 def test_start_loading_twice_loads_once(tmp_path):
     loads = []
 

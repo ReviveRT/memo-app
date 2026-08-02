@@ -1060,12 +1060,32 @@ claim, and it is smaller than "injection-proof".
 
 **A failure after the first byte cannot be a status code.** The status is chosen before the
 response starts, so a generation that gives up halfway has already answered 200. Failures
-therefore split by *when*: nothing listening, or a model still loading, is a 503 with a
-sentence — which is why `AskBackend::ask` performs the request eagerly rather than being a
-generator, since a method containing a `yield` defers its whole body past the point where a
-status can still be set. Everything after that is an `error` event in the stream, and
-`web/src/api/ask.js` treats a stream that ends without `done` or `error` as a failure too,
-which is what catches a connection cut with no chance to say anything.
+therefore split by *when*: nothing listening, or a model that is missing, still loading or
+failed to load, is a 503 with a sentence — which is why `AskBackend::ask` performs the request
+eagerly rather than being a generator, since a method containing a `yield` defers its whole
+body past the point where a status can still be set. Everything after that is an `error` event
+in the stream, and `web/src/api/ask.js` treats a stream that ends without `done` or `error` as
+a failure too, which is what catches a connection cut with no chance to say anything.
+
+The busy case sits in the second group even though it looks like the first, and deliberately:
+whether the model is free is only true at the instant it is acquired, so checking before
+streaming would be a race whose losing side is a corrupt answer rather than a refused one. The
+check stays inside `Model.stream`, under the lock that also starts the generation.
+
+**That split was wrong in the first version of this, and it is worth recording how.** `POST
+/ask` on ai-api always streamed a 200, so "the model is still loading" arrived as an `error`
+event — which made the 503 branch in `HttpAskBackend` unreachable, the README's account of the
+endpoint false, and the browser's authored sentence for a 503 dead code, all three at once.
+Nothing failed; every test passed; the feature worked. What surfaced it was reading the two
+sides against each other rather than either on its own, which is the only thing that ever
+finds a contract both halves agree about and neither implements.
+
+Its sibling was found the other way round, by a test rather than by reading. `HttpAskBackend`
+checked `stream_get_meta_data($handle)['timed_out']` to break a loop that could otherwise spin
+against a hung upstream — and that key exists **only on socket streams**. In production the
+handle is a socket, so it was there; the first test to point a faked `php://temp` body at the
+class turned it into `Undefined array key`. Guzzle picks its handler at runtime and the curl
+one writes to a temp stream, so this was a real path and not only a test artefact.
 
 **PHP buffers a proxied stream by default, and finding that was most of the work.** Two
 settings, both invisible until measured against the running stack:

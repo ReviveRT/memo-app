@@ -111,17 +111,16 @@ DEFAULT_ENRICH_PROVIDER = "local"
 DEFAULT_ENRICH_MODEL_PATH = "/opt/models/llm/qwen2.5-1.5b-instruct-q4_k_m.gguf"
 
 # --- Ask my memos (MEMO-24), read by ai-api and by nothing in the worker -----
-
-# Where uvicorn listens inside the ai-api container.
 #
-# 0.0.0.0 rather than 127.0.0.1, because the only caller is the `api` container
-# over the compose network and a loopback bind would refuse it. That is not a hole:
-# docker-compose.yml maps no host port for this service, so the socket is reachable
-# from the compose network and nowhere else. PHP stays the only public surface,
-# which is the whole reason `/api/ask` is a proxy rather than a second origin the
-# browser talks to.
-DEFAULT_ASK_HOST = "0.0.0.0"  # noqa: S104 -- container-internal, see above
-DEFAULT_ASK_PORT = 8000
+# Where uvicorn listens is **deliberately not here**, and that is the one asymmetry
+# in this file worth explaining rather than fixing. memo_ai/ask/__main__.py holds
+# the host and the port as literals, on the same argument ai/Dockerfile makes about
+# MODEL_DIR: as a variable it would be a foot-gun with no failure mode. The port is
+# also written into docker-compose.yml's healthcheck and into `AI_API_URL`'s
+# default, so `ASK_PORT=9000` would move the listener and leave both of those
+# pointing at a closed socket -- a container that never reports healthy and a proxy
+# that 503s, neither of which names the variable that did it. To run this service
+# somewhere else, point `AI_API_URL` at it; that one *is* a variable.
 
 # How many memos are put in front of the model.
 #
@@ -278,9 +277,8 @@ class Settings:
     # There is no `ask_model_path`: ai-api opens `enrich_model_path`, the same GGUF
     # the worker enriches with. Two settings for one file would let a deployment
     # point them at different models and then wonder why a summary and an answer
-    # about the same memo disagree.
-    ask_host: str
-    ask_port: int
+    # about the same memo disagree. There is no `ask_host` or `ask_port` either --
+    # see the section above for why those are literals.
     ask_top_k: int
     ask_memo_chars: int
     ask_deadline_seconds: float
@@ -328,8 +326,6 @@ class Settings:
             enrich_model_path=Path(
                 _string(source, "ENRICH_MODEL_PATH", DEFAULT_ENRICH_MODEL_PATH)
             ),
-            ask_host=_string(source, "ASK_HOST", DEFAULT_ASK_HOST),
-            ask_port=_positive_int(source, "ASK_PORT", DEFAULT_ASK_PORT),
             # Positive ints for the same reason MAX_ATTEMPTS is one: `ASK_TOP_K=0`
             # is not a narrow search, it is a service that retrieves nothing and
             # answers "no memo mentions that" to every question ever asked.

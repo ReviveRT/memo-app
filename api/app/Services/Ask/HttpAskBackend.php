@@ -7,6 +7,7 @@ namespace App\Services\Ask;
 use App\Contracts\AskBackend;
 use App\Exceptions\AskUnavailable;
 use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -146,21 +147,63 @@ final class HttpAskBackend implements AskBackend
             return $handle;
         }
 
-        // A 503 from ai-api is the ordinary case here and means the model is still loading --
-        // it answers that until the weights are in, which is seconds on a warm page cache and
-        // is also what a missing or unreadable GGUF looks like. Anything else on this route is
-        // a 422 from its own validation, which this class's caller has already made
-        // unreachable by validating the same question first.
+        // **A 503 is the ordinary case here**, and it is reachable: `POST /ask` on ai-api
+        // refuses with one whenever its model is missing, still loading or failed to load,
+        // rather than streaming a 200 whose only content is an apology. An earlier version of
+        // this stack did the latter, which made this branch dead code and this comment a
+        // description of something that did not happen.
         //
-        // The upstream status is named rather than swallowed, because it is the one detail
-        // that tells "still starting" apart from "misconfigured" in a log, and it is not
-        // something a person has to interpret to act on.
+        // Anything else on that route is a 422 from its own validation, which this class's
+        // caller has already made unreachable by validating the same question first. The
+        // upstream status is named rather than swallowed, because it tells "still starting"
+        // apart from "misconfigured" in a log without anyone having to interpret it.
+        //
+        // **Its `message` is used when there is one**, and that is not a contradiction of
+        // this class not parsing the response. What it does not parse is the *answer* -- the
+        // NDJSON event vocabulary, which belongs to memo_ai/ask/service.py and would be a
+        // second copy of it here. A JSON error body on a non-2xx is a different thing and
+        // reading it is what a proxy is for: ai-api knows which of missing, loading or failed
+        // it is in and writes a sentence saying so, and this side knows only "503". Without
+        // it a missing model is reported as one that is still loading, which sends somebody
+        // off to wait for something that is never going to happen -- observed, against a
+        // container started with a bad ENRICH_MODEL_PATH.
+        $reason = $this->reason($response);
+
+        // Used verbatim rather than under a prefix of ours. Each of ai-api's three is already
+        // a complete sentence written for a person -- "The local model is not in this image.
+        // Ask is unavailable until the ai image is rebuilt." -- so "Ask is not ready yet: The
+        // local model is not in this image" reads as two half-sentences glued together, and
+        // the half this side wrote is the wrong one twice out of three: a model that is
+        // missing or failed is not "not ready yet", it is not coming.
         throw new AskUnavailable(
             $response->status() === 503
-                ? 'Ask is not ready yet: the ai-api service is still loading its model. '
-                    .'Try again in a moment.'
+                ? $reason ?? 'Ask is not ready yet: the ai-api service is still loading its '
+                    .'model. Try again in a moment.'
                 : "Ask is not available: the ai-api service answered {$response->status()}.",
         );
+    }
+
+    /**
+     * The sentence ai-api gave for refusing, if it gave one.
+     *
+     * Null for anything unexpected -- a body that is not JSON, an object without the key, a
+     * value that is not a string -- so the caller's own wording stands rather than a fragment
+     * of whatever did arrive. `json()` on a non-JSON body answers null rather than raising,
+     * and the `is_string` check is what stops a nested structure being interpolated as
+     * "Array".
+     *
+     * **The body has to be read here**, before the caller throws, because with
+     * `'stream' => true` it is an open socket rather than a string: nothing else is going to
+     * consume it, so it is read and closed in one place instead of being left for the garbage
+     * collector to notice.
+     */
+    private function reason(Response $response): ?string
+    {
+        $message = $response->json('message');
+
+        $response->toPsrResponse()->getBody()->close();
+
+        return is_string($message) && $message !== '' ? $message : null;
     }
 
     /**
@@ -191,7 +234,14 @@ final class HttpAskBackend implements AskBackend
             while (! feof($handle)) {
                 $chunk = fread($handle, self::CHUNK_BYTES);
 
-                if ($chunk === false || stream_get_meta_data($handle)['timed_out']) {
+                // `?? false`, because **`timed_out` is only present on socket streams** and
+                // reading it unguarded is an ErrorException on anything else. In production
+                // this handle is a socket, so the key is there -- but Guzzle chooses its
+                // handler at runtime, and the curl one writes the body to a `php://temp`
+                // resource with no such key. Found by a test whose faked body is exactly
+                // that, which is the case a comment reasoning about production would have
+                // missed. A stream that cannot time out has not timed out.
+                if ($chunk === false || (stream_get_meta_data($handle)['timed_out'] ?? false)) {
                     Log::warning('Ask: the ai-api response stopped arriving before it ended.');
 
                     break;

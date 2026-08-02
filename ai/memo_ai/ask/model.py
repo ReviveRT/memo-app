@@ -134,6 +134,16 @@ _LOAD_FAILED = (
     "The local model could not be loaded. See the ai-api logs for the reason."
 )
 
+# Why a question cannot be answered, per state. One mapping, because two callers
+# need it and they must not disagree: `/ask` refuses with a 503 *before* the
+# response begins, and `Model.stream` raises the same sentence for a state that
+# changed in between. A second copy is a second thing to forget.
+UNAVAILABLE = {
+    "missing": _MISSING,
+    "loading": _LOADING,
+    "failed": _LOAD_FAILED,
+}
+
 _BUSY = (
     "The local model is answering another question. Only one question can be "
     "answered at a time on this hardware -- try again in a moment."
@@ -218,22 +228,33 @@ class Model:
     @property
     def state(self) -> str:
         """
-        ``missing``, ``loading``, ``failed`` or ``ready``. Reported by ``/health``.
+        ``ready``, ``missing``, ``loading`` or ``failed``. Reported by ``/health``.
 
-        The file check is first and is done on every call rather than once, for the
-        reason memo_ai/enrich/local.py gives: "the file appeared" is a real state --
-        a bind mount, or an image rebuilt under a running stack.
+        **A loaded model is ready whatever the filesystem says**, which is why that
+        check is second rather than first. The weights are in memory and the file is
+        not read again, so an image rebuilt under a running stack -- which is the
+        case that makes the path worth re-checking at all -- must not turn a working
+        service into one that refuses questions. ``memo_ai/enrich/local.py``'s
+        ``_ready_model`` puts the two in the same order, and the first version of
+        this method had them the other way round.
+
+        The file check is still on every call rather than once, for the reason that
+        method gives from the other side: before a successful load, "the file
+        appeared" is a real state -- a bind mount, or that same rebuild.
         """
-        if not self.model_path.is_file():
-            return "missing"
-
         with self._lock:
             load = self._load
+
+        if load is not None and load.done and load.error is None:
+            return "ready"
+
+        if not self.model_path.is_file():
+            return "missing"
 
         if load is None or not load.done:
             return "loading"
 
-        return "failed" if load.error is not None else "ready"
+        return "failed"
 
     def stream(self, messages: list[dict[str, str]]) -> Iterator[str]:
         """
@@ -317,29 +338,30 @@ class Model:
             raise ModelUnavailable(_FAILED) from call.error
 
     def _ready_model(self) -> object:
+        """
+        The loaded model, or the reason there is not one.
+
+        Reachable in a non-ready state only when the state changed between ``/ask``
+        refusing to and this running -- the route checks first, so that a service
+        with no usable model answers 503 rather than a 200 whose only content is an
+        apology. This is the backstop, and it is also the whole check for any caller
+        that is not that route.
+        """
         state = self.state
+
+        if state == "ready":
+            with self._lock:
+                return self._load.result
 
         if state == "missing":
             log.warning("no model at %s", self.model_path)
+        elif state == "failed":
+            with self._lock:
+                error = self._load.error
 
-            raise ModelUnavailable(_MISSING)
+            log.warning("loading the model failed: %s: %s", type(error).__name__, error)
 
-        if state == "loading":
-            raise ModelUnavailable(_LOADING)
-
-        with self._lock:
-            load = self._load
-
-        if state == "failed":
-            log.warning(
-                "loading the model failed: %s: %s",
-                type(load.error).__name__,
-                load.error,
-            )
-
-            raise ModelUnavailable(_LOAD_FAILED)
-
-        return load.result
+        raise ModelUnavailable(UNAVAILABLE[state])
 
 
 def _pump(model: object, messages: list[dict[str, str]], chunks: queue.Queue) -> None:

@@ -70,7 +70,13 @@ _DEFANGED = "< <<"
 # number of sources retrieved, which `cited` checks against the list it is given --
 # this only stops a year, a page number or a quantity in the memo's own words from
 # being read as a citation in the first place.
-_REFERENCE = re.compile(r"\[(\d{1,2})\]")
+#
+# `[0-9]` rather than `\d`, which in Python also matches every other decimal digit
+# Unicode has -- so a memo written in Arabic or Devanagari could have a bracketed
+# numeral quoted back and read as a citation. Harmless if it happened, since it
+# would still resolve through the list this process built, but the answer format
+# asked for is ASCII and matching exactly what was asked for is one character.
+_REFERENCE = re.compile(r"\[([0-9]{1,2})\]")
 
 # What the model is told it is doing.
 #

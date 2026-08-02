@@ -148,6 +148,22 @@ services:
       # else on the page notices. That is also what makes
       # `docker compose up --scale ai-api=0` a supported way to run this.
       AI_API_URL: ${AI_API_URL:-http://ai-api:8000}
+      # Both timeouts are passed through for the reason OPENAI_API_KEY is passed to
+      # ai-worker: they are documented in .env.example and listed in README.md, and
+      # a variable somebody sets there has to reach the container that reads it
+      # rather than being dropped one layer earlier. Left out of this block at
+      # first, which made both of them settings that changed nothing.
+      #
+      # Short, because what it bounds is "ai-api is not running" and the useful
+      # answer to that is a 503 now rather than in a minute.
+      AI_API_CONNECT_TIMEOUT: ${AI_API_CONNECT_TIMEOUT:-5}
+      # Per *read*, not for the whole answer -- Guzzle's `stream` option puts this on
+      # the socket. It has to clear the gap before the first token, which is the
+      # model processing the prompt, so it is set from the same order of magnitude as
+      # ASK_DEADLINE_SECONDS and deliberately above it: ai-api giving up first
+      # produces a readable `error` event, and this side giving up first produces a
+      # truncated stream with nothing to explain it.
+      AI_API_READ_TIMEOUT: ${AI_API_READ_TIMEOUT:-210}
       # FrankenPHP listens on :80 by default; the Vite proxy target is api:8080.
       SERVER_NAME: ":8080"
       # Laravel reads these. APP_KEY is deliberately absent: it exists for

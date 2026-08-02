@@ -23,6 +23,19 @@ from memo_ai.config import ConfigError, Settings
 
 logger = logging.getLogger("memo_ai.ask")
 
+# Where uvicorn listens, and **literals rather than settings on purpose** --
+# memo_ai/config.py has the argument at the section this would belong to. The short
+# version: this port is also written into docker-compose.yml's healthcheck and into
+# `AI_API_URL`'s default, so a variable that moved the listener would leave both
+# pointing at a closed socket and name itself in neither failure.
+#
+# 0.0.0.0 rather than 127.0.0.1, because the only caller is the `api` container over
+# the compose network and a loopback bind would refuse it. That is not a hole: no
+# host port is mapped for this service, so the socket is reachable from that network
+# and nowhere else, which is what keeps PHP the only public surface.
+HOST = "0.0.0.0"  # noqa: S104 -- container-internal; see above
+PORT = 8000
+
 # 2 for a configuration this service refuses, distinct from 1, exactly as the worker
 # uses it: `docker compose ps` reading `exited (2)` says "read the first line of the
 # log" rather than "something crashed".
@@ -51,8 +64,8 @@ def main() -> int:
     logger.info(
         "ai-api starting: listen=%s:%d model=%s context=%d top_k=%d memo_chars=%d "
         "deadline=%.0fs",
-        settings.ask_host,
-        settings.ask_port,
+        HOST,
+        PORT,
         settings.enrich_model_path,
         context,
         settings.ask_top_k,
@@ -75,8 +88,8 @@ def main() -> int:
 
     uvicorn.run(
         app,
-        host=settings.ask_host,
-        port=settings.ask_port,
+        host=HOST,
+        port=PORT,
         # One worker process, and it is not a default left alone: the model is
         # loaded per process, so two would be two copies of the KV cache and two
         # generations competing for the same four threads. Concurrency here is

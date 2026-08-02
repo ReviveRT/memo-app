@@ -50,6 +50,17 @@ const cited = ref(null)
 const error = ref('')
 
 /**
+ * Whether the answer on screen was cut short by the Stop button.
+ *
+ * **Without it a stopped answer is indistinguishable from a finished one**, which is the same
+ * failure `askMemos` guards against for a truncated stream and it arrives by a friendlier
+ * route: the caret disappears, the button says Ask again, and a sentence that stopped mid-
+ * clause looks like all the model had to say. An abort is not an error -- it is what the
+ * reader asked for -- so it gets a note rather than the error box.
+ */
+const stopped = ref(false)
+
+/**
  * The in-flight request's controller, or null.
  *
  * Doubles as the "is it running" flag rather than a second ref beside it, so the two cannot
@@ -63,16 +74,24 @@ const busy = computed(() => running.value !== null)
 const answered = computed(() => sources.value.length > 0 || answer.value !== '')
 
 /**
- * The sources, in the order the answer referred to them, once it is finished.
+ * The memos to list under the answer, narrowed to the cited ones once it is finished.
  *
  * Uncited memos are dropped rather than greyed out. They were retrieved because they matched
  * some word of the question, which is not the same as having contributed to the answer -- and
  * a list mixing "this is where that came from" with "this happened to match" makes the first
  * claim untrustworthy. While the answer is still being written `cited` is null and all of them
  * are shown, because that is honestly what is known at that moment.
+ *
+ * **An answer that cited nothing keeps the whole list**, which is the exception and not a
+ * lapse in that rule. Narrowing to nothing would make three memos appear while the answer
+ * streamed and then vanish at the last token -- the reader loses what was read, and the
+ * disappearance reads as a bug rather than as a statement. So the fallback says "these are
+ * the memos it read", which is the weaker claim and the true one. The model citing nothing is
+ * rare -- every answer measured on this stack cited -- and this is what stops the rare case
+ * being the ugly one.
  */
 const shown = computed(() => {
-  if (cited.value === null) {
+  if (cited.value === null || cited.value.length === 0) {
     return sources.value
   }
 
@@ -86,11 +105,48 @@ function memoFor(source) {
   return props.memos.find((memo) => memo.id === source.id) ?? null
 }
 
-/** What to call a cited memo: its own title, or the label the rest of the app derives. */
+/**
+ * What to call a cited memo.
+ *
+ * Three answers, in the order of how much is known:
+ *
+ *   * this screen is holding the memo — `memoLabel`, so a cited memo is named exactly as the
+ *     card below names it. Anything else would be two names for one memo on one screen.
+ *   * it is not, but it has a title — that.
+ *   * neither — the date it was recorded.
+ *
+ * **The last one used to read "Untitled memo", and that was worse than nothing.** It names no
+ * memo, and it is reachable in an ordinary way rather than a strange one: ask reads the whole
+ * table, the strip holds only unfiled memos under whatever filter is active, and a memo is
+ * untitled for the seconds between being recorded and being enriched. Falling back to a
+ * truncated excerpt was the other candidate and it duplicates the excerpt rendered directly
+ * beneath, so the date it is -- which is also what makes `created_at` a field this payload
+ * carries for a reason rather than one nothing reads.
+ */
 function label(source) {
   const memo = memoFor(source)
 
-  return memo ? memoLabel(memo) : (source.title ?? 'Untitled memo')
+  if (memo) {
+    return memoLabel(memo)
+  }
+
+  return source.title ?? recorded(source.created_at)
+}
+
+/**
+ * When a memo was recorded, in the reader's own zone.
+ *
+ * The same shape MemoStrip uses, and the same fallback: an unparseable string is printed as it
+ * arrived, because "Invalid Date" says nothing about what came over the wire. The API sends
+ * RFC 3339 in UTC with a literal Z (see `_iso_z` in memo_ai/ask/service.py, which exists to
+ * make that true of this payload too), so every browser parses it identically.
+ */
+function recorded(iso) {
+  const at = new Date(iso)
+
+  return Number.isNaN(at.getTime())
+    ? String(iso ?? '')
+    : `Memo from ${at.toLocaleDateString([], { month: 'short', day: 'numeric' })}`
 }
 
 async function ask() {
@@ -107,6 +163,7 @@ async function ask() {
   answer.value = ''
   cited.value = null
   sources.value = []
+  stopped.value = false
 
   try {
     await askMemos(asked, {
@@ -116,15 +173,18 @@ async function ask() {
       signal: controller.signal,
     })
   } catch (failure) {
-    // An abort is the user pressing Stop, not a failure. Whatever had arrived stays on screen,
-    // which is the point of stopping rather than cancelling.
-    if (failure.name !== 'AbortError') {
+    // An abort is the user pressing Stop, not a failure. Whatever had arrived stays on screen
+    // -- that is the point of stopping rather than cancelling -- and it is marked as cut short
+    // rather than left to look like the whole answer.
+    if (failure.name === 'AbortError') {
+      stopped.value = true
+    } else {
       error.value = failure.message
     }
   } finally {
-    // Only if this request is still the current one. A second question started while the first
-    // was finishing would otherwise have its controller cleared by the first one's cleanup, and
-    // the Stop button would go dead with a request still running.
+    // Defensive rather than answering a case that exists today: `ask` returns early while
+    // `busy`, so there is no second request to have its controller cleared by this one. It
+    // costs a comparison and it is what keeps that true if the guard above ever loosens.
     if (running.value === controller) {
       running.value = null
     }
@@ -189,7 +249,7 @@ onScopeDispose(() => running.value?.abort())
       shows nothing at all between the press and the first event. On a loaded machine that gap
       was two seconds of a page that looked like the button had done nothing.
     -->
-    <div v-if="busy || answered || error" class="ask__result">
+    <div v-if="busy || answered || error || stopped" class="ask__result">
       <!--
         aria-live, because the answer arrives after the press rather than because of it, and a
         screen reader would otherwise announce nothing at all. `polite` and not `assertive`: it
@@ -221,6 +281,16 @@ onScopeDispose(() => running.value?.abort())
         <template v-else>
           Reading {{ sources.length }} {{ sources.length === 1 ? 'memo' : 'memos' }}…
         </template>
+      </p>
+
+      <!--
+        A note rather than an error, because stopping is what the reader asked for. It is
+        still said out loud: the answer above ends wherever the model had got to, and nothing
+        else on screen distinguishes that from a sentence the model chose to end.
+      -->
+      <p v-if="stopped" class="ask__waiting" role="status">
+        <template v-if="answer === ''">Stopped before the answer started.</template>
+        <template v-else>Stopped — the answer above is as far as it got.</template>
       </p>
 
       <p v-if="error" class="notice notice--error" role="alert">{{ error }}</p>
