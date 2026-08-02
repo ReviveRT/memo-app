@@ -66,7 +66,62 @@ from math import ceil
 # What can end a sentence, once it has survived the guards in _ends_sentence. The
 # single-character ellipsis is included because whisper emits it as well as three
 # dots.
-TERMINATORS = ".!?…"
+TERMINATORS = ".!?…" + "。！？．।॥؟۔။"
+
+# The second half of that string is the same job in other writing systems, and it
+# was missing until a Chinese memo came back as `别忘了明天三点给医生打电话。.` --
+# closed correctly by the model, not recognised as closed here, and given a Latin
+# full stop on top. Six of nine scripts checked were mangled the same way:
+#
+#   zh/ja  。 ideographic full stop      hi  । danda, ॥ double danda
+#   ar     ؟ question mark              ur  ۔ full stop
+#   my     ။ section mark               (fullwidth ！？． from CJK keyboards)
+#
+# Adding them here rather than only in _terminate is deliberate: _TERMINATOR_RUN
+# splits sentences on this set, so a three-sentence Japanese memo was previously one
+# sentence to _paragraphs and to _capitalize. The Latin abbreviation logic in
+# _ends_sentence is unaffected, because none of these characters occurs in one.
+#
+# Two scripts cannot be fixed by adding a character. Thai does not punctuate the end
+# of a sentence at all -- see TERMINATOR_BY_LANGUAGE -- and Greek's question mark is
+# U+003B, the ASCII semicolon, which _DANGLING would strip; both are handled in
+# _terminate.
+
+# Which mark closes an unterminated sentence, per language. Recognising a script's
+# terminator (above) and *writing* one are separate problems: adding 。 to the set
+# stops `别忘了…。` being closed twice, but a Japanese sentence the model left open
+# still had a Latin full stop bolted on, which is the same error in the other
+# direction.
+#
+# An empty string is a real entry rather than a missing one. Thai, Lao and Khmer do
+# not punctuate the end of a sentence at all -- they separate with a space and mark
+# the end by starting the next one -- so there is nothing to add and no character in
+# TERMINATORS could have expressed that.
+#
+# Anything absent takes DEFAULT_TERMINATOR, which is right for the Latin, Cyrillic,
+# Greek and Hebrew scripts and for Arabic, whose full stop is the ASCII one even
+# though its question mark is not.
+DEFAULT_TERMINATOR = "."
+TERMINATOR_BY_LANGUAGE = {
+    "zh": "。",
+    "ja": "。",
+    "hi": "।",
+    "bn": "।",
+    "mr": "।",
+    "ne": "।",
+    "pa": "।",
+    "ur": "۔",
+    "my": "။",
+    "th": "",
+    "lo": "",
+    "km": "",
+}
+
+# Greek asks a question with U+003B, which is the character _DANGLING treats as a
+# stranded semicolon. Stripping it turns a question into a statement -- "στον
+# γιατρό;" became "στον γιατρό." -- so the mark is a terminator when the language is
+# Greek and dangling punctuation everywhere else.
+GREEK_QUESTION_MARK = ";"
 
 # The most sentences a paragraph may hold. Past this the transcript is divided into
 # as few equal runs as will fit -- see _paragraphs.
@@ -102,7 +157,7 @@ def shape(text: str, language: str | None = None) -> str:
     if not _WORD.search(tidied):
         return ""
 
-    sentences = [_capitalize(s, language) for s in _sentences(tidied)]
+    sentences = [_capitalize(s, language) for s in _sentences(tidied, language)]
 
     return "\n\n".join(" ".join(run) for run in _paragraphs(sentences))
 
@@ -316,7 +371,7 @@ def _ends_sentence(text: str, match: re.Match[str]) -> bool:
     return not (label in _NUMBERED and after.lstrip()[:1].isdigit())
 
 
-def _sentences(text: str) -> list[str]:
+def _sentences(text: str, language: str | None = None) -> list[str]:
     """
     Cut one tidied transcript into sentences.
 
@@ -351,12 +406,12 @@ def _sentences(text: str) -> list[str]:
     tail = _CONTINUATION.sub("", text[cut:].strip())
 
     if tail:
-        out.append(_terminate(tail))
+        out.append(_terminate(tail, language))
 
     return out
 
 
-def _terminate(sentence: str) -> str:
+def _terminate(sentence: str, language: str | None = None) -> str:
     """
     Close the last sentence, which the model left open.
 
@@ -366,11 +421,25 @@ def _terminate(sentence: str) -> str:
 
     Text already ending in an ellipsis keeps it and gets nothing added: the speaker
     trailed off and then stopped, which "..." says and "...." does not.
+
+    ``language`` decides *which* mark closes it -- see TERMINATOR_BY_LANGUAGE, where
+    an empty string means the script does not close sentences at all -- and covers the
+    one case no table can: in Greek a trailing ``;`` is the question mark rather than
+    a stranded semicolon, so it is kept instead of being stripped and replaced with a
+    full stop, which turned questions into statements.
+
+    ``None`` is an unsure detection, and it takes the Latin default it always did.
     """
     if sentence.endswith(tuple(TERMINATORS)):
         return sentence
 
-    return _DANGLING.sub("", sentence) + "."
+    if language == "el" and sentence.endswith(GREEK_QUESTION_MARK):
+        return sentence
+
+    # A stranded comma goes whether or not there is anything to put in its place.
+    return _DANGLING.sub("", sentence) + TERMINATOR_BY_LANGUAGE.get(
+        language, DEFAULT_TERMINATOR
+    )
 
 
 # The first word of a sentence, past whatever opens it -- a quote, a bracket, the
