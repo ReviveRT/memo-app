@@ -83,6 +83,14 @@ DEFAULT_STT_MODEL = "large-v3-turbo"
 DEFAULT_STT_LANGUAGE = None
 DEFAULT_AUDIO_DIR = "/data/audio"
 
+# The model `STT_PROVIDER=groq` asks for, mirroring docker-compose.yml.
+#
+# Its own variable rather than a reuse of `STT_MODEL`, because the two name the
+# same weights in different namespaces: faster-whisper calls it `large-v3-turbo`
+# and Groq calls it `whisper-large-v3-turbo`. One variable would mean switching
+# providers silently requested a model the other has never heard of.
+DEFAULT_GROQ_STT_MODEL = "whisper-large-v3-turbo"
+
 # Mirrors docker-compose.yml. `local` rather than `none`, on the same argument
 # DEFAULT_STT_PROVIDER makes: the committed default must mean "the feature works",
 # because a stack that silently ships without titles and summaries is
@@ -264,6 +272,17 @@ class Settings:
     # empty variable back into its default.
     stt_language: str | None
 
+    # `STT_PROVIDER=groq`, which is opt-in and off by default.
+    #
+    # **The key is optional here on purpose.** Every other absent setting in this
+    # class has a default that works; this one cannot, and refusing to boot without
+    # it would mean a stack configured for `local` could be taken down by an
+    # unrelated variable. `None` reaches memo_ai/stt/groq.py, which fails the first
+    # *voice memo* with a sentence naming the variable -- and falls back to the
+    # local model on the shipped `STT_FALLBACK`.
+    groq_api_key: str | None
+    groq_stt_model: str
+
     # The enrichment pass (MEMO-21). Two settings and no fallback name, unlike
     # transcription: there is one enricher and giving up on it is not a failure,
     # so there is nothing for a second provider to be a second opinion about.
@@ -317,6 +336,13 @@ class Settings:
             stt_fallback=_string(source, "STT_FALLBACK", DEFAULT_STT_FALLBACK),
             stt_model=_string(source, "STT_MODEL", DEFAULT_STT_MODEL),
             stt_language=_optional(source, "STT_LANGUAGE", DEFAULT_STT_LANGUAGE),
+            # `_optional`, so an unset variable and `GROQ_API_KEY=` are the same
+            # absence -- which is rule 1 at the top of this file, and matters more
+            # here than anywhere else: `docker compose up` with no `.env` passes an
+            # empty string, and a provider that treated `''` as a key would send it
+            # to Groq and get a 401 back instead of the sentence naming the variable.
+            groq_api_key=_optional(source, "GROQ_API_KEY", None),
+            groq_stt_model=_string(source, "GROQ_STT_MODEL", DEFAULT_GROQ_STT_MODEL),
             # Not validated here, deliberately, and the same way STT_PROVIDER is
             # not: the set of names lives in memo_ai/enrich/__init__.py beside the
             # classes it maps to, and a second copy of it in config parsing is a

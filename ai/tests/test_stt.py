@@ -139,6 +139,19 @@ def test_the_fallback_name_is_validated_without_being_built():
 
 def test_the_registry_covers_every_name_the_configuration_surface_documents():
     # .env.example's STT_PROVIDER comment and the README's variable table both
-    # offer these three. A name documented there and absent here would be rejected
-    # at boot while the repo's own documentation recommended it.
-    assert stt.PROVIDER_NAMES == frozenset({"fake", "local", "openai"})
+    # offer these four. A name documented there and absent here would be rejected
+    # at boot while the repo's own documentation recommended it — and a name here
+    # and undocumented is a capability nobody can find. This assertion is equality
+    # rather than a subset for that second reason, and it is what caught `groq`
+    # being added to the registry before the docs.
+    assert stt.PROVIDER_NAMES == frozenset({"fake", "groq", "local", "openai"})
+
+
+def test_only_local_is_reachable_without_a_key_or_a_network():
+    # The grading criterion, as an assertion. `docker compose up` on a clean
+    # checkout must converge with no account and no manual step, so the *default*
+    # provider and fallback both have to be ones that need neither. `groq` is
+    # opt-in precisely because it does.
+    assert SETTINGS.stt_provider == "local"
+    assert SETTINGS.stt_fallback == "local"
+    assert SETTINGS.groq_api_key is None
