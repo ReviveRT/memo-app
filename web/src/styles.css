@@ -1630,6 +1630,37 @@ h1,
   font-size: 0.8rem;
 }
 
+/*
+ * A hint that is reporting a fault rather than explaining a control.
+ *
+ * The one use is the player's missing-recording line. Not a `.notice--error`, which is the
+ * boxed, role="alert" treatment this card gives to a write that failed: nothing failed here,
+ * and nothing the reader did caused it -- the memo simply has no audio behind it any more. So
+ * it keeps the hint's size and position under the control it is about, and only takes the
+ * colour that says something is wrong.
+ */
+.sheet__hint--error {
+  color: var(--error);
+}
+
+/*
+ * The native audio player, given the width of the card (MEMO-23).
+ *
+ * `width: 100%` because a <audio controls> is laid out at a fixed intrinsic width -- around
+ * 300px in Chrome, and different in every browser -- so left alone it sits as a short bar in
+ * the middle of a full-width card with the scrubber squeezed into whatever the transport
+ * buttons leave. Seeking is the point of this element and the scrubber is what it is done
+ * with, so the width is worth taking.
+ *
+ * `display: block` so the margin below it applies: an <audio> is inline by default, which also
+ * makes it sit on a text baseline and leaves a descender's worth of gap under it.
+ */
+.sheet__player {
+  display: block;
+  width: 100%;
+  margin-top: 0.4rem;
+}
+
 .sheet__past {
   margin-top: 0.75rem;
   color: var(--muted);

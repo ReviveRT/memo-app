@@ -80,4 +80,27 @@ final class RecordingAudioStorage implements AudioStorage
 
         return true;
     }
+
+    /**
+     * Always null: these blobs are strings in an array and there is no file to point at.
+     *
+     * **Not a gap, and deliberately not papered over by writing the blob to a temp file.**
+     * Null is what AudioStorage defines as "no such object", which is exactly the state this
+     * double is in from the playback route's point of view -- so binding it is how
+     * MemoAudioEndpointTest reaches the second 404, the one for a row that names a blob the
+     * volume does not have. A temp file here would make that branch unreachable and buy
+     * nothing, because the tests that need real bytes want the real driver anyway: ranges
+     * are answered by seeking in a file, and a fake that produced one would be testing
+     * itself. Those bind LocalAudioStorage against a temp directory instead.
+     *
+     * The contract's other rule still holds -- a driver with no local filesystem throws
+     * rather than returning null -- and this one is not that: it is a local driver whose
+     * store happens to be empty, which is a distinction worth keeping because the whole
+     * reason the contract draws it is to stop a misconfigured deployment reading as data
+     * loss.
+     */
+    public function localPath(string $key): ?string
+    {
+        return null;
+    }
 }

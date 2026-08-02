@@ -85,6 +85,106 @@ const titleEl = ref(null)
 const chosenCollection = ref('')
 
 /**
+ * Set when the <audio> element gives up on the recording (MEMO-23).
+ *
+ * The player has no error state of its own worth showing: a src it cannot load leaves the
+ * native control sitting there, greyed out and unexplained, and the most likely reason on this
+ * stack is one worth naming -- `docker compose down -v` takes the audio volume with it while
+ * the database survives on its own, so the row is intact and the blob is not. The API answers
+ * 404 with a sentence saying exactly that, but nothing renders the body of a media request, so
+ * the sentence is repeated here.
+ *
+ * A boolean rather than the API's message, because <audio> does not hand the response to
+ * JavaScript at all -- `error` fires with a MediaError whose codes are about decoding, not
+ * about HTTP. Fetching the URL a second time to read the reason would be a request made only
+ * to build a sentence this file could already write.
+ */
+const playbackFailed = ref(false)
+
+/**
+ * Where the browser fetches a memo's recording from.
+ *
+ * Built here rather than sent on the memo, because it is derived from the id and the API is
+ * explicit that a storage key is not a client's to hold -- see App\Contracts\AudioStorage.
+ * Relative, so it goes through the Vite proxy on the page's own origin like every other /api
+ * call (vite.config.js), which is also what keeps the Range requests same-origin and free of
+ * a preflight.
+ */
+function audioUrl(memo) {
+  return `/api/memos/${memo.id}/audio`
+}
+
+/**
+ * A time no recording can reach, used to make one admit how long it is.
+ *
+ * Any value past the end works -- the element clamps to `seekable.end(0)` -- and this is the
+ * spelling the workaround is usually written with, large enough that no future cap on a memo's
+ * length brings it into range.
+ */
+const BEYOND_ANY_RECORDING = 1e101
+
+/**
+ * Teach the player how long a memo is, for the containers that decline to say.
+ *
+ * **Without this the scrubber does not work in Chrome, and Range support is not what is
+ * missing.** A WebM produced by MediaRecorder carries no Duration element -- config/memo.php
+ * records the same fact from the other side, which is why the length is measured by ffprobe in
+ * the worker rather than at the edge -- so `audio.duration` is `Infinity` and `seekable.end(0)`
+ * with it. A native player with an infinite duration has nothing to size its bar from and
+ * refuses to seek, and Chrome is the browser most of these recordings come from. Measured
+ * against a real memo on this stack: `duration: Infinity`, `readyState: 4`, playback fine,
+ * seeking dead.
+ *
+ * Seeking past the end is what fixes it. The element clamps the request to the real end of the
+ * file, discovers the length on the way, and fires `durationchange` with a finite number --
+ * 4.08 seconds for the memo this was measured on, after which a seek to any point lands exactly
+ * and playback continues from there. It is a hack, and it is the standard one; the alternative
+ * is re-muxing every recording so the container declares what it already contains, which is
+ * work in the worker and a second copy of every blob.
+ *
+ * **It only works because the endpoint honours Range.** The seek to the end is served as a
+ * range request rather than a second download of the whole file, which is the same property
+ * this task exists to add. On a 12 MiB memo the difference is the entire recording.
+ *
+ * `duration_ms` is on the memo already and is deliberately not used here: it is the length of
+ * the *normalised* audio the worker transcribed, and it arrives only once transcription has
+ * finished. This runs on a memo that is still queued, and it has to agree with the file the
+ * element is actually playing rather than with a number measured from a different one.
+ *
+ * Reset to the start afterwards, unconditionally. Somebody who pressed play inside the
+ * millisecond or two this takes is put back at the beginning of the memo, which is where they
+ * were trying to go.
+ */
+async function measureDuration(event) {
+  const audio = event.target
+
+  // Safari's MP4 and Firefox's Ogg both declare a duration, so this is a no-op for them.
+  if (Number.isFinite(audio.duration)) {
+    return
+  }
+
+  const measured = new Promise((resolve) => {
+    audio.addEventListener('durationchange', resolve, { once: true })
+
+    // A file that never reports one -- a truncated container, a stalled response -- must not
+    // leave the element parked at the end of itself waiting for an event that is not coming.
+    setTimeout(resolve, 3000)
+  })
+
+  try {
+    audio.currentTime = BEYOND_ANY_RECORDING
+  } catch {
+    // Throws if the element has no seekable range yet. Nothing to do about it and nothing
+    // worth saying: the player still plays, and it is no worse off than before this ran.
+    return
+  }
+
+  await measured
+
+  audio.currentTime = 0
+}
+
+/**
  * Open and close the real dialog when the prop changes.
  *
  * showModal() rather than the `open` attribute, and they are not equivalent: `open` shows a
@@ -103,6 +203,11 @@ watch(
     // in the field, over the new memo's heading, one keystroke from being saved onto it.
     renaming.value = false
     chosenCollection.value = memo?.collection_id ?? ''
+
+    // Same reasoning, for the player: a failure belongs to the recording that failed, and
+    // leaving the flag set would put "this memo's recording is missing" under the next memo's
+    // perfectly good one.
+    playbackFailed.value = false
 
     const el = dialogEl.value
 
@@ -456,6 +561,66 @@ async function removeReminder(reminderId) {
           — this puts it back at the front of the queue.
         </p>
       </div>
+
+      <!--
+        The recording itself (MEMO-23), which the brief makes a bonus and the transcript
+        required — so it sits under the transcription rather than above it.
+
+        Under the retry button and above the language picker, and both halves of that are
+        deliberate. It does not come between the failure reason and the Retry beside it — the
+        comment on that block is explicit that the action belongs directly under the reason
+        somebody acts on. But it does come before "transcribe this again in another language",
+        because the first thing anybody does before re-decoding a memo is listen to what they
+        actually said. On a `failed` memo this is the only thing on the card that still works.
+
+        Shown for every voice memo including one still being transcribed, and that is correct
+        rather than optimistic: the API writes the blob before the row that points at it
+        (MemoService::createFromAudio), so the file is on the volume by the time this memo
+        exists to be opened at all.
+
+        `controls` and nothing else — no custom transport. The native player is the one that
+        already has a keyboard-accessible scrubber, a volume control, the platform's own
+        playback-speed menu and, on a phone, the lock-screen controls. The brief says not to
+        polish pixels, and this is the control that is better than what would replace it.
+
+        `preload="metadata"` so opening a memo costs a header read rather than the whole
+        recording: the player needs a duration to size its scrubber and nothing more until
+        somebody presses play. `none` would leave the scrubber unsized until first play, and
+        `auto` would fetch every memo anybody glanced at.
+
+        **`:key` is load-bearing, not tidiness.** Vue patches attributes on the element it
+        already has, and an <audio> whose `src` changes does not reload — it keeps playing the
+        old file until something calls load() on it. Keyed by id, clicking a second memo builds
+        a new element instead, which is also what stops the previous recording playing on under
+        the new card.
+      -->
+      <section v-if="memo.source === 'voice'" class="sheet__section">
+        <h3 class="sheet__label">Recording</h3>
+
+        <audio
+          :key="memo.id"
+          class="sheet__player"
+          controls
+          preload="metadata"
+          :src="audioUrl(memo)"
+          @loadedmetadata="measureDuration"
+          @error="playbackFailed = true"
+        ></audio>
+
+        <!--
+          The sentence names the likely cause rather than only the symptom, because on this
+          stack there is one that accounts for nearly every occurrence and it is not obvious:
+          the memos and the recordings live on separate Docker volumes, so removing the volumes
+          takes the audio and leaves the database. Without saying so, a memo with a dead player
+          reads as data this app lost on its own. No command names in the copy — the reader is
+          in a browser, and the README has the detail.
+        -->
+        <p v-if="playbackFailed" class="sheet__hint sheet__hint--error">
+          This recording could not be played. The memo is still here, but its audio file is no
+          longer on the volume — most likely because the stack was brought down with its volumes
+          removed, which does not take the database with it.
+        </p>
+      </section>
 
       <!--
         Wrong language rather than no transcript.

@@ -34,9 +34,31 @@ Route::get('/health', [HealthController::class, 'show'])->name('health');
 // one list. `?collection=none` is the fast strip; see ListMemosRequest for why the scope is
 // one parameter with three readings instead of two that can contradict each other.
 //
-// Still to attach here: the audio range endpoint (MEMO-23).
 Route::get('/memos', [MemoController::class, 'index'])->name('memos.index');
 Route::post('/memos', [MemoController::class, 'store'])->name('memos.store');
+
+// The original recording, with byte ranges (MEMO-23). The one route in this file that does
+// not answer JSON, and the one whose response the frontend never fetches: it is the `src` of
+// an <audio> element, so the browser issues the requests itself and expects a 206 to a Range
+// header. MemoController::audio has what serves them, and why it is not Caddy.
+//
+// A sub-resource rather than a field on the memo, because it is bytes and a memo is JSON --
+// there is no shape of `GET /api/memos` that can carry a recording. Under the memo rather
+// than at a `/api/audio/{key}` of its own for the reason App\Contracts\AudioStorage gives: a
+// storage key is not a client's to hold, so the memo id it already has is what addresses
+// this.
+//
+// GET only, and Laravel registers the matching HEAD for free. That is not a spare verb here
+// -- a player asks HEAD first to learn the length and whether ranges are supported at all,
+// and Symfony answers it from this same method with the headers and no body.
+//
+// whereUuid for the reason spelled out over the writes below -- there is no implicit route
+// binding in this project, so an id that is not a uuid would otherwise reach Postgres and
+// come back as a 500. It is placed here, ahead of that paragraph rather than under it,
+// because this is a read and the writes are grouped together after it.
+Route::get('/memos/{memo}/audio', [MemoController::class, 'audio'])
+    ->whereUuid('memo')
+    ->name('memos.audio');
 
 // Filing a memo into a collection, taking it back out, or renaming it. PATCH rather than PUT
 // because the body is a change and not a replacement -- a PUT carrying only `collection_id`
