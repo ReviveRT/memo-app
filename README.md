@@ -186,6 +186,19 @@ its own. Only a `failed` memo can be retried; pressing it on one a worker is alr
 holding would put two replicas on the same recording, so the API refuses with a 409
 that names the state it actually found.
 
+**An empty recording gets no card at all.** Record four seconds of silence, or with
+the microphone muted, and there is nothing to keep: no words were said, and no retry
+will find any. So that memo is deleted — the row and the recording — and the only
+thing left is the corner toast saying why. Every *other* failure keeps its card,
+because the recording is real and the fault is usually not yours.
+
+The two are told apart by `last_error_code`, a short token the worker writes beside
+the sentence — `no_speech` and `no_audio` are discarded, everything else is kept. The
+sentence is prose meant to be read and reworded; matching on its text to decide
+whether to delete somebody's recording is the mistake that column exists to prevent.
+A code neither side recognises keeps the memo, which is the safe direction to be
+wrong in.
+
 You can watch all of it in `docker compose logs -f ai-worker`.
 
 ## Searching

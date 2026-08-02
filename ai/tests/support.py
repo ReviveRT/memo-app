@@ -151,6 +151,11 @@ class FakeQueue:
         self.committed: list[tuple[ClaimedMemo, Transcript]] = []
         self.finished: list[tuple[ClaimedMemo, Enrichment | None, str | None]] = []
         self.failed: list[tuple[ClaimedMemo, str, bool]] = []
+
+        # The failure kind the pipeline passed for each entry in `failed`, same index.
+        # Beside rather than inside for the reason `durations` is: most of these tests are
+        # about which write happened, not about how it was classified.
+        self.codes: list[str] = []
         self.durations: list[int | None] = []
         self.titled_from: list[str | None] = []
         self._fence_holds = fence_holds
@@ -186,10 +191,16 @@ class FakeQueue:
         memo: ClaimedMemo,
         error: str,
         *,
+        code: str,
         retryable: bool,
         duration_ms: int | None = None,
     ) -> bool:
         self.failed.append((memo, error, retryable))
+
+        # Recorded separately rather than added to the tuple above, so the assertions that
+        # only care about the sentence and the retry decision -- which is most of them --
+        # did not all have to change to gain a field they do not read.
+        self.codes.append(code)
         self.durations.append(duration_ms)
 
         return self._fence_holds

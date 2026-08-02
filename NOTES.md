@@ -592,3 +592,50 @@ the rule that rejected the request and are the whole reason the client reads `me
 all. It is the rule `memo_ai/audio.py` applies to ffmpeg's stderr and `pipeline.py` to an
 unclassified exception, applied to the API itself: the detail goes to the log, and the user
 gets a sentence this project wrote.
+
+## A failed memo carries a code as well as a sentence, and empty ones are deleted
+
+**Decision.** `memos.last_error_code` holds a short token from a closed vocabulary
+(`ai/memo_ai/failures.py`) written by the same statement that writes `last_error`. Two of
+its values — `no_speech` and `no_audio` — mean the recording had nothing in it, and the
+frontend deletes those memos rather than rendering them, explaining itself in a toast.
+Every other failure keeps its card, its reason and its Retry button.
+
+**Why a card for an empty recording is worse than no card.** A memo whose entire content
+is "you did not say anything" is not a memo. It cannot be transcribed now, no retry will
+find words that were never spoken, and it sits in the strip beside real memos until
+somebody deletes it by hand — so the list slowly becomes a list of the user's misfires. The
+information is worth exactly one sentence, once, at the moment it happens, which is what
+the toast is.
+
+**Why the classification is a token and not the sentence.** `last_error` is prose, worded
+where the fault was detected so that the module that knows there are three causes of
+silence can say so. Prose gets reworded. A frontend keyed to a substring of it breaks
+*silently*, and both directions are bad: memos quietly stop being tidied up, or the wrong
+ones start being deleted — and the second one takes the recording with it. The code and the
+sentence both come from the raise site, so neither is derived from the other and they
+cannot disagree.
+
+Deliberately no CHECK constraint on the column, unlike `source` and `status` beside it.
+Those are the memo's lifecycle and a new value should cost a migration; this is a
+diagnosis, and a provider added later should be able to name a new way of failing without
+one. An unrecognised code keeps the memo, so an unknown value is never destructive.
+
+**Why the browser deletes it and not the worker.** The worker knows first and could delete
+the row itself — that was the first design, and it is wrong for one reason: the user has to
+be told. Deleting server-side leaves the browser's toast stuck on "Transcribing…" and a
+recording that vanished without a word, which is the silent gap MEMO-17 exists to close.
+Doing it in the browser makes the removal and the explanation one event, in the one runtime
+with a screen. Ordered accordingly: the toast is raised first, because the reason exists
+only on the row that is about to go; the row leaves the list only once the API has
+confirmed the delete, which is the same rule the create and delete paths already follow.
+The cost is that a memo failing while no tab is open is not tidied until a tab next sees it
+— a delay rather than a hole, and until then it is an ordinary failed card.
+
+**What was rejected.** Refusing silent recordings in the browser before upload, using the
+existing voice-energy meter: the fastest possible feedback, and it discards a genuinely
+quiet memo that the meter misjudges before any row exists to recover it. And discarding
+*every* failure, which is simpler and matches the obvious reading of "do not create a memo
+if it failed" — it throws away recordings for faults that had nothing to do with what was
+said, such as a model that had not finished downloading, and it makes the Retry button
+unreachable.

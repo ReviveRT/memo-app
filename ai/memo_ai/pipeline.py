@@ -38,7 +38,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
-from memo_ai import audio
+from memo_ai import audio, failures
 from memo_ai.enrich import NO_ENRICHMENT, Enricher, Enrichment, EnrichmentError
 from memo_ai.memos import ClaimedMemo, MemoQueue
 from memo_ai.stt import local
@@ -112,7 +112,9 @@ def run_job(
         # would re-measure the same file and reach the same refusal, three minutes
         # later, having told the user nothing new.
         log.info("memo %s: refused for length: %s", memo.id, error)
-        queue.fail_or_retry(memo, str(error), retryable=False, duration_ms=error.duration_ms)
+        queue.fail_or_retry(
+            memo, str(error), code=error.code, retryable=False, duration_ms=error.duration_ms
+        )
 
         return
     except SttUnavailable as error:
@@ -122,7 +124,9 @@ def run_job(
         # no words in it". Both of those resolve on their own, and the backoff is
         # sized so three attempts span long enough for a 1.6 GB fetch to land.
         log.warning("memo %s: provider unavailable: %s", memo.id, error)
-        queue.fail_or_retry(memo, str(error), retryable=True, duration_ms=duration_ms)
+        queue.fail_or_retry(
+            memo, str(error), code=error.code, retryable=True, duration_ms=duration_ms
+        )
 
         return
     except SttError as error:
@@ -133,7 +137,9 @@ def run_job(
         # AudioError's docstring states it. This is also the corrupt-file case in
         # MEMO-16's acceptance: one attempt, a readable sentence, no hanging.
         log.warning("memo %s: no transcript: %s", memo.id, error)
-        queue.fail_or_retry(memo, str(error), retryable=False, duration_ms=duration_ms)
+        queue.fail_or_retry(
+            memo, str(error), code=error.code, retryable=False, duration_ms=duration_ms
+        )
 
         return
     except Exception:
@@ -146,7 +152,15 @@ def run_job(
         # log.exception, so the traceback is in the container logs even though the
         # row only carries the generic sentence above.
         log.exception("memo %s: unexpected error while transcribing", memo.id)
-        queue.fail_or_retry(memo, UNEXPECTED_ERROR, retryable=True, duration_ms=duration_ms)
+        queue.fail_or_retry(
+            memo,
+            UNEXPECTED_ERROR,
+            # The one code not taken from an exception, because the whole point of this
+            # branch is that nothing classified this one. See memo_ai/failures.py.
+            code=failures.UNEXPECTED,
+            retryable=True,
+            duration_ms=duration_ms,
+        )
 
         return
 

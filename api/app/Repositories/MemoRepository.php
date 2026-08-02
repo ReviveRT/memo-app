@@ -97,6 +97,11 @@ class MemoRepository
         to_jsonb(tags) AS tags,
         duration_ms,
         last_error,
+
+        -- The sentence and the token for it always travel together, because a client
+        -- that has one and not the other can either explain a failure or act on it but
+        -- not both. 004_last_error_code.sql has why the token exists at all.
+        last_error_code,
         collection_id,
         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at_iso,
         (

@@ -138,6 +138,7 @@ final class FakeMemoRepository extends MemoRepository
             tags: [],
             durationMs: null,
             lastError: null,
+            lastErrorCode: null,
             createdAt: '2026-07-31T09:00:00.000Z',
         );
     }
@@ -235,6 +236,7 @@ final class FakeMemoRepository extends MemoRepository
                 tags: $memo->tags,
                 durationMs: $memo->durationMs,
                 lastError: $memo->lastError,
+                lastErrorCode: $memo->lastErrorCode,
                 createdAt: $memo->createdAt,
                 collectionId: $memo->collectionId,
                 reminders: $memo->reminders,

@@ -1,5 +1,7 @@
 import { computed, ref } from 'vue'
-import { listMemos } from '../api/memos'
+import { deleteMemo, listMemos } from '../api/memos'
+import { isEmptyRecording } from '../memoFailure'
+import { reportDiscarded } from './useMemoToasts'
 import { useDateRange } from './useDateRange'
 
 /*
@@ -94,6 +96,118 @@ export function removeMemoEverywhere(id) {
   for (const list of lists) {
     list.removeMemo(id)
   }
+
+  for (const watcher of removalWatchers) {
+    watcher(id)
+  }
+}
+
+/**
+ * Things to tell when a memo stops existing, beyond the lists themselves.
+ *
+ * One subscriber today: the open detail card. A memo can be removed while its dialog is open --
+ * by a discard, or by a delete in another tab -- and the dialog holds the row it was given, so
+ * without this it goes on rendering a memo that is gone and every button on it 404s. The lists
+ * cannot answer that for it, because leaving a *list* is ordinary: a date filter does it.
+ *
+ * A registry rather than a prop or an event, because the dialog's owner is MemosView and the
+ * removal can be initiated three levels away, by a poll in a composable that has never heard of
+ * a dialog.
+ *
+ * @type {Set<(id: string) => void>}
+ */
+const removalWatchers = new Set()
+
+/**
+ * Be told when any memo is removed. Returns the unsubscribe.
+ *
+ * @param {(id: string) => void} watcher
+ * @returns {() => void}
+ */
+export function onMemoRemoved(watcher) {
+  removalWatchers.add(watcher)
+
+  return () => removalWatchers.delete(watcher)
+}
+
+/**
+ * Memos whose discard is in flight, by id.
+ *
+ * Two lists can be on screen at once and both poll, so both can see the same empty recording in
+ * the same second. Without this they would both DELETE it: one 200, one 404, and an error toast
+ * for a memo that was thrown away exactly as intended.
+ *
+ * Never cleared on success, only on failure. A successful discard means the row is gone and the
+ * id can never be seen again, so an entry left behind costs one string; clearing it would open
+ * a window where a poll already in flight -- carrying the row as it was before the DELETE --
+ * arrives and starts a second discard for a memo that no longer exists.
+ *
+ * @type {Set<string>}
+ */
+const discarding = new Set()
+
+/**
+ * Throw away a memo the worker found nothing in, and answer whether it was thrown away.
+ *
+ * **Why the browser does this and not the worker.** The worker knows first and could delete the
+ * row itself, and that was the first design. It is wrong for one reason: the user has to be
+ * told. A row deleted server-side leaves the browser with a toast stuck on "Transcribing…" and
+ * a recording that vanished without a word -- the exact silent gap MEMO-17 exists to close.
+ * Here the removal and the explanation are one event, in the one runtime that has a screen.
+ * What it costs is that a memo failing while no tab is open is not tidied until a tab next sees
+ * it, which is a delay rather than a hole -- and until then it is an ordinary failed card.
+ *
+ * **The toast is raised before the request, and the card is hidden before it too.** The first
+ * is because the reason exists only on this row and this is the last moment anything holds it.
+ * The second is a deliberate exception to this app's usual rule -- `store()` and `remove()` both
+ * refuse to change the screen until the database agrees -- and the exception is the whole
+ * feature: the ask was that an empty recording never appear, and a card rendered for the ~10ms
+ * of a round trip is a card that appears. So the filter hides it on sight, and the `await` only
+ * decides whether the row is also dropped from the *other* lists and from the open dialog.
+ *
+ * That trade is safe in the direction that matters. Hiding a row whose delete then fails leaves
+ * the memo in the database, invisible on this page, and the next poll comes straight back here
+ * and tries again -- so the visible behaviour is already correct and the cleanup is what
+ * retries. The reverse trade is not available: there is no way to un-render a card the user has
+ * already seen.
+ *
+ * Returns synchronously, before the request finishes, because its caller is filtering a page
+ * and needs the answer now. The `true` means "this is being dealt with, do not render it".
+ *
+ * @param {object} memo
+ * @returns {boolean} Whether this memo is being discarded rather than shown.
+ */
+function discardEmpty(memo) {
+  if (!isEmptyRecording(memo)) {
+    return false
+  }
+
+  if (discarding.has(memo.id)) {
+    return true
+  }
+
+  discarding.add(memo.id)
+  reportDiscarded(memo)
+
+  deleteMemo(memo.id)
+    .then(() => {
+      removeMemoEverywhere(memo.id)
+
+      // **Not `forgetMemo`, which the delete path calls here and which would be wrong by
+      // exactly one function.** That one dismisses every toast following the memo, because
+      // a memo the user deleted on purpose needs no receipt. This memo was deleted *for*
+      // them, and the toast raised two lines ago is the only thing that will ever say so --
+      // dismissing it would take the explanation off the screen in the same tick it
+      // appeared, leaving a recording that vanished silently.
+    })
+    .catch(() => {
+      // Left in the database and left off this page. The next poll will find it and come
+      // back here; nothing is reported, because the toast already said what happened to the
+      // recording and "we could not also delete the row" is not the user's problem.
+      discarding.delete(memo.id)
+    })
+
+  return true
 }
 /**
  * Build one list.
@@ -304,7 +418,9 @@ export function createMemoList({ collection = null } = {}) {
       const page = await listMemos(activeFilter())
 
       if (revision === revisionAtRequest) {
-        replacePage(page.memos)
+        // Before the rows are handed to the renderer, so a memo with nothing in it never
+        // becomes a card even for one frame. See discardEmpty.
+        replacePage(page.memos.filter((memo) => !discardEmpty(memo)))
 
         // Inside the same guard as the rows, so the caption and the rows it describes can
         // never come from different responses.

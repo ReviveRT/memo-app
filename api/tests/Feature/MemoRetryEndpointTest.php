@@ -66,7 +66,12 @@ final class MemoRetryEndpointTest extends TestCase
             // and the write that knows it is over is the next successful transcription --
             // `_COMMIT_TRANSCRIPT` in memo_ai/memos.py. The worker's own retry path writes
             // `last_error` onto a `queued` row for the same reason.
-            ->assertJsonPath('memo.last_error', 'No speech was detected in this recording.');
+            ->assertJsonPath('memo.last_error', 'The local transcription model could not be loaded.')
+
+            // And its code, which travels with it. The two are written by one statement and
+            // read by two different readers -- a person, and the branch in memoFailure.js
+            // that decides whether a failed memo is kept at all.
+            ->assertJsonPath('memo.last_error_code', 'provider_unavailable');
     }
 
     public function test_retrying_a_ready_memo_is_refused(): void
@@ -166,7 +171,14 @@ final class MemoRetryEndpointTest extends TestCase
             summary: null,
             tags: [],
             durationMs: 4200,
-            lastError: 'No speech was detected in this recording.',
+
+            // A failure the recording's owner cannot fix by retrying and the app does not
+            // keep -- `provider_unavailable` is the opposite kind, and the one this route
+            // exists for. It is here rather than `no_speech` so this fixture is a memo that
+            // genuinely wants a Retry button; web/src/memoFailure.js is where the two kinds
+            // part company.
+            lastError: 'The local transcription model could not be loaded.',
+            lastErrorCode: 'provider_unavailable',
             createdAt: '2026-07-31T09:00:00.000Z',
         );
     }

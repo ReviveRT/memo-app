@@ -55,6 +55,48 @@ export function failureReason(memo) {
 }
 
 /**
+ * The failure codes that mean the recording had nothing in it.
+ *
+ * The other copy of `DISCARDABLE` in ai/memo_ai/failures.py, which is where the vocabulary is
+ * defined and argued for. Two runtimes cannot share a constant, so each names the other -- the
+ * same arrangement MemoDialog and UpdateMemoRequest use for the title cap, and a much safer one
+ * here than it looks: these are short tokens chosen to be stable, unlike the sentences beside
+ * them, which exist to be reworded and are the reason the codes exist at all.
+ *
+ * A code this set has never heard of keeps the memo. That is the safe direction for an unknown
+ * value to fall, and it is why this is a set of things to *discard* rather than a set of things
+ * to keep: a worker newer than this bundle can invent a failure kind, and the worst that does
+ * is leave a card that could have been tidied away.
+ */
+const DISCARDABLE_CODES = new Set(['no_speech', 'no_audio'])
+
+/**
+ * Whether this memo is an empty recording -- one the app should not keep a card for.
+ *
+ * **The rule: a memo whose whole content is "you did not say anything" is not a memo.** A
+ * silent recording, a muted microphone, a file with no audio track -- there is nothing in it to
+ * transcribe now and nothing a retry could find later, so a `failed` card for it is a permanent
+ * receipt for a misfire, sitting in the list next to real memos and needing to be deleted by
+ * hand. useMemoList deletes these instead of rendering them, and the toast says why.
+ *
+ * **Keyed on the code and never on the sentence.** `last_error` is prose written for a person
+ * and it gets reworded; a branch keyed to a substring of it breaks silently, and the two ways
+ * it can break are "memos quietly stop being tidied up" and "the wrong ones start being
+ * deleted". db/migrations/004_last_error_code.sql has the full argument for the column.
+ *
+ * `status === 'failed'` as well as the code, for the reason `failureReason` needs it too: the
+ * pair is not cleared when a retry succeeds, so a memo that failed with no speech and then
+ * transcribed on a second attempt still carries `no_speech` while being perfectly `ready`.
+ * Reading the code alone would delete it.
+ *
+ * @param {object} memo
+ * @returns {boolean}
+ */
+export function isEmptyRecording(memo) {
+  return memo?.status === 'failed' && DISCARDABLE_CODES.has(memo.last_error_code)
+}
+
+/**
  * Whether this memo can be sent back to the worker (MEMO-17).
  *
  * The other half of the same idea: a reason nobody can act on is only half an improvement, and
@@ -72,15 +114,21 @@ export function failureReason(memo) {
  * server decides whether to perform it. They agree, and when they disagree -- a card holding a
  * status the worker has since moved on from -- the 409's sentence is what the user sees.
  *
- * Deliberately not `failureReason(memo) !== null`, even though the two answer the same today.
- * That one is about having something to *say* and falls back to a sentence when the column is
- * empty; this is about what may be *done*, and reading a button's availability out of a
- * message's presence is the kind of coupling that turns a future empty-string fallback into a
+ * Deliberately not `failureReason(memo) !== null`, even though the two nearly answer the same
+ * today. That one is about having something to *say* and falls back to a sentence when the
+ * column is empty; this is about what may be *done*, and reading a button's availability out of
+ * a message's presence is the kind of coupling that turns a future empty-string fallback into a
  * disabled control.
+ *
+ * **Empty recordings are excluded, and it is not only that they are about to be deleted.**
+ * Retrying one is a guaranteed round trip to the same answer -- the file is unchanged, and
+ * "there is no speech in it" is a property of the file rather than of the attempt. So the
+ * button would be a lie even on the copy that survives, which is the one whose delete failed:
+ * for that memo the honest action is Delete, which the detail card already offers.
  *
  * @param {object} memo
  * @returns {boolean}
  */
 export function canRetry(memo) {
-  return memo?.status === 'failed'
+  return memo?.status === 'failed' && !isEmptyRecording(memo)
 }

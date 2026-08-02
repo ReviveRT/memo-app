@@ -69,7 +69,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from memo_ai import audio, prose
+from memo_ai import audio, failures, prose
 from memo_ai.stt.base import SttError, SttUnavailable, Transcript
 
 log = logging.getLogger(__name__)
@@ -524,7 +524,10 @@ class LocalWhisperStt:
                 segments, info = transcriber.model.transcribe(str(source), **options)
 
             if info.duration <= 0:
-                raise SttError(_EMPTY)
+                # NO_AUDIO rather than the class default: nothing failed here, the
+                # file simply has no audio in it. That decides whether the app keeps
+                # the memo for a retry or throws it away -- memo_ai/failures.py.
+                raise SttError(_EMPTY, code=failures.NO_AUDIO)
 
             # Shaped outside the deadline, and after `info` exists, because both
             # things it needs are here: the language the model actually decoded in,
@@ -567,10 +570,15 @@ class LocalWhisperStt:
             # nothing, while the temporary directory in the path is per-job.
             log.warning("whisper could not read %s: %s", source, error)
 
-            raise SttError(_UNREADABLE) from None
+            raise SttError(_UNREADABLE, code=failures.UNREADABLE) from None
 
         if not text:
-            raise SttError(_NO_SPEECH)
+            # The one failure the person who made the recording caused and cannot
+            # fix by retrying: there are no words in the file. Coded so the app can
+            # discard the memo instead of leaving a card that says "you said
+            # nothing" -- see memo_ai/failures.py, and web/src/memoFailure.js for
+            # what is done with it.
+            raise SttError(_NO_SPEECH, code=failures.NO_SPEECH)
 
         return Transcript(text=text, provider=self.name, model=self.model_size)
 
@@ -647,7 +655,7 @@ class LocalWhisperStt:
                 audio_seconds,
             )
 
-            raise SttError(_TOO_SLOW)
+            raise SttError(_TOO_SLOW, code=failures.TOO_SLOW)
 
         if drain.error is not None:
             # Raised in this thread so the caller's except clauses can classify it

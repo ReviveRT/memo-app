@@ -1,0 +1,56 @@
+-- 004_last_error_code.sql — the machine-readable half of a failure.
+--
+-- Same two rules as every file in this directory, because db/migrate.sh wraps it and
+-- its ledger row in one `psql --single-transaction` call:
+--
+--   * no BEGIN/COMMIT in here
+--   * nothing illegal inside a transaction block: CREATE INDEX CONCURRENTLY,
+--     CREATE DATABASE, VACUUM
+--
+-- `last_error` holds prose. That is the right shape for the person who made the
+-- recording — 001_init.sql called it "the reason", and memo_ai/audio.py and
+-- memo_ai/stt/local.py each word their own so the sentence comes from whichever code
+-- detected the fault — and it is the wrong shape for a program.
+--
+-- The frontend has to tell two kinds of failure apart, and the difference is not
+-- cosmetic. A recording with no speech in it is an empty file: nothing was lost,
+-- nothing can be recovered by trying again, and leaving a card for it turns the memo
+-- list into a list of the user's misfires. A model that could not be loaded is the
+-- opposite — the recording is real and the fault is usually fixable, so that memo has
+-- to stay, with its reason and a Retry button (MEMO-17). Both arrive as one `failed`
+-- row with one sentence, and the only way to separate them from the sentence alone is
+-- to match on its text.
+--
+-- Matching on prose is the thing this column exists to avoid. The sentences are
+-- written to be read, which means they get reworded, and a frontend keyed to a
+-- substring of one breaks *silently*: memos quietly stop being tidied up, or the wrong
+-- ones start being deleted. Neither shows up as an error anywhere.
+--
+-- So the classification travels as its own value, written by the same statement that
+-- writes the sentence. Both come from the raise site — the only place that knows which
+-- kind of failure this is — so neither is derived from the other and they cannot
+-- disagree. memo_ai/failures.py holds the vocabulary; web/src/memoFailure.js holds the
+-- one subset the browser acts on.
+--
+-- Nullable, and it means "this memo has never failed". Every failure path in the
+-- worker sets one, including `unexpected` for a fault nobody classified, so a `failed`
+-- row with a NULL code is either older than this migration or was written by hand.
+-- Readers should treat that as "some other failure" — which is the safe direction,
+-- since it is the discardable codes that are acted on and an unknown code keeps the
+-- memo.
+--
+-- **No CHECK constraint, unlike `source` and `status` in 001_init.sql, and the
+-- asymmetry is deliberate.** Those two are the memo's own lifecycle: the set of
+-- allowed values is a design decision, adding one changes what a memo *is*, and a
+-- migration is the right amount of friction. This is a diagnosis. A provider added
+-- later will find new ways to fail and should be able to name them without a schema
+-- change, and a code the database has never heard of is not a corrupt row — it is a
+-- fault this build does not have an opinion about. What that costs is that a typo
+-- reaches the table, which is why memo_ai/failures.py is constants rather than string
+-- literals at the raise sites.
+--
+-- No index either. The column is read as part of the row on the list endpoint's
+-- projection and nothing filters or groups by it; an index would be maintained by
+-- every failure write and read by nothing.
+
+ALTER TABLE memos ADD COLUMN IF NOT EXISTS last_error_code text;

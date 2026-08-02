@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from memo_ai import audio, pipeline
+from memo_ai import audio, failures, pipeline
 from memo_ai.config import DEFAULT_MAX_AUDIO_SECONDS, DEFAULT_REAP_AFTER_SECONDS
 from memo_ai.enrich import NO_ENRICHMENT, Enrichment, EnrichmentError
 from memo_ai.stt.base import SttError, SttUnavailable
@@ -470,3 +470,48 @@ def test_an_audio_key_that_escapes_audio_dir_is_refused(key):
 )
 def test_a_legal_audio_key_joins_to_audio_dir(key, expected):
     assert pipeline.audio_file(Path("/data/audio"), key) == Path(expected)
+
+
+# --------------------------------------------------------------------------
+# The failure kind, as it reaches the queue write
+# --------------------------------------------------------------------------
+#
+# The classification itself is pinned in test_failures.py; these are about the trip.
+# `last_error_code` is written by the same statement as the sentence and is what the
+# frontend branches on -- a code lost between the raise site and the row means a memo
+# the app cannot classify, which it then keeps. See db/migrations/004_last_error_code.sql.
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        # The two that mean "there is nothing in this recording", and the two the app
+        # throws away. Both are a plain SttError: the class cannot tell them from a
+        # generic transcription failure, which is exactly why the raise site names them.
+        (SttError("No speech was detected.", code=failures.NO_SPEECH), failures.NO_SPEECH),
+        (SttError("This recording is empty.", code=failures.NO_AUDIO), failures.NO_AUDIO),
+        # And three kinds that are kept, one per handler in run_job.
+        (SttUnavailable("The model could not be loaded."), failures.PROVIDER_UNAVAILABLE),
+        (audio.AudioError("ffmpeg could not read it."), failures.UNREADABLE),
+        (audio.AudioTooLong("Too long.", duration_ms=700_000), failures.TOO_LONG),
+    ],
+)
+def test_the_failure_code_reaches_the_queue_unchanged(error, expected, audio_dir, normalizer):
+    queue = FakeQueue()
+
+    run(queue, claimed_memo(), RecordingStt(error=error), audio_dir)
+
+    assert queue.codes == [expected]
+
+
+def test_an_unclassified_failure_is_coded_as_unexpected(audio_dir, normalizer):
+    # The one code not taken from an exception, because this branch exists for exceptions
+    # nobody classified. It must not be discardable: an unknown fault is the last thing to
+    # throw somebody's recording away for, and the generic sentence beside it says nothing
+    # about the recording at all.
+    queue = FakeQueue()
+
+    run(queue, claimed_memo(), RecordingStt(error=RuntimeError("boom")), audio_dir)
+
+    assert queue.codes == [failures.UNEXPECTED]
+    assert failures.UNEXPECTED not in failures.DISCARDABLE

@@ -111,8 +111,8 @@ final class Memo
      */
     private const REQUIRED_COLUMNS = [
         'id', 'source', 'status', 'transcript', 'title',
-        'summary', 'tags', 'duration_ms', 'last_error', 'created_at_iso',
-        'collection_id', 'reminders',
+        'summary', 'tags', 'duration_ms', 'last_error', 'last_error_code',
+        'created_at_iso', 'collection_id', 'reminders',
     ];
 
     /**
@@ -139,6 +139,27 @@ final class Memo
         public readonly array $tags,
         public readonly ?int $durationMs,
         public readonly ?string $lastError,
+
+        /**
+         * Which *kind* of failure `lastError` describes, or null for a memo that has
+         * never failed.
+         *
+         * A short token from a closed vocabulary -- memo_ai/failures.py owns it -- and
+         * it is on the wire beside the sentence because the two answer different
+         * questions. The sentence is what a person reads; this is what a program
+         * branches on, and the frontend has one branch that matters: a recording with
+         * nothing in it is discarded rather than shown, and everything else is kept
+         * with a Retry. Deriving that from the sentence would mean matching on prose
+         * that exists to be reworded. 004_last_error_code.sql has the argument.
+         *
+         * Not validated here against a list of known codes. This class maps a row; a
+         * code it has never heard of is a worker newer than this API, and the honest
+         * thing is to pass it through and let the reader treat an unknown kind as "some
+         * other failure" -- which is the direction that keeps a memo rather than
+         * deleting it.
+         */
+        public readonly ?string $lastErrorCode,
+
         public readonly string $createdAt,
         public readonly ?string $collectionId = null,
         public readonly array $reminders = [],
@@ -183,6 +204,7 @@ final class Memo
             durationMs: $row->duration_ms === null ? null : (int) $row->duration_ms,
 
             lastError: self::nullableString($row->last_error),
+            lastErrorCode: self::nullableString($row->last_error_code),
             createdAt: (string) $row->created_at_iso,
             collectionId: self::nullableString($row->collection_id),
             reminders: self::reminders($row->reminders),
@@ -202,6 +224,7 @@ final class Memo
             'tags' => $this->tags,
             'duration_ms' => $this->durationMs,
             'last_error' => $this->lastError,
+            'last_error_code' => $this->lastErrorCode,
             'created_at' => $this->createdAt,
             'collection_id' => $this->collectionId,
             'reminders' => array_map(

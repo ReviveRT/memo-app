@@ -15,6 +15,7 @@ from uuid import UUID
 
 import pytest
 
+from memo_ai import failures
 from memo_ai.enrich import Enrichment
 from memo_ai.memos import (
     _CLAIM_COLUMNS,
@@ -360,7 +361,7 @@ def test_a_long_enrichment_error_is_truncated_like_a_transcription_one():
 def test_a_retryable_failure_below_the_cap_goes_back_to_the_queue():
     connection = FakeConnection(rowcount=1)
 
-    queue(connection).fail_or_retry(claimed_memo(attempts=1), "still loading", retryable=True)
+    queue(connection).fail_or_retry(claimed_memo(attempts=1), "still loading", code=failures.TRANSCRIPTION_FAILED, retryable=True)
 
     assert "SET status = 'queued'" in connection.last_sql
     assert connection.last_params["last_error"] == "still loading"
@@ -373,7 +374,7 @@ def test_a_retry_releases_the_fence_token_so_the_old_attempt_cannot_write():
     # previous claim after a new worker had taken it.
     connection = FakeConnection(rowcount=1)
 
-    queue(connection).fail_or_retry(claimed_memo(attempts=1), "went wrong", retryable=True)
+    queue(connection).fail_or_retry(claimed_memo(attempts=1), "went wrong", code=failures.TRANSCRIPTION_FAILED, retryable=True)
 
     assert "locked_at = NULL" in connection.last_sql
 
@@ -383,7 +384,7 @@ def test_a_retryable_failure_at_the_cap_is_terminal():
     # retries after it.
     connection = FakeConnection(rowcount=1)
 
-    queue(connection).fail_or_retry(claimed_memo(attempts=3), "still loading", retryable=True)
+    queue(connection).fail_or_retry(claimed_memo(attempts=3), "still loading", code=failures.TRANSCRIPTION_FAILED, retryable=True)
 
     assert "SET status = 'failed'" in connection.last_sql
 
@@ -393,7 +394,7 @@ def test_a_failure_that_is_not_retryable_is_terminal_on_the_first_attempt():
     # two more claims to confirm it cost 90 seconds and tell the user nothing.
     connection = FakeConnection(rowcount=1)
 
-    queue(connection).fail_or_retry(claimed_memo(attempts=1), "unreadable", retryable=False)
+    queue(connection).fail_or_retry(claimed_memo(attempts=1), "unreadable", code=failures.TRANSCRIPTION_FAILED, retryable=False)
 
     assert "SET status = 'failed'" in connection.last_sql
     assert connection.last_params["last_error"] == "unreadable"
@@ -409,12 +410,12 @@ def test_a_terminal_failure_can_carry_a_duration_and_coalesces_when_it_cannot():
     memos = queue(connection)
 
     memos.fail_or_retry(
-        claimed_memo(), "This recording is 11:04 long...", retryable=False, duration_ms=664_200
+        claimed_memo(), "This recording is 11:04 long...", code=failures.TRANSCRIPTION_FAILED, retryable=False, duration_ms=664_200
     )
 
     assert connection.last_params["duration_ms"] == 664_200
 
-    memos.fail_or_retry(claimed_memo(), "Something else went wrong.", retryable=False)
+    memos.fail_or_retry(claimed_memo(), "Something else went wrong.", code=failures.TRANSCRIPTION_FAILED, retryable=False)
 
     assert connection.last_params["duration_ms"] is None
     assert "duration_ms = COALESCE" in connection.last_sql
@@ -428,7 +429,7 @@ def test_a_long_error_is_truncated_with_a_visible_marker():
     connection = FakeConnection(rowcount=1)
 
     queue(connection).fail_or_retry(
-        claimed_memo(), "x" * (MAX_LAST_ERROR_CHARS + 100), retryable=False
+        claimed_memo(), "x" * (MAX_LAST_ERROR_CHARS + 100), code=failures.TRANSCRIPTION_FAILED, retryable=False
     )
 
     written = connection.last_params["last_error"]
@@ -441,7 +442,7 @@ def test_an_error_that_fits_is_left_exactly_as_it_is():
     connection = FakeConnection(rowcount=1)
 
     queue(connection).fail_or_retry(
-        claimed_memo(), "The audio file could not be read.", retryable=False
+        claimed_memo(), "The audio file could not be read.", code=failures.TRANSCRIPTION_FAILED, retryable=False
     )
 
     assert connection.last_params["last_error"] == "The audio file could not be read."
@@ -512,8 +513,8 @@ def test_a_write_that_matches_no_rows_reports_failure_rather_than_success():
 
     assert queue(lost).commit_transcript(claimed_memo(), words) is False
     assert queue(lost).finish_ready(claimed_memo()) is False
-    assert queue(lost).fail_or_retry(claimed_memo(), "went wrong", retryable=False) is False
-    assert queue(lost).fail_or_retry(claimed_memo(attempts=1), "wrong", retryable=True) is False
+    assert queue(lost).fail_or_retry(claimed_memo(), "went wrong", code=failures.TRANSCRIPTION_FAILED, retryable=False) is False
+    assert queue(lost).fail_or_retry(claimed_memo(attempts=1), "wrong", code=failures.TRANSCRIPTION_FAILED, retryable=True) is False
 
 
 def test_a_write_that_matches_one_row_reports_success():
@@ -522,7 +523,7 @@ def test_a_write_that_matches_one_row_reports_success():
 
     assert queue(held).commit_transcript(claimed_memo(), words) is True
     assert queue(held).finish_ready(claimed_memo()) is True
-    assert queue(held).fail_or_retry(claimed_memo(), "went wrong", retryable=False) is True
+    assert queue(held).fail_or_retry(claimed_memo(), "went wrong", code=failures.TRANSCRIPTION_FAILED, retryable=False) is True
 
 
 def test_neither_commit_point_touches_locked_at():
@@ -543,8 +544,8 @@ def test_every_write_that_ends_a_claim_releases_the_token():
     connection = FakeConnection(rowcount=1)
     memos = queue(connection)
 
-    memos.fail_or_retry(claimed_memo(attempts=3), "gave up", retryable=True)
-    memos.fail_or_retry(claimed_memo(attempts=1), "try again", retryable=True)
+    memos.fail_or_retry(claimed_memo(attempts=3), "gave up", code=failures.TRANSCRIPTION_FAILED, retryable=True)
+    memos.fail_or_retry(claimed_memo(attempts=1), "try again", code=failures.TRANSCRIPTION_FAILED, retryable=True)
 
     for sql, _params in connection.executed:
         assert "locked_at = NULL" in sql.split("WHERE")[0]

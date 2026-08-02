@@ -46,6 +46,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from memo_ai import failures
 from memo_ai.stt.base import SttError, SttProvider
 
 log = logging.getLogger(__name__)
@@ -162,6 +163,11 @@ class AudioError(SttError):
     decode is a file none of them will transcribe.
     """
 
+    # The default for this class, and the raise site overrides it where the file was
+    # read perfectly well and simply had nothing in it -- see the no-audio-track case
+    # in probe() below, which is the one AudioError that is not about a bad file.
+    code = failures.UNREADABLE
+
 
 class AudioTooLong(AudioError):
     """
@@ -174,6 +180,10 @@ class AudioTooLong(AudioError):
     beside a blank length.
     """
 
+    code = failures.TOO_LONG
+
+    # Calls up without a code on purpose: SttError only assigns when one is passed,
+    # so the class attribute above survives rather than being shadowed by None.
     def __init__(self, message: str, duration_ms: int) -> None:
         super().__init__(message)
         self.duration_ms = duration_ms
@@ -302,7 +312,14 @@ def _require_audio_stream(source: Path) -> None:
     )
 
     if not streams.strip():
-        raise AudioError("This file has no audio track, so there is nothing to transcribe.")
+        raise AudioError(
+            "This file has no audio track, so there is nothing to transcribe.",
+            # Not UNREADABLE, which is what AudioError means by default: the file
+            # was read perfectly well and there is simply nothing in it to
+            # transcribe. That distinction is what decides whether the memo is kept
+            # for a retry or thrown away -- see memo_ai/failures.py.
+            code=failures.NO_AUDIO,
+        )
 
 
 def _ffmpeg_command(source: Path, destination: Path, fmt: AudioFormat) -> list[str]:

@@ -18,7 +18,7 @@ from uuid import UUID
 import psycopg
 from psycopg.rows import class_row
 
-from memo_ai import titles
+from memo_ai import failures, titles
 from memo_ai.config import Settings
 from memo_ai.enrich import Enrichment
 from memo_ai.stt.base import Transcript
@@ -338,7 +338,8 @@ _COMMIT_TRANSCRIPT = """
            stt_model = COALESCE(%(stt_model)s, stt_model),
            duration_ms = COALESCE(%(duration_ms)s, duration_ms),
            cost_micro_usd = COALESCE(%(cost_micro_usd)s, cost_micro_usd),
-           last_error = NULL
+           last_error = NULL,
+           last_error_code = NULL
      WHERE id = %(id)s
        AND locked_at = %(locked_at)s
 """
@@ -397,7 +398,15 @@ _FINISH_READY = f"""
            category = COALESCE(%(category)s, category),
            enrichment_error = %(enrichment_error)s,
            enriched_at = CASE WHEN %(enriched)s THEN now() ELSE enriched_at END,
-           last_error = NULL
+           last_error = NULL,
+
+           -- Cleared with the sentence, never without it. Every write in this file sets
+           -- both error columns or clears both: a code with no sentence explains nothing
+           -- to a person, and a sentence with no code can be classified by nothing.
+           -- test_failures.py checks the statements for it, because both places this rule
+           -- was broken were statements written before the code column existed, where one
+           -- cleared line looks like the whole job.
+           last_error_code = NULL
      WHERE id = %(id)s
        AND locked_at = %(locked_at)s
 """
@@ -427,6 +436,7 @@ _FAIL = """
        SET status = 'failed',
            locked_at = NULL,
            last_error = %(last_error)s,
+           last_error_code = %(last_error_code)s,
            duration_ms = COALESCE(%(duration_ms)s, duration_ms)
      WHERE id = %(id)s
        AND locked_at = %(locked_at)s
@@ -453,6 +463,7 @@ _RETRY = """
        SET status = 'queued',
            locked_at = NULL,
            last_error = %(last_error)s,
+           last_error_code = %(last_error_code)s,
            next_attempt_at = now() + make_interval(secs => %(delay_seconds)s),
            duration_ms = COALESCE(%(duration_ms)s, duration_ms)
      WHERE id = %(id)s
@@ -523,6 +534,7 @@ _REAP_REQUEUE = """
        SET status = 'queued',
            locked_at = NULL,
            last_error = %(last_error)s,
+           last_error_code = %(last_error_code)s,
            next_attempt_at = now() + make_interval(
                secs => least(
                            %(backoff_seconds)s * power(2, greatest(attempts - 1, 0)),
@@ -547,7 +559,8 @@ _REAP_FAIL = """
     UPDATE memos
        SET status = 'failed',
            locked_at = NULL,
-           last_error = COALESCE(last_error, %(last_error)s)
+           last_error = COALESCE(last_error, %(last_error)s),
+           last_error_code = COALESCE(last_error_code, %(last_error_code)s)
      WHERE status = 'processing'
        AND locked_at < now() - make_interval(secs => %(lease_seconds)s)
        AND attempts >= %(max_attempts)s
@@ -568,6 +581,13 @@ _REAP_FAIL = """
 # cleared: transcription did not fail here, enrichment never got to run, and
 # leaving a stale interruption notice on a ready memo would say otherwise.
 #
+# `last_error_code` is cleared **with** it, and the pairing is the rule rather than a
+# detail of this statement: every write in this file either sets both columns or
+# clears both, because a row carrying a code with no sentence can explain nothing to a
+# person, and one carrying a sentence with no code can be classified by nothing. This
+# is the statement where the rule is easiest to break, since it was written before the
+# code column existed and clearing one line looks complete.
+#
 # Both of these branches were run on a real Postgres with two rows at the cap in the
 # same pass -- one with a transcript, one without -- and the pass resolved each to
 # its own outcome and requeued neither.
@@ -576,6 +596,7 @@ _REAP_SALVAGE = f"""
        SET status = 'ready',
            locked_at = NULL,
            last_error = NULL,
+           last_error_code = NULL,
            title = COALESCE(title, {_FALLBACK_TITLE}),
            enrichment_error = COALESCE(enrichment_error, %(enrichment_error)s)
      WHERE status = 'processing'
@@ -705,6 +726,7 @@ class MemoQueue:
         memo: ClaimedMemo,
         error: str,
         *,
+        code: str,
         retryable: bool,
         duration_ms: int | None = None,
     ) -> bool:
@@ -717,6 +739,13 @@ class MemoQueue:
         worse than saying so now. The attempt count is this class's half of the
         decision, because it lives on the row.
 
+        ``code`` travels with the sentence for the same reason and from the same
+        place: only the raise site knows which *kind* of failure this is, and the
+        sentence cannot be parsed back into one. It is required rather than
+        defaulted, so a new failure path has to say what it is instead of silently
+        writing NULL into a column the frontend branches on. memo_ai/failures.py has
+        the vocabulary and the argument.
+
         Returns whether the write landed, not what it decided; the decision is
         logged here, where both numbers are in hand.
         """
@@ -724,10 +753,11 @@ class MemoQueue:
 
         if exhausted or not retryable:
             log.info(
-                "memo %s: failing after attempt %d of %d (%s)",
+                "memo %s: failing after attempt %d of %d (%s, %s)",
                 memo.id,
                 memo.attempts,
                 self._policy.max_attempts,
+                code,
                 "attempts exhausted" if exhausted else "not retryable",
             )
 
@@ -737,6 +767,7 @@ class MemoQueue:
                     "id": memo.id,
                     "locked_at": memo.locked_at,
                     "last_error": _truncate(error),
+                    "last_error_code": code,
                     "duration_ms": duration_ms,
                 },
                 memo,
@@ -746,10 +777,11 @@ class MemoQueue:
         delay = self._policy.delay_for(memo.attempts)
 
         log.info(
-            "memo %s: attempt %d of %d failed, retrying in %.1fs",
+            "memo %s: attempt %d of %d failed (%s), retrying in %.1fs",
             memo.id,
             memo.attempts,
             self._policy.max_attempts,
+            code,
             delay,
         )
 
@@ -759,6 +791,7 @@ class MemoQueue:
                 "id": memo.id,
                 "locked_at": memo.locked_at,
                 "last_error": _truncate(error),
+                "last_error_code": code,
                 "delay_seconds": delay,
                 "duration_ms": duration_ms,
             },
@@ -786,6 +819,7 @@ class MemoQueue:
                 _REAP_REQUEUE,
                 {
                     "last_error": REAPED_MESSAGE,
+                    "last_error_code": failures.INTERRUPTED,
                     "backoff_seconds": self._policy.backoff_seconds,
                     "max_backoff_seconds": MAX_BACKOFF_SECONDS,
                     "lease_seconds": self._policy.reap_after_seconds,
@@ -796,6 +830,12 @@ class MemoQueue:
                 _REAP_FAIL,
                 {
                     "last_error": ABANDONED_MESSAGE,
+                    # COALESCEd in the statement, like the sentence beside it and for
+                    # the same reason: if an earlier attempt recorded a real diagnosis,
+                    # that is the one worth keeping. A memo abandoned after a
+                    # `no_speech` attempt therefore stays discardable, which is right --
+                    # it is still a recording with nothing in it.
+                    "last_error_code": failures.ABANDONED,
                     "lease_seconds": self._policy.reap_after_seconds,
                     "max_attempts": self._policy.max_attempts,
                 },
