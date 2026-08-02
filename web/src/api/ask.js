@@ -132,13 +132,27 @@ export async function askMemos(question, { onSources, onToken, onDone, signal } 
  * So the sentence is authored here, on this side, instead of trusting the body. The rule is
  * kept intact: nothing the server said is rendered for any 5xx.
  *
+ * **It names no command, and that changed when this app became deployable.** The sentence used
+ * to end "check it with: docker compose ps ai-api", which was good advice to the one audience
+ * that existed -- somebody running the stack on their own machine. On a hosted deployment it is
+ * wrong twice over: `ai-api` is deliberately not part of the production image (deploy/README.md
+ * has why -- the models will not fit a free tier), so it is not a service that has failed to
+ * start, it is one that is not there; and the person reading has no terminal to run compose in
+ * anyway. Telling them to check a container sends them looking for a fault that does not exist.
+ *
+ * What replaced it says the state and its consequence, which is true in both deployments and is
+ * the part a reader can act on -- by not waiting for an answer that is not coming. The operator's
+ * half is not lost, it moved: App\Services\Ask\HttpAskBackend writes the actionable sentence into
+ * the api log, which is the same split this project uses for provider failures (a memo row gets a
+ * sentence, ffmpeg's stderr goes to the log).
+ *
  * A 422 is the other reachable status -- the question was empty, or over the cap -- and it is
  * a 4xx, so its `message` is passed through exactly as request.js passes the rest of this
  * API's authored validation sentences.
  */
 async function failureMessage(response) {
   if (response.status === 503) {
-    return 'Ask is not available right now. The ai-api service is either not running or still loading its model — check it with: docker compose ps ai-api'
+    return 'Ask is not available right now — the service that answers questions is not running. Your memos are unaffected, and search still works.'
   }
 
   if (response.status >= 500) {

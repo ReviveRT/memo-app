@@ -37,9 +37,22 @@ def connection(lexemes=("dentist",), rows=None) -> FakeConnection:
     )
 
 
+# Whose memos are being answered from. This module is about the event sequence rather
+# than about scoping -- tests/test_ask_retrieval.py covers that the value reaches the
+# statement -- so every call here uses the same one.
+OWNER = "01900000-0000-7000-8000-0000000000aa"
+
+
 def answer(fake_connection, model, question="what about the dentist"):
     return list(
-        service.answer(fake_connection, model, question, top_k=3, memo_chars=1200)
+        service.answer(
+            fake_connection,
+            model,
+            question,
+            owner_id=OWNER,
+            top_k=3,
+            memo_chars=1200,
+        )
     )
 
 

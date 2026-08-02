@@ -96,4 +96,30 @@ interface AudioStorage
      *                          filesystem to answer with.
      */
     public function localPath(string $key): ?string;
+
+    /**
+     * A URL the browser may fetch this object from directly, or null from a driver that has
+     * none.
+     *
+     * **The second method the localPath docblock above predicted, and it is the branch, not a
+     * convenience.** Callers ask for this first and fall back to localPath, so a driver
+     * answers exactly one of the two and never both: S3AudioStorage throws from localPath and
+     * returns a URL here; LocalAudioStorage returns null here and a path there. A caller that
+     * checked only one would work against one driver and 404 against the other.
+     *
+     * Null and an exception mean different things, the same way they do above. Null is "this
+     * driver does not do that", which is a fact about the deployment and sends the caller to
+     * localPath. An exception is a malformed key.
+     *
+     * **Whatever this returns is a bearer capability for the lifetime it is signed with.** It
+     * carries no cookie and no owner check -- S3 has never heard of either -- so the
+     * ownership decision has already been made by the time this is called, and anyone the URL
+     * reaches can fetch those bytes until it expires. Keep $seconds short. It is the same
+     * trade the claim link makes, on a much smaller scale and with a deadline.
+     *
+     * @param  int  $seconds  How long the URL stays valid.
+     *
+     * @throws StorageException On a malformed key.
+     */
+    public function temporaryUrl(string $key, int $seconds): ?string;
 }

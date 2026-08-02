@@ -1,0 +1,60 @@
+# Caddy config for the single-container production image (deploy/Dockerfile).
+#
+# **The whole point of this file is that the browser sees one origin.** The owner cookie is
+# what scopes every memo to a browser, and a cookie belongs to a host -- so the moment the SPA
+# is served from one origin and the API from another, `SameSite=Lax` stops sending it on XHR
+# and the identity has to be relaxed to `SameSite=None` with a CORS layer and a CSRF token to
+# replace what Lax was providing. Serving both from here costs one config file and avoids all
+# three. App\Support\OwnerCookie has the argument in full.
+#
+# It is also the shape free hosting wants: one web service, which is what the free tier of
+# every platform gives you one of.
+#
+# Not used by local development. docker-compose.yml still runs Vite's dev server in front of
+# the api container, because a baked SPA has no hot reload -- and Vite's proxy gives the same
+# single-origin property for free, which is why the cookie works identically in both.
+
+{
+	# The port. `{$VAR:default}` is Caddy's env-with-default syntax, so this reads
+	# SERVER_NAME and falls back to :8080 -- matching what api/Dockerfile has always set.
+	#
+	# Free platforms assign the port and expect the process to bind it. Most inject it as
+	# $PORT, which Caddy cannot substitute into another variable's default, so a deployment
+	# there sets SERVER_NAME to ":10000" (or whatever the platform uses) directly. deploy/
+	# README.md has the per-platform value.
+	auto_https off
+}
+
+{$SERVER_NAME::8080} {
+	root /app/public
+
+	encode zstd br gzip
+
+	# Everything the API owns. First match wins among `handle` blocks, so this is checked
+	# before the SPA fallback below and there is no path where an API route falls through to
+	# index.html -- which would answer 200 with an HTML document to a fetch expecting JSON,
+	# and surface in the browser as a parse error rather than as a 404.
+	handle /api/* {
+		# Expands to try_files {path} {path}/index.php index.php, so /api/memos lands on
+		# Laravel's front controller with its URI intact.
+		php_server
+	}
+
+	# The SPA. try_files with a literal /index.html rather than php_server's chain: this is a
+	# client-routed application, so /collections and /memos/<uuid> are not files and must
+	# still return the app rather than a 404.
+	handle {
+		# Hashed asset filenames from Vite are immutable, so they may be cached hard. The
+		# entry document must not be, or a deploy leaves browsers holding an index.html
+		# pointing at asset hashes that no longer exist -- a blank page that a reload does
+		# not fix.
+		@immutable path /assets/*
+		header @immutable Cache-Control "public, max-age=31536000, immutable"
+
+		@document not path /assets/*
+		header @document Cache-Control "no-cache"
+
+		try_files {path} /index.html
+		file_server
+	}
+}

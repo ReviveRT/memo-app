@@ -38,9 +38,17 @@ final class FakeAskBackend implements AskBackend
     /** Set to refuse before answering, standing in for an ai-api that is down or loading. */
     public ?string $unavailable = null;
 
-    public function ask(string $question): iterable
+    /** Every owner id ask() was called with, in order, so a test can prove the scope reached
+     * the backend rather than only that the request succeeded.
+     *
+     * @var list<string>
+     */
+    public array $askedBy = [];
+
+    public function ask(string $question, string $ownerId): iterable
     {
         $this->asked[] = $question;
+        $this->askedBy[] = $ownerId;
 
         if ($this->unavailable !== null) {
             // Thrown from `ask` itself rather than from the generator below, which is the

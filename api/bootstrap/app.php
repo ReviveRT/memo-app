@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+use App\Console\Commands\PruneOwners;
+use App\Http\Middleware\ResolveOwner;
 use App\Http\Middleware\ValidateJsonBody;
 use App\Http\Requests\StoreMemoRequest;
 use Illuminate\Foundation\Application;
@@ -33,6 +35,11 @@ return Application::configure(basePath: dirname(__DIR__))
         // and answers 503 when it fails. Two health endpoints disagreeing is worse
         // than one that tells the truth.
     )
+    // Named explicitly rather than left to the skeleton's discovery of
+    // app/Console/Commands, which is the same preference the rest of this file shows: what
+    // runs is in one readable list instead of inferred from a directory listing. There is
+    // one command and it deletes people's memos -- worth being findable by reading this file.
+    ->withCommands([PruneOwners::class])
     ->withMiddleware(function (Middleware $middleware): void {
         // A body that claims to be JSON and is not gets a 400 saying so, instead of
         // silently becoming an empty input bag and coming back as somebody else's
@@ -63,6 +70,37 @@ return Application::configure(basePath: dirname(__DIR__))
         // not a route wanted it -- and there is a test pinning it so it stays a
         // decision rather than an accident.
         $middleware->append(ValidateJsonBody::class);
+
+        // Whose memos this request may see. Appended after ValidateJsonBody so that an
+        // unreadable body is still a 400 rather than a database round trip first, and
+        // global rather than scoped to the api group for the same reason ValidateJsonBody
+        // is: there is only one group here, and a route added outside it would silently
+        // lose its scoping. That is the one mistake this middleware exists to prevent, so
+        // it should not be possible to make by adding a route.
+        //
+        // App\Services\Owners\OwnerContext is what carries the result to the repositories,
+        // and it throws rather than defaulting if this middleware has not run -- so the
+        // failure mode of forgetting it is a 500, not one person reading another's memos.
+        $middleware->append(ResolveOwner::class);
+
+        // **Required for the owner cookie to be marked Secure on any hosted deployment.**
+        // Every free platform terminates TLS at its edge and speaks plain http to the
+        // container, so without this Request::isSecure() is false in production and the
+        // cookie carrying the bearer token goes out without the one flag that keeps it off
+        // plain-http requests. It also fixes the scheme in the claim URL, which is built
+        // from the request and would otherwise say http:// on an https deployment.
+        //
+        // '*' -- trust whatever fronts us -- because the trustworthy proxy's address is not
+        // knowable here: it is assigned by the platform, differs per provider, and changes
+        // without notice. The usual objection is that a client can then spoof
+        // X-Forwarded-Proto, and it is worth being precise about what that buys them here:
+        // the headers Laravel reads from this affect the scheme, the host and the client IP.
+        // Nothing in this application authorises on IP, and claiming to be https when you
+        // are not only sets Secure on your *own* cookie, which stops your own browser from
+        // sending it back over http. Both are self-inflicted. The exposure would be real if
+        // a route ever trusted the client IP for rate limiting or allow-listing; none does,
+        // and one that did should narrow this rather than inherit it.
+        $middleware->trustProxies(at: '*');
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         // The framework's own 413, reworded. ValidatePostSize sits in the global stack

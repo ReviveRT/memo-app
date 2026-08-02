@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Repositories;
 
 use App\Services\Collections\Collection;
+use App\Services\Owners\OwnerContext;
 use App\Support\TimeWindow;
 use Illuminate\Database\DatabaseManager;
 use Illuminate\Database\QueryException;
@@ -104,7 +105,26 @@ class CollectionRepository
         ) AS recent_labels
         SQL;
 
-    public function __construct(private readonly DatabaseManager $db) {}
+    public function __construct(
+        private readonly DatabaseManager $db,
+        private readonly OwnerContext $owner,
+    ) {}
+
+    /**
+     * The owner every statement in this class is scoped by. See MemoRepository::ownerId for
+     * why this is read at query time rather than at construction, and why a foreign row is
+     * answered as a 404 rather than a 403.
+     *
+     * Note that the two subqueries in COLUMNS -- the memo count and the recent labels -- carry
+     * no owner predicate of their own. They do not need one: 007_owners.sql constrains
+     * `memos.collection_id` against `(id, owner_id)`, so a memo filed into this collection
+     * provably shares its owner and a redundant filter here would only mask a broken
+     * constraint.
+     */
+    private function ownerId(): string
+    {
+        return $this->owner->current()->id;
+    }
 
     /**
      * The grid, newest first, narrowed by a name-or-contents search and a date window.
@@ -161,11 +181,14 @@ class CollectionRepository
      */
     public function list(?string $text, TimeWindow $window, int $limit): array
     {
+        // Seeded, not appended, for the reason MemoRepository::list gives: this predicate is
+        // the one no caller may omit, and it should be visible on the first line of the
+        // assembly rather than found by reading to the end of it.
         /** @var list<string> $where */
-        $where = [];
+        $where = ['c.owner_id = ?'];
 
         /** @var list<mixed> $bindings */
-        $bindings = [];
+        $bindings = [$this->ownerId()];
 
         if ($text !== null) {
             $where[] = '(c.name ILIKE ?'
@@ -200,7 +223,7 @@ class CollectionRepository
         $rows = $this->db->connection()->select(
             'SELECT '.self::COLUMNS
                 ."\nFROM collections c"
-                .($where === [] ? '' : "\nWHERE ".implode("\n  AND ", $where))
+                ."\nWHERE ".implode("\n  AND ", $where)
                 ."\nORDER BY c.created_at DESC"
                 ."\nLIMIT ?",
             $bindings,
@@ -242,8 +265,8 @@ class CollectionRepository
     {
         try {
             $rows = $this->db->connection()->selectFromWriteConnection(
-                'INSERT INTO collections AS c (id, name) VALUES (?, ?) RETURNING '.self::COLUMNS,
-                [$id, $name],
+                'INSERT INTO collections AS c (id, owner_id, name) VALUES (?, ?, ?) RETURNING '.self::COLUMNS,
+                [$id, $this->ownerId(), $name],
             );
         } catch (QueryException $e) {
             if (! MemoRepository::isSqlState($e, self::UNIQUE_VIOLATION)) {
@@ -291,8 +314,8 @@ class CollectionRepository
     {
         try {
             $rows = $this->db->connection()->selectFromWriteConnection(
-                'UPDATE collections AS c SET name = ? WHERE c.id = ? RETURNING '.self::COLUMNS,
-                [$name, $id],
+                'UPDATE collections AS c SET name = ? WHERE c.id = ? AND c.owner_id = ? RETURNING '.self::COLUMNS,
+                [$name, $id, $this->ownerId()],
             );
         } catch (QueryException $e) {
             if (! MemoRepository::isSqlState($e, self::UNIQUE_VIOLATION)) {
@@ -322,6 +345,9 @@ class CollectionRepository
      */
     public function delete(string $id): bool
     {
-        return $this->db->connection()->delete('DELETE FROM collections WHERE id = ?', [$id]) > 0;
+        return $this->db->connection()->delete(
+            'DELETE FROM collections WHERE id = ? AND owner_id = ?',
+            [$id, $this->ownerId()],
+        ) > 0;
     }
 }

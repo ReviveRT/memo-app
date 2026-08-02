@@ -91,6 +91,20 @@ DEFAULT_AUDIO_DIR = "/data/audio"
 # providers silently requested a model the other has never heard of.
 DEFAULT_GROQ_STT_MODEL = "whisper-large-v3-turbo"
 
+# What `AUDIO_BUCKET_REGION` means when it is not set. Cloudflare R2 requires the
+# literal "auto" and ignores it; real S3 needs its own, so this is the default that
+# makes the intended target work without configuration. api/config/filesystems.php
+# carries the same default for the same reason.
+DEFAULT_AUDIO_BUCKET_REGION = "auto"
+
+# Everything a bucket needs beyond its name. Named here rather than inline in the
+# check below so the error message and the parsing cannot drift apart.
+REQUIRED_WITH_BUCKET = (
+    "AUDIO_BUCKET_ENDPOINT",
+    "AUDIO_BUCKET_KEY",
+    "AUDIO_BUCKET_SECRET",
+)
+
 # Mirrors docker-compose.yml. `local` rather than `none`, on the same argument
 # DEFAULT_STT_PROVIDER makes: the committed default must mean "the feature works",
 # because a stack that silently ships without titles and summaries is
@@ -283,6 +297,25 @@ class Settings:
     groq_api_key: str | None
     groq_stt_model: str
 
+    # Where recordings live when this deployment keeps them in a bucket rather than
+    # on the shared `audio` volume (memo_ai/blobs.py has why that became necessary).
+    #
+    # **`audio_bucket` alone decides**, matching the API's AppServiceProvider: a
+    # driver name would be a second way to spell the same fact and a first way to
+    # spell a contradiction. Empty means the volume, which is what local compose and
+    # every test get without setting anything.
+    #
+    # All optional, so a stack using the volume is not asked for credentials it has
+    # no use for. A bucket named without the rest of these is caught at parse time by
+    # the check in `from_env` rather than on the first voice memo -- a half-configured
+    # bucket is a deployment mistake, and the worker should refuse to start rather
+    # than fail memos one at a time.
+    audio_bucket: str | None
+    audio_bucket_endpoint: str | None
+    audio_bucket_region: str
+    audio_bucket_key: str | None
+    audio_bucket_secret: str | None
+
     # The enrichment pass (MEMO-21). Two settings and no fallback name, unlike
     # transcription: there is one enricher and giving up on it is not a failure,
     # so there is nothing for a second provider to be a second opinion about.
@@ -325,6 +358,10 @@ class Settings:
         """
         source = os.environ if env is None else env
 
+        # Before anything is constructed, so a half-configured bucket is one error naming
+        # the variables rather than a Settings that looks fine until the first voice memo.
+        _check_bucket(source)
+
         return cls(
             # No default. Every other value here has a sensible one; a
             # connection string does not, and inventing localhost would turn a
@@ -343,6 +380,20 @@ class Settings:
             # to Groq and get a 401 back instead of the sentence naming the variable.
             groq_api_key=_optional(source, "GROQ_API_KEY", None),
             groq_stt_model=_string(source, "GROQ_STT_MODEL", DEFAULT_GROQ_STT_MODEL),
+            # `_optional` throughout, so an unset variable and an empty one are the
+            # same absence -- rule 1 again, and it is what makes `audio_bucket` a
+            # usable switch: `docker compose up` with no `.env` passes empty strings
+            # for all of these, and a truthiness test on `''` would read as "bucket
+            # configured" and send every worker looking for a bucket named nothing.
+            audio_bucket=_optional(source, "AUDIO_BUCKET", None),
+            audio_bucket_endpoint=_optional(source, "AUDIO_BUCKET_ENDPOINT", None),
+            # 'auto' is what R2 requires and ignores. Real S3 needs its own, so this
+            # is a setting with R2's answer as the default -- matching the `audio`
+            # disk in api/config/filesystems.php, which has the same default for the
+            # same reason.
+            audio_bucket_region=_string(source, "AUDIO_BUCKET_REGION", DEFAULT_AUDIO_BUCKET_REGION),
+            audio_bucket_key=_optional(source, "AUDIO_BUCKET_KEY", None),
+            audio_bucket_secret=_optional(source, "AUDIO_BUCKET_SECRET", None),
             # Not validated here, deliberately, and the same way STT_PROVIDER is
             # not: the set of names lives in memo_ai/enrich/__init__.py beside the
             # classes it maps to, and a second copy of it in config parsing is a
@@ -384,6 +435,42 @@ class Settings:
                 source, "REAPER_INTERVAL_SECONDS", DEFAULT_REAPER_INTERVAL_SECONDS
             ),
             log_level=_log_level(source, "LOG_LEVEL", DEFAULT_LOG_LEVEL),
+        )
+
+    def uses_bucket(self) -> bool:
+        """
+        Whether recordings live in a bucket rather than on ``audio_dir``.
+
+        One question with one answer, asked by ``pipeline.owed_audio``. A method rather
+        than a truthiness test at the call site so that "what counts as configured" is
+        decided here, next to the check below that guarantees the rest of the settings are
+        present whenever this is true.
+        """
+        return bool(self.audio_bucket)
+
+
+def _check_bucket(source: Mapping[str, str]) -> None:
+    """
+    Refuse a half-configured bucket at parse time.
+
+    A bucket named with no endpoint or no credentials is a deployment mistake, and the
+    alternative to catching it here is catching it once per voice memo: each one claims,
+    fails to sign or fails to connect, and lands on the row as an error about the bucket
+    being unreachable. That is a slow, expensive and misleading way to report a typo in an
+    environment variable.
+
+    Only checked when a bucket is named, so a stack using the volume -- local compose,
+    every test -- is never asked for credentials it has no use for.
+    """
+    if not source.get("AUDIO_BUCKET"):
+        return
+
+    missing = [key for key in REQUIRED_WITH_BUCKET if not source.get(key)]
+
+    if missing:
+        raise ConfigError(
+            f"AUDIO_BUCKET is set, so {', '.join(missing)} must be set too. "
+            "Unset AUDIO_BUCKET to keep recordings on the audio volume."
         )
 
 

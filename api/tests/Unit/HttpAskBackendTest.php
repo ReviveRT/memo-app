@@ -29,6 +29,13 @@ final class HttpAskBackendTest extends TestCase
 {
     private const URL = 'http://ai-api:8000';
 
+    /**
+     * Any owner id. This class is about the transport, not about scoping -- what it has to
+     * show is that whatever it is given reaches the wire, which the assertion in
+     * test_the_question_is_posted_as_json_to_the_ask_path covers.
+     */
+    private const OWNER = '0192f3a1-0000-7000-8000-000000000001';
+
     private function backend(): HttpAskBackend
     {
         return new HttpAskBackend(self::URL, connectTimeout: 5, readTimeout: 210);
@@ -38,12 +45,17 @@ final class HttpAskBackendTest extends TestCase
     {
         Http::fake([self::URL.'/ask' => Http::response("{\"type\":\"done\"}\n", 200)]);
 
-        iterator_to_array($this->backend()->ask('what about the dentist'));
+        iterator_to_array($this->backend()->ask('what about the dentist', self::OWNER));
 
         Http::assertSent(
             fn ($request): bool => $request->url() === self::URL.'/ask'
                 && $request->method() === 'POST'
-                && $request['question'] === 'what about the dentist',
+                && $request['question'] === 'what about the dentist'
+                // The owner travels in the body beside the question. Asserted here because
+                // ai-api refuses a request without it, so a regression that dropped this
+                // field would surface as every Ask failing rather than as a leak -- but it
+                // would surface at runtime, and this is where it costs nothing to catch.
+                && $request['owner_id'] === self::OWNER,
         );
     }
 
@@ -53,7 +65,7 @@ final class HttpAskBackendTest extends TestCase
 
         Http::fake([self::URL.'/ask' => Http::response($answer, 200)]);
 
-        $chunks = iterator_to_array($this->backend()->ask('anything at all'));
+        $chunks = iterator_to_array($this->backend()->ask('anything at all', self::OWNER));
 
         $this->assertSame($answer, implode('', $chunks));
     }
@@ -71,7 +83,7 @@ final class HttpAskBackendTest extends TestCase
     {
         Http::fake([self::URL.'/ask' => Http::response("{\"type\":\"done\"}\n", 200)]);
 
-        $this->backend()->ask('what about the dentist');
+        $this->backend()->ask('what about the dentist', self::OWNER);
 
         Http::assertSentCount(1);
     }
@@ -91,7 +103,7 @@ final class HttpAskBackendTest extends TestCase
         $this->expectException(AskUnavailable::class);
         $this->expectExceptionMessage('The local model is not in this image.');
 
-        $this->backend()->ask('what about the dentist');
+        $this->backend()->ask('what about the dentist', self::OWNER);
     }
 
     public function test_a_503_with_nothing_useful_in_it_falls_back_to_our_own_sentence(): void
@@ -101,7 +113,7 @@ final class HttpAskBackendTest extends TestCase
         $this->expectException(AskUnavailable::class);
         $this->expectExceptionMessage('still loading its model');
 
-        $this->backend()->ask('what about the dentist');
+        $this->backend()->ask('what about the dentist', self::OWNER);
     }
 
     public function test_any_other_status_names_itself(): void
@@ -111,7 +123,7 @@ final class HttpAskBackendTest extends TestCase
         $this->expectException(AskUnavailable::class);
         $this->expectExceptionMessage('answered 500');
 
-        $this->backend()->ask('what about the dentist');
+        $this->backend()->ask('what about the dentist', self::OWNER);
     }
 
     public function test_a_connection_failure_names_the_container_rather_than_the_host(): void
@@ -119,7 +131,7 @@ final class HttpAskBackendTest extends TestCase
         Http::fake(fn () => throw new ConnectionException('cURL error 6: Could not resolve host'));
 
         try {
-            $this->backend()->ask('what about the dentist');
+            $this->backend()->ask('what about the dentist', self::OWNER);
 
             $this->fail('Expected AskUnavailable.');
         } catch (AskUnavailable $e) {

@@ -286,6 +286,46 @@ final class MemoAudioEndpointTest extends TestCase
             ->assertJsonPath('message', 'The recording for that memo is no longer on the audio volume.');
     }
 
+    public function test_a_bucket_deployment_redirects_to_a_signed_url_instead_of_serving_bytes(): void
+    {
+        // The branch S3AudioStorage takes. Standing in for it with a double rather than a real
+        // bucket, because what has to be pinned here is the *controller's* choice -- ask
+        // temporaryUrl first, redirect when it answers -- and that is a decision this process
+        // makes. Whether the signature is valid is the AWS SDK's problem and not something a
+        // fake could tell us anyway.
+        $storage = new RecordingAudioStorage;
+        $storage->signedUrl = 'https://bucket.example/audio/key?X-Amz-Signature=stub';
+        $this->app->instance(AudioStorage::class, $storage);
+
+        $response = $this->get($this->url());
+
+        $response->assertRedirect('https://bucket.example/audio/key?X-Amz-Signature=stub');
+
+        // Not cached for the year the local branch uses. The bytes are immutable; this
+        // pointer to them expires in minutes, and a browser holding a stale signed URL cannot
+        // recover from it.
+        // A fraction of the signature's 300s life, not all of it: a redirect cached right up
+        // to the expiry would be followed with a second of validity left.
+        $this->assertStringContainsString('max-age=75', $response->headers->get('Cache-Control'));
+        $this->assertStringContainsString('private', $response->headers->get('Cache-Control'));
+    }
+
+    public function test_the_signed_url_is_only_minted_after_the_owner_check(): void
+    {
+        // The ordering the whole scheme rests on: a signed URL carries no cookie, so once it
+        // is issued S3 will serve those bytes to anybody holding it. If the controller could
+        // mint one before the scoped lookup, a foreign memo id would yield a working link to
+        // somebody else's recording. `rows = []` is what a foreign memo looks like coming out
+        // of an owner-scoped query -- and no URL may be signed for it.
+        $storage = new RecordingAudioStorage;
+        $storage->signedUrl = 'https://bucket.example/should-never-be-issued';
+        $this->app->instance(AudioStorage::class, $storage);
+
+        $this->repository->rows = [];
+
+        $this->get($this->url())->assertNotFound();
+    }
+
     public function test_a_stored_type_this_app_would_not_accept_is_served_as_octet_stream(): void
     {
         // Unreachable through the upload route -- SniffedAudioType refuses everything not on

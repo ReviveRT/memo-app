@@ -178,6 +178,24 @@ services:
       # container's proxy. Detail goes to stderr instead.
       APP_DEBUG: ${APP_DEBUG:-false}
       LOG_CHANNEL: ${LOG_CHANNEL:-stderr}
+
+      # Whose memos are whose. Neither needs setting locally; both are forwarded so
+      # that a value in .env is not a documented variable that quietly does nothing.
+      # db/migrations/007_owners.sql has the design.
+      OWNER_COOKIE: ${OWNER_COOKIE:-memo_owner}
+      OWNER_COOKIE_DAYS: ${OWNER_COOKIE_DAYS:-400}
+
+      # Recordings in a bucket rather than on the `audio` volume. Empty by default,
+      # which is what compose wants -- the volume is shared between these containers
+      # and is not ephemeral here. Forwarded anyway, and the worker gets the same six
+      # values, so the two cannot end up pointed at different storage.
+      # See deploy/README.md.
+      AUDIO_BUCKET: ${AUDIO_BUCKET:-}
+      AUDIO_BUCKET_ENDPOINT: ${AUDIO_BUCKET_ENDPOINT:-}
+      AUDIO_BUCKET_KEY: ${AUDIO_BUCKET_KEY:-}
+      AUDIO_BUCKET_SECRET: ${AUDIO_BUCKET_SECRET:-}
+      AUDIO_BUCKET_REGION: ${AUDIO_BUCKET_REGION:-auto}
+      AUDIO_BUCKET_PATH_STYLE: ${AUDIO_BUCKET_PATH_STYLE:-false}
     volumes:
       # Target repeats the default literally rather than using the anchor: a
       # YAML alias cannot be spliced into part of a scalar, and the mount point
@@ -337,6 +355,17 @@ services:
       # picks a provider.
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       GROQ_STT_MODEL: ${GROQ_STT_MODEL:-whisper-large-v3-turbo}
+      # Recordings in a bucket rather than on the `audio` volume. Empty by default,
+      # which is what compose wants -- the volume is shared between these containers
+      # and is not ephemeral here. Forwarded anyway so that `AUDIO_BUCKET=` in a
+      # local .env actually reaches the process, rather than being a documented
+      # variable that silently does nothing. See deploy/README.md.
+      AUDIO_BUCKET: ${AUDIO_BUCKET:-}
+      AUDIO_BUCKET_ENDPOINT: ${AUDIO_BUCKET_ENDPOINT:-}
+      AUDIO_BUCKET_KEY: ${AUDIO_BUCKET_KEY:-}
+      AUDIO_BUCKET_SECRET: ${AUDIO_BUCKET_SECRET:-}
+      AUDIO_BUCKET_REGION: ${AUDIO_BUCKET_REGION:-auto}
+      AUDIO_BUCKET_PATH_STYLE: ${AUDIO_BUCKET_PATH_STYLE:-false}
       # The enrichment pass — title, summary, tags, category (MEMO-21).
       #
       # `local` runs Qwen2.5-1.5B-Instruct in the worker process from the GGUF

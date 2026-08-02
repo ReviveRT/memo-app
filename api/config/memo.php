@@ -103,4 +103,39 @@ return [
         'read_timeout' => Env::positiveInt('AI_API_READ_TIMEOUT', 210),
     ],
 
+    // --- Owners --------------------------------------------------------------
+    //
+    // Who a request belongs to, and for how long a browser is remembered.
+    // db/migrations/007_owners.sql has the design and its limits; these are the two
+    // knobs a deployment might legitimately want to turn.
+    'owner' => [
+
+        // The cookie name. Configurable for one real case: two deployments of this app
+        // on different paths of the same hostname would otherwise overwrite each
+        // other's cookie, because cookies are scoped by domain and not by origin or
+        // port. Nothing else should change it -- the name is not a secret and renaming
+        // it silently logs every existing browser out.
+        'cookie' => Env::string('OWNER_COOKIE', 'memo_owner'),
+
+        // How long a browser keeps its identity without visiting, in days.
+        //
+        // 400 is not a round number, it is a ceiling. Chrome caps cookie lifetimes at
+        // 400 days and silently clamps anything longer, so a larger value here would
+        // be a promise the browser does not keep. Safari is stricter still and expires
+        // script-writable storage far sooner, though not this -- an HttpOnly cookie set
+        // by the server is exempt from ITP's seven-day cap, which is a second reason
+        // this identity lives in a cookie rather than in localStorage.
+        //
+        // The window slides. App\Http\Middleware\ResolveOwner re-sends the cookie on
+        // use, so 400 days means "since you last opened the app", not "since you first
+        // did". Somebody who uses this monthly never loses anything.
+        //
+        // It also has to agree with `memo:prune-owners`, whose cutoff defaults to this
+        // number: deleting owners sooner
+        // than their cookies expire means a browser presenting a perfectly valid token
+        // that no longer resolves, which reads to the user as their memos vanishing.
+        // Keep the prune cutoff at or above this number.
+        'lifetime_days' => Env::positiveInt('OWNER_COOKIE_DAYS', 400),
+    ],
+
 ];

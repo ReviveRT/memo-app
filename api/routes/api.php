@@ -16,6 +16,7 @@ use App\Http\Controllers\AskController;
 use App\Http\Controllers\CollectionController;
 use App\Http\Controllers\HealthController;
 use App\Http\Controllers\MemoController;
+use App\Http\Controllers\OwnerController;
 use App\Http\Controllers\ReminderController;
 use Illuminate\Support\Facades\Route;
 
@@ -195,3 +196,34 @@ Route::patch('/reminders/{reminder}', [ReminderController::class, 'update'])
 Route::delete('/reminders/{reminder}', [ReminderController::class, 'destroy'])
     ->whereUuid('reminder')
     ->name('reminders.destroy');
+
+// --- Owners ----------------------------------------------------------------
+//
+// Every route above answers only for the browser that asked, and these three are what
+// decide which browser that is. There is no login here and no 401 anywhere in this file --
+// see db/migrations/007_owners.sql for why this application has owners rather than accounts,
+// and for the honest limits of that choice.
+//
+// `owner` is the frontend's bootstrap and the one safe read allowed to create an identity
+// (App\Http\Middleware\ResolveOwner::needsOwner names this path). It is awaited before any
+// other request on a cold load, which is what stops three parallel cookie-less fetches from
+// minting three owners and keeping whichever Set-Cookie arrived last.
+Route::get('/owner', [OwnerController::class, 'show'])->name('owner.show');
+
+// The only response in this application that contains the bearer token, which is why it is
+// a POST that changes nothing -- OwnerController::claimLink has the argument. Reaching it
+// requires the cookie, so this hands the secret back to somebody who already has it; it
+// grants nothing they could not already do.
+Route::post('/owner/claim-link', [OwnerController::class, 'claimLink'])->name('owner.claim-link');
+
+// Adopting an identity in this browser. Opened by a person from an address bar rather than
+// fetched by the frontend, so it answers a redirect to the SPA rather than JSON -- including
+// for a bad token, which redirects with `?claim=` set rather than showing somebody a 404
+// document.
+//
+// Deliberately *not* whereUuid, unlike every other parameterised route in this file. The
+// token is not a uuid and must not be one: 007_owners.sql has why a UUIDv7 is disqualifying
+// for a secret. The format check belongs to App\Support\OwnerToken and the controller calls
+// it, so a malformed token is answered with the same redirect as an unknown one rather than
+// falling through to a route-not-found.
+Route::get('/claim/{token}', [OwnerController::class, 'claim'])->name('owner.claim');

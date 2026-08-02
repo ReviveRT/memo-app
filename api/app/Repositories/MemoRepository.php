@@ -8,6 +8,7 @@ use App\Services\Memos\DeletedMemo;
 use App\Services\Memos\Memo;
 use App\Services\Memos\MemoAudio;
 use App\Services\Memos\MemoQuery;
+use App\Services\Owners\OwnerContext;
 use Illuminate\Database\DatabaseManager;
 use Illuminate\Database\QueryException;
 use RuntimeException;
@@ -139,7 +140,32 @@ class MemoRepository
      */
     private const FOREIGN_KEY_VIOLATION = '23503';
 
-    public function __construct(private readonly DatabaseManager $db) {}
+    public function __construct(
+        private readonly DatabaseManager $db,
+        private readonly OwnerContext $owner,
+    ) {}
+
+    /**
+     * The owner every statement in this class is scoped by.
+     *
+     * A method rather than a property read at construction, because the container may build
+     * this repository before ResolveOwner has run -- see OwnerContext, which throws if it is
+     * asked for an owner that was never resolved. Calling it at query time is what makes
+     * that throw impossible to reach through an HTTP request and guaranteed to fire outside
+     * one.
+     *
+     * **Every statement below binds this in its WHERE, and none of them check ownership
+     * afterwards in PHP.** That is deliberate and it is the reason no method here answers
+     * 403. A memo belonging to somebody else matches no row, which is identical to a memo
+     * that does not exist, which the controllers already turn into a 404. So a probe for
+     * another owner's memo id cannot tell an id that is taken from one that is free -- the
+     * scoping and the not-found path are the same code, and there is no second answer to
+     * accidentally leak through.
+     */
+    private function ownerId(): string
+    {
+        return $this->owner->current()->id;
+    }
 
     /**
      * One statement, and the row it just wrote comes back with it.
@@ -197,9 +223,9 @@ class MemoRepository
         // because config/database.php configures no read/write split, but the day
         // one is added a plain select() here would send an INSERT to a replica.
         $rows = $this->db->connection()->selectFromWriteConnection(
-            'INSERT INTO memos (id, source, status, transcript, audio_path, audio_mime, language)'
-                .' VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING '.self::COLUMNS,
-            [$id, $source, $status, $transcript, $audioPath, $audioMime, $language],
+            'INSERT INTO memos (id, owner_id, source, status, transcript, audio_path, audio_mime, language)'
+                .' VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING '.self::COLUMNS,
+            [$id, $this->ownerId(), $source, $status, $transcript, $audioPath, $audioMime, $language],
         );
 
         $row = $rows[0] ?? null;
@@ -226,11 +252,14 @@ class MemoRepository
      * collection scope -- because eight combinations is eight methods, and the point of
      * MemoQuery is that the call site names what it wants instead of picking one.
      *
-     * With no filters at all the assembled statement is character-for-character the old
-     * `recent()`: `SELECT ... FROM memos ORDER BY created_at DESC LIMIT ?`. So the
-     * unfiltered list keeps the plan it had -- an Index Scan straight down
-     * memos_created_idx -- and there is no `WHERE TRUE` in front of it to cost that.
-     * MemoService no longer needs its own branch for the same reason.
+     * With no filters at all the assembled statement is now
+     * `SELECT ... FROM memos WHERE owner_id = ? ORDER BY created_at DESC LIMIT ?`, which
+     * memos_owner_created_idx serves as an Index Scan in output order -- the same shape the
+     * unfiltered list had before owners existed, one equality deeper.
+     *
+     * That predicate is not optional and has no filter behind it. It is seeded before the
+     * assembly below rather than added to it; 007_owners.sql has why every read in this
+     * application is scoped and what it would mean if one were not.
      *
      * **The text predicate is unchanged, and its three arms still are what they were.**
      *
@@ -292,29 +321,42 @@ class MemoRepository
      * ordering that makes the date filter legible: a list filtered to a range should read
      * in the same direction as the unfiltered one.
      *
-     * **The plans, measured on 5,002 rows.** Worth recording because the interesting one
-     * is not the one that sounds interesting:
+     * **The plans below were measured on 5,002 rows before this table had owners, and are
+     * left here as history rather than as current fact.** Every one of them was taken
+     * against a query with no leading equality, and 007_owners.sql added one to all four
+     * shapes plus the two indexes they name have been replaced by owner-first composites.
+     * Which plan each reading now gets has not been re-measured; restating these numbers as
+     * though it had would be worse than leaving the question open. What they still document
+     * is the *reasoning* -- which is why they are kept:
      *
-     *   * `collection = <uuid>` is a Bitmap Index Scan on memos_collection_idx with the
-     *     text arms as a recheck filter.
-     *   * a date window is an Index Cond on memos_created_idx -- `created_at >= ... AND
-     *     created_at < ...` -- with everything else filtered on top. That is the plan a
-     *     bounded list wants: the index walk is already in output order and the window
-     *     ends it.
-     *   * `collection = none` with four fifths of the table unfiled does *not* use
-     *     memos_collection_idx, and should not: it walks memos_created_idx and filters,
-     *     which the LIMIT makes cheaper because nearly every row is a match. 003's
-     *     comment on that index has the inverted measurement.
+     *   * `collection = <uuid>` was a Bitmap Index Scan on memos_collection_idx (now
+     *     memos_owner_collection_idx) with the text arms as a recheck filter.
+     *   * a date window was an Index Cond on memos_created_idx (now
+     *     memos_owner_created_idx) -- `created_at >= ... AND created_at < ...` -- with
+     *     everything else filtered on top. That is the plan a bounded list wants: the index
+     *     walk is already in output order and the window ends it.
+     *   * `collection = none` with four fifths of the table unfiled did *not* use
+     *     memos_collection_idx, and should not have: it walked memos_created_idx and
+     *     filtered, which the LIMIT makes cheaper because nearly every row is a match. 003's
+     *     comment on that index has the inverted measurement. Note that the premise --
+     *     "four fifths of the table" -- is itself now per-owner, so this is the reading most
+     *     likely to have changed.
      *
      * @return list<Memo>
      */
     public function list(MemoQuery $query): array
     {
+        // The owner leads, always, and is the one predicate no caller can omit. It is
+        // seeded here rather than appended with the optional filters so that it cannot be
+        // reordered behind them by a later edit -- memos_owner_created_idx wants the
+        // equality first, and more importantly a reader checking that this list is scoped
+        // should find the answer on the first line of the method rather than by reading to
+        // the end of the assembly.
         /** @var list<string> $where */
-        $where = [];
+        $where = ['owner_id = ?'];
 
         /** @var list<mixed> $bindings */
-        $bindings = [];
+        $bindings = [$this->ownerId()];
 
         if ($query->text !== null) {
             // Built from the constant rather than written out, so adding a status to
@@ -364,10 +406,13 @@ class MemoRepository
         // is defence in depth rather than the only check.
         $bindings[] = $query->limit;
 
+        // No `$where === []` branch any more: the owner predicate above guarantees at least
+        // one, so the WHERE clause is unconditional and the empty case it used to guard
+        // against is unreachable.
         $rows = $this->db->connection()->select(
             'SELECT '.self::COLUMNS
                 ."\nFROM memos"
-                .($where === [] ? '' : "\nWHERE ".implode("\n  AND ", $where))
+                ."\nWHERE ".implode("\n  AND ", $where)
                 ."\nORDER BY created_at DESC"
                 ."\nLIMIT ?",
             $bindings,
@@ -388,8 +433,8 @@ class MemoRepository
     public function find(string $id): ?Memo
     {
         $rows = $this->db->connection()->select(
-            'SELECT '.self::COLUMNS.' FROM memos WHERE id = ?',
-            [$id],
+            'SELECT '.self::COLUMNS.' FROM memos WHERE id = ? AND owner_id = ?',
+            [$id, $this->ownerId()],
         );
 
         $row = $rows[0] ?? null;
@@ -422,12 +467,21 @@ class MemoRepository
      * and nothing writes `''`, so this is defending against a hand-written row -- but the cost
      * of not doing it is a key that AudioStorage refuses with a StorageException, which is a
      * 500 for a memo that simply has no recording.
+     *
+     * **This is the one owner check in the application that no amount of frontend care could
+     * have supplied.** The request that reaches here is issued by an `<audio>` element's
+     * `src` (MemoDialog.vue), not by the fetch wrapper -- the browser makes it, so no code in
+     * web/src can attach anything to it. An identity carried in a header or in localStorage
+     * would therefore have left recordings readable by memo id alone, and would have done so
+     * silently, because every JSON route would have looked correctly scoped. The identity is
+     * a cookie precisely so that the browser attaches it to a request the application never
+     * sees. See 007_owners.sql.
      */
     public function audioFor(string $id): ?MemoAudio
     {
         $rows = $this->db->connection()->select(
-            'SELECT audio_path, audio_mime FROM memos WHERE id = ?',
-            [$id],
+            'SELECT audio_path, audio_mime FROM memos WHERE id = ? AND owner_id = ?',
+            [$id, $this->ownerId()],
         );
 
         $row = $rows[0] ?? null;
@@ -471,6 +525,16 @@ class MemoRepository
      * apart afterwards and does not need to; the message it answers with names both
      * possibilities.
      *
+     * **There is a third failure mode and it takes the same path: a collection that exists
+     * and belongs to somebody else.** Nothing in this statement checks for it, deliberately.
+     * 007_owners.sql makes `memos.collection_id` a composite foreign key over
+     * `(collection_id, owner_id)`, so a stranger's collection fails the constraint exactly as
+     * an absent one does, raises the same 23503, and is caught below into the same null. The
+     * check lives in the schema rather than here because a predicate in this method would
+     * hold only for as long as this stays the only statement writing the column, and because
+     * "no such collection" and "not your collection" are the same mistake from the client's
+     * side and deserve one answer.
+     *
      * Not wrapped in a transaction: it is one statement.
      *
      * @param  ?string  $collectionId  Null unfiles the memo. That is a real operation
@@ -483,8 +547,8 @@ class MemoRepository
     {
         try {
             $rows = $this->db->connection()->selectFromWriteConnection(
-                'UPDATE memos SET collection_id = ? WHERE id = ? RETURNING '.self::COLUMNS,
-                [$collectionId, $memoId],
+                'UPDATE memos SET collection_id = ? WHERE id = ? AND owner_id = ? RETURNING '.self::COLUMNS,
+                [$collectionId, $memoId, $this->ownerId()],
             );
         } catch (QueryException $e) {
             // Rethrown unless it is the one code that means "you named a collection that
@@ -587,9 +651,10 @@ class MemoRepository
                        enriched_at = NULL,
                        enrichment_error = NULL
                  WHERE id = ?
+                   AND owner_id = ?
                 RETURNING
                 SQL.' '.self::COLUMNS,
-            [$transcript, $memoId],
+            [$transcript, $memoId, $this->ownerId()],
         );
 
         $row = $rows[0] ?? null;
@@ -600,8 +665,8 @@ class MemoRepository
     public function rename(string $memoId, ?string $title): ?Memo
     {
         $rows = $this->db->connection()->selectFromWriteConnection(
-            'UPDATE memos SET title = ? WHERE id = ? RETURNING '.self::COLUMNS,
-            [$title, $memoId],
+            'UPDATE memos SET title = ? WHERE id = ? AND owner_id = ? RETURNING '.self::COLUMNS,
+            [$title, $memoId, $this->ownerId()],
         );
 
         $row = $rows[0] ?? null;
@@ -664,10 +729,11 @@ class MemoRepository
                        next_attempt_at = now(),
                        locked_at = NULL
                  WHERE id = ?
+                   AND owner_id = ?
                    AND status = 'failed'
                 RETURNING
                 SQL.' '.self::COLUMNS,
-            [$memoId],
+            [$memoId, $this->ownerId()],
         );
 
         $row = $rows[0] ?? null;
@@ -702,8 +768,8 @@ class MemoRepository
     public function delete(string $memoId): ?DeletedMemo
     {
         $rows = $this->db->connection()->selectFromWriteConnection(
-            'DELETE FROM memos WHERE id = ? RETURNING '.self::COLUMNS.', audio_path',
-            [$memoId],
+            'DELETE FROM memos WHERE id = ? AND owner_id = ? RETURNING '.self::COLUMNS.', audio_path',
+            [$memoId, $this->ownerId()],
         );
 
         $row = $rows[0] ?? null;

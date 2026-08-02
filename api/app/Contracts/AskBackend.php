@@ -43,6 +43,13 @@ interface AskBackend
      * response has begun. HttpAskBackend does the request here and returns a generator over
      * the body.
      *
+     * @param  string  $ownerId  Whose memos to answer from. Not optional, and not defaulted:
+     *                           an implementation that could be called without it would be
+     *                           one retrieval away from quoting a stranger's transcript into
+     *                           somebody's answer, which is the worst-shaped leak this
+     *                           application can produce -- the private text is not merely
+     *                           reachable, it is read aloud. The Python side refuses a
+     *                           request that omits it for the same reason.
      * @return iterable<string> Chunks of NDJSON, in order, split wherever the network split
      *                          them. A chunk is not a line: a caller writing these straight
      *                          to the client does not care, and one that wanted lines would
@@ -50,5 +57,5 @@ interface AskBackend
      *
      * @throws AskUnavailable When there is nothing to ask, or it refused before answering.
      */
-    public function ask(string $question): iterable;
+    public function ask(string $question, string $ownerId): iterable;
 }

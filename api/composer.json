@@ -9,7 +9,8 @@
         "ext-json": "*",
         "ext-pdo": "*",
         "ext-pdo_pgsql": "*",
-        "laravel/framework": "^13.8"
+        "laravel/framework": "^13.8",
+        "league/flysystem-aws-s3-v3": "^3.0"
     },
     "require-dev": {
         "laravel/pail": "^1.2.5",

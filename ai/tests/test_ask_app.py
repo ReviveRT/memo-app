@@ -29,6 +29,11 @@ from tests.support import FakeConnection, RecordingAskModel
 
 CREATED_AT = datetime(2026, 7, 31, 12, 0, 0, 123456, tzinfo=UTC)
 
+# A valid owner for the requests that are supposed to succeed. This service does not
+# authenticate it -- the api container resolved it from a cookie and ai-api is not
+# reachable from anywhere else -- so any well-formed uuid is as good as another here.
+OWNER = "01900000-0000-7000-8000-0000000000aa"
+
 SETTINGS = Settings.from_env({"DATABASE_URL": "postgresql://memo:memo@db:5432/memo"})
 
 
@@ -98,7 +103,7 @@ def test_the_answer_is_one_json_object_per_line(database):
     model = RecordingAskModel(chunks=("You should ", "call [1]."))
 
     with client(model) as http:
-        response = http.post("/ask", json={"question": "what about the dentist"})
+        response = http.post("/ask", json={"question": "what about the dentist", "owner_id": OWNER})
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/x-ndjson")
@@ -113,7 +118,7 @@ def test_the_answer_is_one_json_object_per_line(database):
 
 def test_the_answer_is_never_stored_by_a_cache(database):
     with client(RecordingAskModel()) as http:
-        response = http.post("/ask", json={"question": "what about the dentist"})
+        response = http.post("/ask", json={"question": "what about the dentist", "owner_id": OWNER})
 
     assert "no-store" in response.headers["cache-control"]
 
@@ -137,7 +142,7 @@ def test_the_lines_are_ascii_whatever_the_memo_was_written_in(database):
     )
 
     with client(RecordingAskModel()) as http:
-        response = http.post("/ask", json={"question": "what about the meeting"})
+        response = http.post("/ask", json={"question": "what about the meeting", "owner_id": OWNER})
 
     assert response.content.isascii()
     assert events(response)[0]["sources"][0]["title"] == "Встреча"
@@ -163,16 +168,26 @@ def test_the_model_is_loaded_when_the_service_starts_rather_than_on_the_first_qu
     "body",
     [
         {},
-        {"question": ""},
-        {"question": "a"},
-        {"question": "   "},
-        {"question": " a "},
-        {"question": "a" * (MAX_QUESTION_CHARS + 1)},
-        {"question": 12},
-        {"question": None},
+        # Every question row carries a valid owner, so the 422 is provably about the
+        # question and not about the field beside it. Without that these would all still
+        # pass, for the wrong reason, the moment `owner_id` became required.
+        {"question": "", "owner_id": OWNER},
+        {"question": "a", "owner_id": OWNER},
+        {"question": "   ", "owner_id": OWNER},
+        {"question": " a ", "owner_id": OWNER},
+        {"question": "a" * (MAX_QUESTION_CHARS + 1), "owner_id": OWNER},
+        {"question": 12, "owner_id": OWNER},
+        {"question": None, "owner_id": OWNER},
+        # And the mirror: a good question with no owner, or one that is not a uuid.
+        # Refused here rather than defaulted, because the default would be "search
+        # everybody's memos" -- see the field's comment in memo_ai/ask/app.py.
+        {"question": "what about the dentist"},
+        {"question": "what about the dentist", "owner_id": None},
+        {"question": "what about the dentist", "owner_id": ""},
+        {"question": "what about the dentist", "owner_id": "not-a-uuid"},
     ],
 )
-def test_a_question_of_the_wrong_shape_is_refused_before_the_model_is_touched(database, body):
+def test_a_request_of_the_wrong_shape_is_refused_before_the_model_is_touched(database, body):
     """
     The whitespace rows are the interesting ones: they are refused because the field
     is stripped *before* the length rules, which is what makes this agree with
@@ -190,7 +205,7 @@ def test_a_question_of_the_wrong_shape_is_refused_before_the_model_is_touched(da
 
 def test_a_question_is_stripped_before_it_reaches_retrieval(database):
     with client(RecordingAskModel()) as http:
-        http.post("/ask", json={"question": "  what about the dentist \n"})
+        http.post("/ask", json={"question": "  what about the dentist \n", "owner_id": OWNER})
 
     assert database["connection"].executed[0][1] == {"question": "what about the dentist"}
 
@@ -206,7 +221,7 @@ def test_a_model_that_cannot_answer_is_a_503_rather_than_a_200_full_of_apology(d
     model = RecordingAskModel(state=state)
 
     with client(model) as http:
-        response = http.post("/ask", json={"question": "what about the dentist"})
+        response = http.post("/ask", json={"question": "what about the dentist", "owner_id": OWNER})
 
     assert response.status_code == 503
     assert response.json()["model"] == state
@@ -233,7 +248,7 @@ def test_a_database_that_is_not_answering_arrives_as_an_error_event(database):
     database["error"] = psycopg.OperationalError("connection refused")
 
     with client(RecordingAskModel()) as http:
-        response = http.post("/ask", json={"question": "what about the dentist"})
+        response = http.post("/ask", json={"question": "what about the dentist", "owner_id": OWNER})
 
     assert response.status_code == 200
 
@@ -250,7 +265,7 @@ def test_the_ask_connection_is_named_apart_from_the_workers(database):
     answer three things counted as four.
     """
     with client(RecordingAskModel()) as http:
-        http.post("/ask", json={"question": "what about the dentist"})
+        http.post("/ask", json={"question": "what about the dentist", "owner_id": OWNER})
 
     assert database["roles"] == ["ask"]
 

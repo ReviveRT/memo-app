@@ -1,0 +1,36 @@
+# Build context for deploy/Dockerfile, which builds from the repository root because it needs
+# api/, web/ and db/ together. Without this file that context includes ai/ -- whose image
+# bakes ~2.8 GB of models -- and every node_modules and vendor directory on disk, all of which
+# are sent to the daemon before the first instruction runs.
+
+.git
+.gitignore
+.claude
+
+# Not part of the production image at all: deploy/Dockerfile ships the API and the built SPA,
+# and deliberately not the two Python services. Their models will not fit in a free tier's
+# memory, and deploy/README.md has what to set to get transcription from a hosted provider
+# instead.
+ai/
+
+# Rebuilt inside the image by `npm ci` and `composer install`. Copying the host's copies in
+# would be slower *and* wrong -- they are built for the host's platform, and node_modules
+# carries compiled binaries that may not match the image's architecture.
+web/node_modules/
+web/dist/
+api/vendor/
+
+# Development-only, and each would change the built image if it leaked in.
+api/tests/
+api/phpunit.xml
+api/.env
+api/.env.*
+docker-compose.yml
+.env
+.env.*
+
+# Notes and documentation. Large, and read by people rather than by the runtime.
+NOTES.md
+README.md
+
+**/.DS_Store

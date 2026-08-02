@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Repositories;
 
+use App\Services\Owners\OwnerContext;
 use Illuminate\Database\DatabaseManager;
 use Illuminate\Database\QueryException;
 use stdClass;
@@ -40,7 +41,24 @@ class ReminderRepository
      */
     private const FOREIGN_KEY_VIOLATION = '23503';
 
-    public function __construct(private readonly DatabaseManager $db) {}
+    public function __construct(
+        private readonly DatabaseManager $db,
+        private readonly OwnerContext $owner,
+    ) {}
+
+    /**
+     * The owner every statement in this class is scoped by. See MemoRepository::ownerId.
+     *
+     * The predicate is on `r.owner_id` rather than on the joined `m.owner_id`, and that is the
+     * whole reason 007_owners.sql denormalised the column onto this table: the reminders the
+     * browser polls for are found through reminders_owner_due_idx as a range scan over one
+     * owner's undelivered rows, instead of walking every owner's in remind_at order and
+     * discarding them after the join. The join is still there, but only to label the memo.
+     */
+    private function ownerId(): string
+    {
+        return $this->owner->current()->id;
+    }
 
     /**
      * Every reminder still owed, soonest first, with just enough of its memo to name it.
@@ -83,11 +101,12 @@ class ReminderRepository
                     r.note
                 FROM reminders r
                 JOIN memos m ON m.id = r.memo_id
-                WHERE r.delivered_at IS NULL
+                WHERE r.owner_id = ?
+                  AND r.delivered_at IS NULL
                 ORDER BY r.remind_at
                 LIMIT ?
                 SQL,
-            [$limit],
+            [$this->ownerId(), $limit],
         );
     }
 
@@ -104,10 +123,31 @@ class ReminderRepository
      */
     public function insert(string $id, string $memoId, string $remindAt, ?string $note): bool
     {
+        // **INSERT ... SELECT rather than VALUES, and the SELECT is the ownership check.**
+        // `owner_id` is denormalised onto this table (007_owners.sql has why -- the due-poll
+        // index needs it), which raises the obvious question of how the copy is kept honest.
+        // The answer is that it is never supplied by a caller: it is read from the memo row in
+        // the same statement that files the reminder against it, so the two cannot disagree.
+        //
+        // The `AND m.owner_id = ?` in that SELECT is what stops one owner setting a reminder
+        // on another's memo. A foreign memo selects no row, so the INSERT writes nothing, and
+        // `insert()` returning 0 affected rows takes exactly the same path as a memo that does
+        // not exist -- which is already this method's 404. No new error case, and the check
+        // cannot be skipped by a caller who forgets, because there is no parameter for it.
+        //
+        // The foreign-key catch below is kept even though the SELECT now makes 23503 much
+        // harder to reach: a memo deleted between the SELECT and the write still races, and
+        // the catch is what turns that into the same 404 rather than a 500.
         try {
-            $this->db->connection()->insert(
-                'INSERT INTO reminders (id, memo_id, remind_at, note) VALUES (?, ?, ?, ?)',
-                [$id, $memoId, $remindAt, $note],
+            $affected = $this->db->connection()->affectingStatement(
+                <<<'SQL'
+                    INSERT INTO reminders (id, memo_id, owner_id, remind_at, note)
+                    SELECT ?, m.id, m.owner_id, ?, ?
+                      FROM memos m
+                     WHERE m.id = ?
+                       AND m.owner_id = ?
+                    SQL,
+                [$id, $remindAt, $note, $memoId, $this->ownerId()],
             );
         } catch (QueryException $e) {
             if (! MemoRepository::isSqlState($e, self::FOREIGN_KEY_VIOLATION)) {
@@ -117,7 +157,7 @@ class ReminderRepository
             return false;
         }
 
-        return true;
+        return $affected > 0;
     }
 
     /**
@@ -141,8 +181,8 @@ class ReminderRepository
     {
         $rows = $this->db->connection()->selectFromWriteConnection(
             'UPDATE reminders SET delivered_at = coalesce(delivered_at, now())'
-                .' WHERE id = ? RETURNING memo_id',
-            [$id],
+                .' WHERE id = ? AND owner_id = ? RETURNING memo_id',
+            [$id, $this->ownerId()],
         );
 
         $row = $rows[0] ?? null;
@@ -164,8 +204,8 @@ class ReminderRepository
     public function delete(string $id): ?string
     {
         $rows = $this->db->connection()->selectFromWriteConnection(
-            'DELETE FROM reminders WHERE id = ? RETURNING memo_id',
-            [$id],
+            'DELETE FROM reminders WHERE id = ? AND owner_id = ? RETURNING memo_id',
+            [$id, $this->ownerId()],
         );
 
         $row = $rows[0] ?? null;
