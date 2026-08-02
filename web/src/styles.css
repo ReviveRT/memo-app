@@ -32,6 +32,25 @@
     0 1px 2px color-mix(in srgb, var(--bg) 82%, transparent),
     0 2px 14px color-mix(in srgb, var(--bg) 70%, transparent);
 
+  /*
+   * The ask widget's sphere, in diameter.
+   *
+   * Up here rather than beside the widget's own rules at the end of the file, and both halves
+   * of that matter. It is a *shared* number -- `.askw__orb` is drawn at it, and the panel's
+   * own height is measured from it so an open panel cannot run off the top of the screen -- and
+   * two literals that have to agree is exactly what a custom property is for. And it has to be
+   * declared before the `max-width: 40rem` block that overrides it: both selectors are `:root`,
+   * so whichever is written later wins, and stated down there the desktop size would beat the
+   * phone's.
+   *
+   * 8rem on a desktop and 6.5 on a phone. The gap is smaller than it looks: 8rem is about a
+   * sixteenth of the width of a laptop window and 6.5rem is more than a quarter of a 375px
+   * screen, so the phone's sphere is by far the more prominent of the two. That is deliberate
+   * -- it is the one screen where the sphere is competing with nothing else for attention,
+   * and where a control has to be findable by thumb rather than by hover.
+   */
+  --ask-orb: 8rem;
+
   color-scheme: light dark;
 }
 
@@ -1949,6 +1968,15 @@ h1,
 /*
  * Fixed to the corner, so a reminder firing does not reflow the page under the cursor.
  *
+ * **The left corner, and it used to be the right one.** The ask widget now owns the bottom
+ * right, and two things stacking there was not a layout to be arranged -- the widget's panel is
+ * as tall as an answer and the toast column is as tall as however many memos are being written,
+ * so whichever went on top would sit over the other at the exact moment both were busy.
+ * Recording a memo is the thing that produces both at once.
+ *
+ * The width is capped so the two corners cannot meet on a laptop screen; below 40rem they would
+ * still overlap, and the narrow-screen block near the end of this file has what is done there.
+ *
  * This is one of the few things in the app that needs a z-index, and it needs a large one:
  * everything else on the page is at or below 0, but a native <dialog> renders in the top layer
  * and is *above any z-index at all*. So a toast cannot be layered over an open dialog by this
@@ -1958,13 +1986,13 @@ h1,
  */
 .toasts {
   position: fixed;
-  right: 1rem;
+  left: 1rem;
   bottom: 1rem;
   z-index: 10;
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
-  width: min(22rem, calc(100vw - 2rem));
+  width: min(22rem, calc(50vw - 2rem));
 
   /* So the empty live region never sits over the page catching clicks. */
   pointer-events: none;
@@ -2087,6 +2115,49 @@ h1,
     /* Cards nearly the width of the screen, so one is clearly "current" and the next peeks. */
     grid-auto-columns: minmax(13rem, 80vw);
   }
+
+  :root {
+    /*
+     * Not far off the desktop size, which is the point rather than an oversight: against a
+     * 375px screen this is over a quarter of the width, where 8rem on a laptop is a
+     * sixteenth. The panel's own height is measured from this (see `.askw__panel`), so the
+     * two stay out of each other's way without a second number to keep in step.
+     */
+    --ask-orb: 6.5rem;
+  }
+
+  /*
+   * No label beside the sphere here, and the wording is only half the reason -- "Click" is
+   * pointer language on a device that has none. The other half is the room, and there is less
+   * of it than there was: the bubble is about 8rem wide and the orb is now 6.5, so together
+   * they would reach most of the way across a 375px screen, permanently, over a list somebody
+   * is reading. The sphere is also proportionally far bigger against a phone screen than a
+   * desktop one, which is exactly the case where it needs the least explaining.
+   */
+  .askw__nudge {
+    display: none;
+  }
+
+  /*
+   * **The toasts go to the top of the screen, because a phone has no second corner.**
+   *
+   * On a desktop the two live in opposite bottom corners and never meet. Half a phone screen is
+   * about 150px, which is not a width "Still transcribing — a long recording can take a while"
+   * can be read at, so a toast here has to be full width -- and a full-width toast at the
+   * bottom is over the ask panel, which is also full width and also anchored to the bottom.
+   * Sitting it above the orb is not enough: that is *inside* the panel when the panel is open,
+   * which is exactly when a memo saved a moment ago is still being written. Seen at 375px.
+   *
+   * Nothing else on the page is fixed to the top, and a notification arriving at the top of a
+   * phone screen is where a phone puts notifications. It covers the header while it is there,
+   * which is a heading and a Refresh button rather than anything being read.
+   */
+  .toasts {
+    top: 1rem;
+    right: 1rem;
+    bottom: auto;
+    width: auto;
+  }
 }
 
 /* --- disabled controls ------------------------------------------------------ */
@@ -2132,24 +2203,304 @@ button:disabled:hover,
 /* --- ask my memos (MEMO-24) -------------------------------------------------- */
 
 /*
- * The panel sits between the composer and the fast strip, so the two write paths stay at the
- * top of the screen where the recorder's bloom is centred. See MemosView for the ordering
- * argument.
+ * The widget: a sphere in the bottom right, and a panel that opens above it.
+ *
+ * It was a section of the page between the composer and the strip, and what that cost is worth
+ * recording because it is the argument for every rule below. An empty box held a band of the
+ * page permanently; an answer arriving pushed the memo list down by its own height, under the
+ * cursor of somebody reading it; and the feature existed at one scroll position, so asking
+ * about a memo halfway down the list meant scrolling away from it first. None of the three is
+ * a styling problem, which is why this is a different element rather than a restyled one.
+ *
+ * The container is sized by its contents rather than given a footprint, so nothing invisible
+ * sits over the page catching clicks -- closed, it is exactly the orb. The corner it takes is
+ * the one the toasts used to have; `.toasts` above says why they moved rather than stacked.
  */
-.ask__form {
+.askw {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+
+  /*
+   * The same 10 the toasts use, and it buys the same thing and has the same limit: it clears
+   * everything in normal flow, and it loses to a native <dialog>, which renders in the top
+   * layer above any z-index at all. That is the right way round here -- a citation opens a
+   * memo card, and the card is what the reader has just asked to look at.
+   */
+  z-index: 10;
   display: flex;
-  gap: 0.5rem;
-  margin-bottom: 1rem;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.6rem;
 }
 
-.ask__result {
-  padding: 0.9rem 1rem;
+/*
+ * The sphere and its label, side by side.
+ *
+ * Its own row inside the column, because `.askw` stacks the panel above this and `align-items:
+ * flex-end` there would otherwise put the label above the orb rather than beside it.
+ */
+.askw__dock {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+/*
+ * "Click to ask memo", to the left of the sphere.
+ *
+ * A card in the same materials as everything else that floats over this page -- the toast's
+ * surface, border and shadow -- so it reads as belonging to the widget rather than as a
+ * browser tooltip. `white-space: nowrap` because it is one short line and wrapping it into two
+ * would make the corner busier than the thing it is pointing at.
+ */
+.askw__nudge {
+  margin: 0;
+  padding: 0.4rem 0.65rem;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--surface);
+  color: var(--text);
+  font-size: 0.8rem;
+  white-space: nowrap;
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--text) 16%, transparent);
+
+  /* For the pointer below, which is positioned against this. */
+  position: relative;
+
+  /*
+   * Transform only, and the panel's rule has the long version: an animation that never
+   * advances holds its first keyframe, so this fails to a label sitting two pixels to the
+   * left rather than to one that never appears.
+   */
+  animation: askw-nudge 0.18s ease;
 }
 
-.ask__answer {
+/*
+ * The little tail pointing at the sphere: a square rotated 45 degrees with two of its borders
+ * kept, which is the same shape as a triangle and unlike a border-triangle can carry the
+ * surface colour and the border colour at once.
+ */
+.askw__nudge::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  right: -5px;
+  width: 8px;
+  height: 8px;
+  transform: translateY(-50%) rotate(45deg);
+  border-top: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+}
+
+@keyframes askw-nudge {
+  from {
+    transform: translateX(-4px);
+  }
+}
+
+/* Drawn at `--ask-orb`, which is declared at the top of this file and says why it is there. */
+.askw__orb {
+  flex: none;
+  width: var(--ask-orb);
+  height: var(--ask-orb);
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+
+  /* The button's own fill would be a blue disc behind a sphere. The canvas is the appearance. */
+  background: none;
+
+  /* So the canvas is the element's whole height -- a button's line box would add a few px. */
+  line-height: 0;
+  cursor: pointer;
+  transition: transform 0.18s ease;
+}
+
+.askw__orb:hover {
+  transform: scale(1.06);
+}
+
+/*
+ * Focus is drawn as a ring outside the sphere rather than as the default outline, which on a
+ * round button drawn by a canvas lands as a rectangle around a circle.
+ */
+.askw__orb:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.orb {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/*
+ * What the button looks like when there is no canvas to draw the sphere on -- see `blank` in
+ * AskOrb for when that happens and why it must not be nothing.
+ *
+ * A ring and a tint rather than an attempt at a sphere in CSS: it says "there is a control
+ * here" without pretending the effect is present. Only ever applied when the canvas is empty,
+ * so it never shows through the drawing.
+ */
+.orb--blank {
+  border: 1px solid var(--accent);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+/*
+ * The panel. `min-height: 0` on a flex column is what lets the answer scroll rather than
+ * pushing the panel past its own max-height -- without it a long answer grows the panel off
+ * the top of the screen, which is the failure this height is here to prevent.
+ *
+ * Two max-heights, and the second is not a duplicate: `dvh` follows a mobile browser's address
+ * bar as it hides and shows, where `vh` is fixed to the *larger* viewport and would let the
+ * panel run under the chrome. Browsers without `dvh` ignore the second declaration and keep
+ * the first.
+ *
+ * **The room the sphere takes is subtracted rather than guessed at**, which is what makes this
+ * survive the orb changing size. The panel sits on top of a stack that is the bottom margin,
+ * the orb and the gap between them, so a literal here is a number that silently stops being
+ * right the day `--ask-orb` moves -- and it did move, from 4rem to 8rem, which under the old
+ * literal put the top of a full-height panel off the screen.
+ */
+.askw__panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  width: min(26rem, calc(100vw - 2rem));
+  max-height: min(34rem, calc(100vh - var(--ask-orb) - 3.5rem));
+  max-height: min(34rem, calc(100dvh - var(--ask-orb) - 3.5rem));
+  padding: 0.9rem 1rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+
+  /* It floats over content and has to read as being above it -- the same shadow a toast gets. */
+  box-shadow: 0 10px 34px color-mix(in srgb, var(--text) 22%, transparent);
+
+  /*
+   * Growing out of the orb: the origin is the corner the sphere is in, so the panel reads as
+   * having been opened by the thing that was pressed.
+   *
+   * **A keyframe animation on the panel itself, and not a Vue <Transition>, which is what this
+   * was.** A transition is a promise that a style will *finish changing*, and a document the
+   * browser considers hidden does not keep that promise -- it stops advancing them, and the
+   * value stays wherever it started. That is not a hypothetical environment: some embedded
+   * browser views report `visibilityState: 'hidden'` permanently, and one of them is what this
+   * app is checked in. Measured there, both halves broke: opening left the panel at the enter
+   * transition's starting opacity of 0, and closing left it stuck in `leave-from` -- so `v-show`
+   * never got to apply `display: none` and the panel could not be closed at all.
+   *
+   * With the animation here instead, `v-show` toggles `display` and nothing intervenes, so
+   * showing and hiding are as reliable as the property itself. The animation restarts each time
+   * the panel is displayed, which is what makes it read as opening.
+   *
+   * Transform only, and no fade. The same argument decides it: if the animation never advances,
+   * the element holds its first keyframe -- and "four percent small and six pixels low" is a
+   * failure nobody will see, where an opacity of 0 is a panel that opened invisibly.
+   */
+  animation: askw-open 0.16s ease;
+  transform-origin: bottom right;
+}
+
+@keyframes askw-open {
+  from {
+    transform: scale(0.96) translateY(6px);
+  }
+}
+
+/*
+ * Reduced motion drops the movement, which is the same view the caret below and MemoBackdrop
+ * take of the setting. Nothing is lost: the panel simply appears, which is what it asks for.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .askw__panel,
+  .askw__nudge {
+    animation: none;
+  }
+
+  .askw__orb {
+    transition: none;
+  }
+
+  .askw__orb:hover {
+    transform: none;
+  }
+}
+
+.askw__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.askw__heading {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.askw__close {
+  flex: none;
+  padding: 0 0.35rem;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 1.3rem;
+  line-height: 1;
+}
+
+.askw__hint {
+  margin: 0.35rem 0 0.75rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.askw__form {
+  display: flex;
+  flex: none;
+  gap: 0.5rem;
+}
+
+/*
+ * The scroll container, and the only one in the panel. `flex: 1 1 auto` with `min-height: 0`
+ * is the pair that makes it take the room left over by the form above it and no more.
+ *
+ * The negative margin and matching padding are so the focus ring on a citation is not clipped
+ * by the overflow -- an outline drawn at the edge of a scroll box is cut in half by it.
+ */
+.askw__result {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0.85rem -0.25rem 0;
+  padding: 0.85rem 0.25rem 0.25rem;
+  border-top: 1px solid var(--border);
+}
+
+/*
+ * The question the answer belongs to.
+ *
+ * Set as a quotation rather than as a heading, because that is what it is: the reader's own
+ * words, being repeated back. It is not the same string as the box above -- see `asked` in
+ * AskWidget -- and the whole reason it is on screen is the case where the two differ.
+ */
+.askw__asked {
+  margin: 0 0 0.6rem;
+  padding-left: 0.6rem;
+  border-left: 2px solid var(--accent);
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.askw__answer {
   margin: 0;
   line-height: 1.55;
 
@@ -2239,25 +2590,40 @@ button:disabled:hover,
  * A button that reads as a link, because it opens a dialog rather than navigating -- the same
  * reason MemoStrip's cards are buttons. Reset to nothing but the underline, since the default
  * button chrome next to an excerpt reads as a form control.
+ *
+ * There used to be a `.ask__title` beside this: the same text, unstyled and unclickable, for a
+ * cited memo the strip was not holding. It is gone because that case is gone -- every citation
+ * fetches its memo by id now, so there is no memo this can name and not open.
  */
-.ask__open,
-.ask__title {
+.ask__open {
   display: block;
   padding: 0;
   border: 0;
   background: none;
-  color: var(--text);
   font: inherit;
   font-size: 0.92rem;
   font-weight: 600;
   text-align: left;
-}
-
-.ask__open {
   color: var(--accent);
   cursor: pointer;
   text-decoration: underline;
   text-underline-offset: 2px;
+}
+
+/*
+ * While the memo behind a citation is being fetched. It is one request and usually invisible,
+ * and this is what it looks like on a stack that is busy -- rather than a button that does
+ * nothing twice because it was pressed again.
+ *
+ * Its own rule because the file's blanket `button:disabled` gives a disabled control a filled
+ * grey box, which is right for a form button and wrong for something drawn as a link.
+ */
+.ask__open:disabled,
+.ask__open:disabled:hover {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  cursor: progress;
 }
 
 .ask__excerpt {

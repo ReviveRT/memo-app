@@ -58,6 +58,18 @@ Route::post('/ask', [AskController::class, 'store'])->name('ask');
 Route::get('/memos', [MemoController::class, 'index'])->name('memos.index');
 Route::post('/memos', [MemoController::class, 'store'])->name('memos.store');
 
+// One memo by id. The lookup the list route cannot do: `GET /memos` answers a *filter*, and
+// the ask widget's citations name memos by identity -- a cited memo filed into a collection
+// is not in any list the screen behind the widget would ask for. MemoController::show has the
+// longer version.
+//
+// Placed between the list and the recording rather than beside the writes, because it is a
+// read of the same resource -- and above the whereUuid paragraph below, so it says its own
+// constraint rather than borrowing that one's.
+Route::get('/memos/{memo}', [MemoController::class, 'show'])
+    ->whereUuid('memo')
+    ->name('memos.show');
+
 // The original recording, with byte ranges (MEMO-23). The one route in this file that does
 // not answer JSON, and the one whose response the frontend never fetches: it is the `src` of
 // an <audio> element, so the browser issues the requests itself and expects a 206 to a Range

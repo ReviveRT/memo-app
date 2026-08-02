@@ -281,6 +281,37 @@ final class MemoController extends Controller
     }
 
     /**
+     * One memo by id.
+     *
+     * **The route exists for the ask widget, and the case it answers is not an edge one.** A
+     * citation names a memo the answer was built from; ask reads the whole table, while the
+     * screen the widget floats over holds only the unfiled memos matching whatever filter is
+     * active. So a cited memo that has been filed into a collection is one the client has no
+     * copy of -- and `GET /memos` cannot fetch it either, because that route filters and this
+     * is a lookup by identity.
+     *
+     * `no-store`, for a weaker version of the list's reason. A memo is edited from the card
+     * this response opens -- renamed, its transcript corrected, moved -- and it is written by
+     * the worker while it transcribes. Nothing here is immutable the way a recording's bytes
+     * are (see `audio()`), so there is nothing for a cache to be right about for long.
+     *
+     * 404 with the same sentence the writes use for a memo that is not there, because the
+     * client has the same one thing to do about it.
+     */
+    public function show(string $memo): JsonResponse
+    {
+        $found = $this->memos->find($memo);
+
+        if ($found === null) {
+            abort(Response::HTTP_NOT_FOUND, 'That memo no longer exists.');
+        }
+
+        return response()
+            ->json(['memo' => $found->toArray()])
+            ->header('Cache-Control', 'no-store');
+    }
+
+    /**
      * Play back the original recording (MEMO-23).
      *
      * **Range support is the feature, not a refinement of it.** Safari refuses to play audio

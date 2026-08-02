@@ -287,16 +287,30 @@ const working = ref(false)
  * again the obvious response and two reminders the result. Reproduced in a browser before the
  * fix. Handing the memo to every live list removes the question of which list was on screen.
  *
+ * **`memo` is passed as well, and that is the second half of the same bug.** Every list on
+ * screen is covered by the line above, and until the ask widget landed that was every memo a
+ * card could be showing. It no longer is: a citation opens a memo the widget fetched by id,
+ * which is in no list -- a memo filed into a collection, or one the search box has filtered
+ * out. Renaming that memo reached the database and left the card showing the old title, which
+ * is the same silent failure in a new place. Reproduced in a browser before this fix.
+ *
+ * @param {?object} memo The memo being written, as the caller is rendering it, or null when
+ *   the caller has no object of its own. Brought up to date if no list turned out to hold it.
  * @param {() => Promise<object>} write
  * @param {string} failure
  * @param {(memo: object) => void} [apply] What to do with the memo the API answered with.
- *   Defaults to writing it into every live list. Delete overrides it: there is no memo left to
- *   apply, and writing a deleted row's fields back into a list before dropping it would be a
- *   render of something that no longer exists.
+ *   Defaults to writing it into every live list and, failing that, into `memo`. Delete
+ *   overrides it: there is no memo left to apply, and writing a deleted row's fields back into
+ *   a list before dropping it would be a render of something that no longer exists.
  * @returns {Promise<?object>} The updated memo, or null if the write failed. Callers use the
  *   null to decide whether to close a dialog.
  */
-async function writeMemo(write, failure, apply = applyMemoEverywhere) {
+async function writeMemo(
+  write,
+  failure,
+  memo = null,
+  apply = (updated) => applyMemoEverywhere(updated, memo),
+) {
   if (working.value) {
     return null
   }
@@ -342,6 +356,7 @@ async function moveMemo(memo, collectionId) {
   const updated = await writeMemo(
     () => patchMemo(memo.id, collectionId),
     'Could not move the memo',
+    memo,
   )
 
   if (updated !== null) {
@@ -364,7 +379,7 @@ async function moveMemo(memo, collectionId) {
  * @returns {Promise<?object>}
  */
 function rename(memo, title) {
-  return writeMemo(() => renameMemo(memo.id, title), 'Could not rename the memo')
+  return writeMemo(() => renameMemo(memo.id, title), 'Could not rename the memo', memo)
 }
 
 /**
@@ -385,6 +400,7 @@ function correct(memo, transcript) {
   return writeMemo(
     () => correctTranscript(memo.id, transcript),
     'Could not save the transcript',
+    memo,
   )
 }
 
@@ -408,6 +424,9 @@ function remove(memo) {
   return writeMemo(
     () => deleteMemo(memo.id),
     'Could not delete the memo',
+
+    // No merge target: the row is being removed, so there is nothing to bring up to date.
+    null,
     (deleted) => {
       removeMemoEverywhere(deleted.id)
 
@@ -491,7 +510,9 @@ async function retry(memo) {
   try {
     const updated = await retryMemo(memo.id)
 
-    applyMemoEverywhere(updated)
+    // `memo` for the same reason writeMemo takes it: the card may be showing a memo that is in
+    // no list, and a retry that leaves it reading `failed` invites a second press.
+    applyMemoEverywhere(updated, memo)
     toast.stored(updated)
 
     return updated
@@ -516,6 +537,7 @@ function addReminder(memo, remindAt, note) {
   return writeMemo(
     () => createReminder(memo.id, remindAt, note),
     'Could not set the reminder',
+    memo,
   )
 }
 
@@ -529,6 +551,7 @@ function dropReminder(memo, reminderId) {
   return writeMemo(
     () => deleteReminder(reminderId),
     'Could not remove the reminder',
+    memo,
   )
 }
 

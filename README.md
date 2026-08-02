@@ -375,10 +375,22 @@ in-app cards still appear.
 
 ## Asking your memos
 
-Above the memo list is **Ask your memos**. Type a question in your own words —
+In the bottom right corner of the memo screen is a small glowing sphere. Click or
+tap it and **Ask your memos** opens above it: type a question in your own words —
 "what did I say about the landing page" — and a local model reads the few memos
 that match and answers from them, citing which ones it used. Nothing leaves your
 machine, and there is no key to add.
+
+The question you asked is repeated above the answer, so an answer that arrives
+while you are already typing the next question still says what it answers. Closing
+the panel keeps it — the sphere is a lid, not a reset — and an answer still being
+written carries on while you read the memo it cited. Escape closes it too.
+
+**It is a corner rather than a band of the page**, which it used to be. A panel
+between the composer and the list held a permanent empty box, pushed the list down
+by the height of whatever answer arrived, and could only be used from one scroll
+position. The sphere pulses faster while an answer is being written, so the wait
+is visible from anywhere on the page.
 
 **It is search plus a model, not a search box with a longer name.** The question
 goes through the same full-text index the filter uses, with two differences that
@@ -394,6 +406,13 @@ memos labelled `[1]`, `[2]`, `[3]` and cites those; the app maps them back to re
 memos itself. So a citation cannot point at a memo that was not retrieved — if the
 model invents `[7]`, nothing links to it. Every cited memo is listed under the
 answer with the exact excerpt the model was shown, and clicking one opens the card.
+
+**Every citation opens, including memos that are not on the screen behind it.**
+Ask reads the whole table while the strip below holds only the unfiled memos
+matching whatever is in the search box, so a cited memo is regularly one filed away
+in a collection — or one filtered out by a search you ran before asking. Those are
+fetched by id (`GET /api/memos/{id}`). Only a memo deleted since the answer was
+written fails to open, and it says so.
 
 **What it costs to wait.** The retrieved memos appear within milliseconds and the
 answer streams in as it is written, so the wait is spent reading rather than
@@ -432,7 +451,7 @@ from the same image with the model up in both: `Shared_Clean 1,117,840 kB`,
 docker compose up --scale ai-api=0
 ```
 
-Everything else is unchanged. The panel then reports that Ask is unavailable and
+Everything else is unchanged. The widget then reports that Ask is unavailable and
 nothing else on the page notices — `api` deliberately does not wait for `ai-api`
 to be healthy, so recording, listing and searching never queue behind a model
 load.
@@ -1203,6 +1222,7 @@ server so the browser sees one origin. No authentication — see Assumptions.
 | `GET` | `/health` | Database round trip and upload limits; 503 when it fails |
 | `POST` | `/ask` | `{question}` — ask about the memos. Streams NDJSON; 503 when `ai-api` is not up or its model is not ready. See below |
 | `GET` | `/memos` | The list, newest first. See the parameters below |
+| `GET` | `/memos/{memo}` | One memo by id. What a citation opens when the screen is not holding it |
 | `POST` | `/memos` | Create one: JSON `{text}`, or `multipart/form-data` with `audio` |
 | `PATCH` | `/memos/{memo}` | `{collection_id}` — file it, or `null` to unfile. `{title}` — rename it, or `null` to clear. Either field, or both |
 | `POST` | `/memos/{memo}/retry` | Send a failed memo back to the queue. No body. 409 if it is not `failed` |
