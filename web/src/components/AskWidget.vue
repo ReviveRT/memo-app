@@ -564,26 +564,48 @@ onScopeDispose(() => running.value?.abort())
     </section>
 
     <!--
-      The orb. A button with no visible label, which is why it carries one for a screen reader
-      and a `title` for a pointer -- an unlabelled circle in a corner is a thing people hover
-      before they click.
-
-      aria-expanded and aria-controls make it a disclosure rather than an unexplained toggle:
-      the panel it names is in the DOM whether it is open or not, so the reference always
-      resolves.
+      The sphere and the label beside it, on one row so the label sits to its left rather than
+      under it. A row of its own rather than the two being children of `.askw`, which is a
+      column: the panel stacks above both of them, and the label belongs beside the orb.
     -->
-    <button
-      ref="orbEl"
-      type="button"
-      class="askw__orb"
-      :aria-expanded="open"
-      aria-controls="ask-panel"
-      title="Ask your memos"
-      @click="toggle"
-    >
-      <AskOrb :active="busy" :open="open" />
+    <div class="askw__dock">
+      <!--
+        What the sphere is for, in words, because a glowing circle in a corner is not a
+        control anybody is obliged to recognise. It replaced a `title`, which said the same
+        thing and only after a second of hovering something you had to suspect was a button
+        first.
 
-      <span class="sr-only">Ask your memos</span>
-    </button>
+        Dropped while the panel is open: it is an invitation to open the thing that is already
+        open, and it would sit beside a panel that says "Ask your memos" at the top of it.
+
+        aria-hidden, because the button already carries this meaning as its accessible name --
+        without it a screen reader reads the invitation and then the button that is the
+        invitation. The wording differs for the same reason it can: "Click" is instruction for
+        a pointer, and a screen reader's user is not necessarily using one.
+      -->
+      <p v-if="!open" class="askw__nudge" aria-hidden="true">Click to ask memo</p>
+
+      <!--
+        The orb. A button with no visible label of its own, which is why it carries one for a
+        screen reader -- the bubble above is aria-hidden and cannot serve as its name, and the
+        bubble is gone once the panel is open while the button is not.
+
+        aria-expanded and aria-controls make it a disclosure rather than an unexplained toggle:
+        the panel it names is in the DOM whether it is open or not, so the reference always
+        resolves.
+      -->
+      <button
+        ref="orbEl"
+        type="button"
+        class="askw__orb"
+        :aria-expanded="open"
+        aria-controls="ask-panel"
+        @click="toggle"
+      >
+        <AskOrb :active="busy" :open="open" />
+
+        <span class="sr-only">Ask your memos</span>
+      </button>
+    </div>
   </div>
 </template>

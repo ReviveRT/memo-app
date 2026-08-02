@@ -12,11 +12,14 @@ import { onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue'
  * frequencies are integrated into phases (see advance) and a rate change is continuous.
  *
  * It is a *second* canvas on a page that already has one, which is worth justifying rather than
- * assuming. The backdrop's offscreen is 317x179 at a typical window; this is 128x128 at
- * devicePixelRatio 2 -- under a third of the pixels, and the whole drawing is eight arcs and a
- * handful of small gradients into them. The two composites at the end are where a naive version
- * of this would have gone wrong, and BLOOM has what they cost and why they are done on the
- * small offscreen rather than as a CSS filter on the element.
+ * assuming -- and the justification got weaker when the sphere doubled to 8rem, so here are the
+ * real numbers rather than the reassuring ones. The backdrop's offscreen is 317x179 at a
+ * typical window, about 57 thousand pixels. This is 256x256 at devicePixelRatio 2, about 66
+ * thousand: no longer the rounding error it was at half the size. What is drawn into them is
+ * still small -- eight arcs and a handful of gradients -- and the cost that scales is the two
+ * blurred composites at the end, which is why MAX_BACKING exists to stop the backing store
+ * growing with the element for ever. BLOOM has why the blur is done on the offscreen at all
+ * rather than as a CSS filter on the stretched element, which is where it would be ruinous.
  *
  * Everything here is decoration. The canvas is inside a button that works with no canvas at
  * all: a failure to get a 2d context falls back to a plain ringed circle (see `blank`), and
@@ -164,6 +167,24 @@ const ACTIVE_GLOW = 0.3
  * retargets where an interpolation would have to restart and would visibly stutter.
  */
 const ENERGY_EASE = 3.2
+
+/**
+ * The largest the backing store is allowed to get, in device pixels.
+ *
+ * **A ceiling rather than a resolution, and it exists because the sphere doubled.** Rendering
+ * at devicePixelRatio and no more was fine while the orb was 4rem: 128 device pixels square,
+ * a quarter of what the backdrop composes. At 8rem on a retina screen that is 256 square and
+ * four times the area, and the part that scales with it is the two blurred composites -- the
+ * bloom is a *fraction* of the canvas, so a bigger canvas means both more pixels and a wider
+ * blur kernel over each of them.
+ *
+ * 192 is where that stops growing. It costs a 1.33x upscale by the compositor at 8rem, for
+ * nothing, on content that is entirely soft gradients and deliberately blurred strokes -- the
+ * same trade MemoBackdrop's RESOLUTION makes far more aggressively for the same reason. What
+ * it buys is that the next person to want a bigger sphere changes one number in the stylesheet
+ * and pays for it in layout rather than in frame time.
+ */
+const MAX_BACKING = 192
 
 /**
  * The largest frame delta the simulation will accept, in seconds.
@@ -314,8 +335,13 @@ function resize() {
 
   // Capped at 2, which is where the returns stop on content that is nothing but gradients and
   // blurred strokes -- and the cap is what keeps a 3x phone from quadrupling this for nothing.
-  scale = Math.min(2, window.devicePixelRatio || 1)
-  size = Math.round(css * scale)
+  // Then capped again in absolute terms, which is MAX_BACKING's argument.
+  size = Math.min(MAX_BACKING, Math.round(css * Math.min(2, window.devicePixelRatio || 1)))
+
+  // Derived from the size that survived both caps rather than from devicePixelRatio, because
+  // it is what one displayed pixel is actually worth here -- and SHARP_PX, the only thing that
+  // reads it, is smoothing the rasteriser's stair-stepping and has to be in those units.
+  scale = size / css
 
   el.width = size
   el.height = size

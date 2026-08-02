@@ -36,13 +36,20 @@
    * The ask widget's sphere, in diameter.
    *
    * Up here rather than beside the widget's own rules at the end of the file, and both halves
-   * of that matter. It is a *shared* number -- `.askw__orb` is drawn at it and `.toasts` clears
-   * it on a narrow screen -- and two literals that have to agree is exactly what a custom
-   * property is for. And it has to be declared before the `max-width: 40rem` block that
-   * overrides it: both selectors are `:root`, so whichever is written later wins, and stated
-   * down there the desktop size would beat the phone's.
+   * of that matter. It is a *shared* number -- `.askw__orb` is drawn at it, and the panel's
+   * own height is measured from it so an open panel cannot run off the top of the screen -- and
+   * two literals that have to agree is exactly what a custom property is for. And it has to be
+   * declared before the `max-width: 40rem` block that overrides it: both selectors are `:root`,
+   * so whichever is written later wins, and stated down there the desktop size would beat the
+   * phone's.
+   *
+   * 8rem on a desktop and less than half of that on a phone, which is a bigger gap than the
+   * usual bit of responsive trimming. It is the same object answering two different questions:
+   * with a window to spare, the sphere is the thing that says the feature exists and is worth
+   * being able to see moving from across the room; on a phone it is a thumb target over a list
+   * somebody is reading, and 8rem of it would be a tenth of the screen covered.
    */
-  --ask-orb: 4rem;
+  --ask-orb: 8rem;
 
   color-scheme: light dark;
 }
@@ -2110,8 +2117,20 @@ h1,
   }
 
   :root {
-    /* A thumb's worth rather than the desktop size, which would take a tenth of the width. */
+    /* A thumb's worth rather than the desktop size, which would take a tenth of the screen. */
     --ask-orb: 3.25rem;
+  }
+
+  /*
+   * No label beside the sphere here, and the wording is only half the reason -- "Click" is
+   * pointer language on a device that has none. The other half is the room: the bubble is
+   * about 8rem wide and the orb is 3.25, so together they reach a third of the way across a
+   * 375px screen, permanently, over a list somebody is reading. The sphere is also
+   * proportionally much bigger against a phone screen than a desktop one, which is exactly
+   * the case where it needs the least explaining.
+   */
+  .askw__nudge {
+    display: none;
   }
 
   /*
@@ -2210,6 +2229,72 @@ button:disabled:hover,
   gap: 0.6rem;
 }
 
+/*
+ * The sphere and its label, side by side.
+ *
+ * Its own row inside the column, because `.askw` stacks the panel above this and `align-items:
+ * flex-end` there would otherwise put the label above the orb rather than beside it.
+ */
+.askw__dock {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+/*
+ * "Click to ask memo", to the left of the sphere.
+ *
+ * A card in the same materials as everything else that floats over this page -- the toast's
+ * surface, border and shadow -- so it reads as belonging to the widget rather than as a
+ * browser tooltip. `white-space: nowrap` because it is one short line and wrapping it into two
+ * would make the corner busier than the thing it is pointing at.
+ */
+.askw__nudge {
+  margin: 0;
+  padding: 0.4rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.8rem;
+  white-space: nowrap;
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--text) 16%, transparent);
+
+  /* For the pointer below, which is positioned against this. */
+  position: relative;
+
+  /*
+   * Transform only, and the panel's rule has the long version: an animation that never
+   * advances holds its first keyframe, so this fails to a label sitting two pixels to the
+   * left rather than to one that never appears.
+   */
+  animation: askw-nudge 0.18s ease;
+}
+
+/*
+ * The little tail pointing at the sphere: a square rotated 45 degrees with two of its borders
+ * kept, which is the same shape as a triangle and unlike a border-triangle can carry the
+ * surface colour and the border colour at once.
+ */
+.askw__nudge::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  right: -5px;
+  width: 8px;
+  height: 8px;
+  transform: translateY(-50%) rotate(45deg);
+  border-top: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+}
+
+@keyframes askw-nudge {
+  from {
+    transform: translateX(-4px);
+  }
+}
+
 /* Drawn at `--ask-orb`, which is declared at the top of this file and says why it is there. */
 .askw__orb {
   flex: none;
@@ -2270,14 +2355,20 @@ button:disabled:hover,
  * bar as it hides and shows, where `vh` is fixed to the *larger* viewport and would let the
  * panel run under the chrome. Browsers without `dvh` ignore the second declaration and keep
  * the first.
+ *
+ * **The room the sphere takes is subtracted rather than guessed at**, which is what makes this
+ * survive the orb changing size. The panel sits on top of a stack that is the bottom margin,
+ * the orb and the gap between them, so a literal here is a number that silently stops being
+ * right the day `--ask-orb` moves -- and it did move, from 4rem to 8rem, which under the old
+ * literal put the top of a full-height panel off the screen.
  */
 .askw__panel {
   display: flex;
   flex-direction: column;
   min-height: 0;
   width: min(26rem, calc(100vw - 2rem));
-  max-height: min(34rem, calc(100vh - 9rem));
-  max-height: min(34rem, calc(100dvh - 9rem));
+  max-height: min(34rem, calc(100vh - var(--ask-orb) - 3.5rem));
+  max-height: min(34rem, calc(100dvh - var(--ask-orb) - 3.5rem));
   padding: 0.9rem 1rem 1rem;
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -2322,7 +2413,8 @@ button:disabled:hover,
  * take of the setting. Nothing is lost: the panel simply appears, which is what it asks for.
  */
 @media (prefers-reduced-motion: reduce) {
-  .askw__panel {
+  .askw__panel,
+  .askw__nudge {
     animation: none;
   }
 
