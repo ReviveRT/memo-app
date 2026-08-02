@@ -112,7 +112,7 @@ final class Memo
     private const REQUIRED_COLUMNS = [
         'id', 'source', 'status', 'transcript', 'title',
         'summary', 'tags', 'duration_ms', 'last_error', 'last_error_code',
-        'created_at_iso', 'collection_id', 'reminders',
+        'language', 'created_at_iso', 'collection_id', 'reminders',
     ];
 
     /**
@@ -161,6 +161,24 @@ final class Memo
         public readonly ?string $lastErrorCode,
 
         public readonly string $createdAt,
+
+        /**
+         * The language this memo is decoded in, or null for "detect it".
+         *
+         * Sent to the browser as well as read by the worker, because the UI has to show
+         * what a memo was last transcribed as -- otherwise "re-transcribe as Romanian" is
+         * a button with no way to tell whether it already happened.
+         *
+         * Defaulted, and placed here rather than beside `lastErrorCode` where it belongs
+         * by subject, for one uninteresting reason: PHP deprecates an optional parameter
+         * standing before a required one, and `createdAt` is required. The default is not
+         * a relaxation of the projection contract -- that is REQUIRED_COLUMNS plus the
+         * property_exists loop in fromRow, which names the missing column and is asserted
+         * by test_a_projection_that_no_longer_matches_the_dto_fails_immediately. Nothing
+         * reaching this class from a database row can skip the argument.
+         */
+        public readonly ?string $language = null,
+
         public readonly ?string $collectionId = null,
         public readonly array $reminders = [],
     ) {}
@@ -205,6 +223,7 @@ final class Memo
 
             lastError: self::nullableString($row->last_error),
             lastErrorCode: self::nullableString($row->last_error_code),
+            language: self::nullableString($row->language),
             createdAt: (string) $row->created_at_iso,
             collectionId: self::nullableString($row->collection_id),
             reminders: self::reminders($row->reminders),
@@ -225,6 +244,7 @@ final class Memo
             'duration_ms' => $this->durationMs,
             'last_error' => $this->lastError,
             'last_error_code' => $this->lastErrorCode,
+            'language' => $this->language,
             'created_at' => $this->createdAt,
             'collection_id' => $this->collectionId,
             'reminders' => array_map(

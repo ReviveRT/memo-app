@@ -53,7 +53,11 @@ class FakeStt:
 
     name = "fake"
 
-    def transcribe(self, audio: Path) -> Transcript:
+    def transcribe(self, audio: Path, language: str | None = None) -> Transcript:
+        # `language` accepted and ignored, which is the honest thing for a provider
+        # that never opens the file: the canned string is English whatever was
+        # asked for, and pretending otherwise would make `memos.language` describe
+        # a decode that did not happen.
         # `model=None` rather than settings.stt_model. STT_MODEL defaults to
         # `base`, and recording "base" against a canned string would put a claim
         # in `memos.stt_model` that no model backs -- which is precisely the

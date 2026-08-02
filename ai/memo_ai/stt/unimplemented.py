@@ -47,7 +47,7 @@ class UnimplementedStt:
         self.name = name
         self._because = because
 
-    def transcribe(self, audio: Path) -> Transcript:
+    def transcribe(self, audio: Path, language: str | None = None) -> Transcript:
         raise SttUnavailable(
             f"The {self.name!r} speech-to-text provider is not built in this project: "
             f"{self._because}. Set STT_PROVIDER=local to transcribe on the local model."

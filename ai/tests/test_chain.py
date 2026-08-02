@@ -21,6 +21,7 @@ class Stub:
         self.name = name
         self.calls = 0
         self.warmed = 0
+        self.languages: list[str | None] = []
         self._error = error
 
         if audio_format is not None:
@@ -34,8 +35,12 @@ class Stub:
     def _prefetch(self):
         self.warmed += 1
 
-    def transcribe(self, source: Path) -> Transcript:
+    def transcribe(self, source: Path, language: str | None = None) -> Transcript:
         self.calls += 1
+
+        # Recorded so the chain can be held to passing the memo's language on to
+        # whichever provider answers, rather than only to the first one.
+        self.languages.append(language)
 
         if self._error is not None:
             raise self._error
@@ -71,6 +76,32 @@ def test_an_unavailable_primary_walks_to_the_fallback():
     # The row records what actually produced the words, not what was configured.
     assert result.text == "from fallback"
     assert result.provider == "fallback"
+
+
+def test_the_memos_language_reaches_whichever_provider_answers():
+    """
+    The language is a fact about the recording, not about which provider ran, so the
+    fallback has to be told the same thing the primary was. A fallback left to detect
+    for itself could decode the same audio in a different language than the user asked
+    for -- and the result would still be labelled with the fallback's name, which is
+    exactly the kind of quiet disagreement this class exists to prevent.
+    """
+    primary = Stub("primary", error=SttUnavailable("no model here"))
+    fallback = Stub("fallback")
+
+    FallbackStt(primary, fallback).transcribe(AUDIO, "ro")
+
+    assert primary.languages == ["ro"]
+    assert fallback.languages == ["ro"]
+
+
+def test_no_language_stays_none_through_the_chain():
+    """None means detect, and it must not become a string on the way through."""
+    primary = Stub("primary")
+
+    FallbackStt(primary, Stub("fallback")).transcribe(AUDIO)
+
+    assert primary.languages == [None]
 
 
 def test_a_terminal_error_is_not_retried_on_the_fallback():

@@ -111,7 +111,7 @@ class SttProvider(Protocol):
 
     name: str
 
-    def transcribe(self, audio: Path) -> Transcript:
+    def transcribe(self, audio: Path, language: str | None = None) -> Transcript:
         """
         Turn one audio file into a transcript, or raise ``SttError``.
 
@@ -120,5 +120,20 @@ class SttProvider(Protocol):
         memo_ai/pipeline.py joins and checks for traversal. A provider does not
         have to trust it exists or is readable: the local one classifies a missing
         or undecodable file rather than hanging on it.
+
+        ``language`` is this *memo's* language, chosen by whoever recorded it, and
+        it outranks anything the deployment configured. ``None`` means nobody said,
+        which is the usual case and leaves the provider to detect -- so a provider
+        may ignore this argument entirely and `fake` does.
+
+        It is a per-call argument rather than provider state because it varies per
+        memo while a provider is built once and shared by every job on the replica.
+        ``STT_LANGUAGE`` is the other half of the same setting and is the right
+        shape for a deployment where everyone speaks one language; this is the half
+        that survives two people, or one person with two languages. Both meet in
+        ``LocalWhisperStt.transcribe``, where the argument wins.
+
+        Keeping it optional is what lets a test double stay the five-line class the
+        note above promises.
         """
         ...

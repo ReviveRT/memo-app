@@ -304,9 +304,63 @@ h1,
 }
 
 .recorder__hint,
-.recorder__elapsed {
+.recorder__elapsed,
+.recorder__language {
   color: var(--muted);
   font-size: 0.85rem;
+}
+
+/*
+ * The language for the next recording, immediately after the Record button.
+ *
+ * A <label> wrapping both the word and the select, so the word is the select's accessible name
+ * without needing an id to point at -- there is one recorder on the page, but ids in a component
+ * are a promise about uniqueness that a second instance would break.
+ *
+ * Deliberately *not* pushed to the far end like `.recorder__hint`. It belongs to the button: the
+ * two are one decision -- what to record and in what language -- and the hint's whole reason for
+ * the auto margin is that it is a line about the screen rather than a label for the control. The
+ * hint keeps its `margin-left: auto`, so this sits left with Record and the sentence stays right,
+ * which is also what makes them wrap in a sensible order on a narrow window.
+ */
+.recorder__language {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.recorder__language-select {
+  padding: 0.35rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+
+  /* `font: inherit` would take the 0.85rem from the parent and then the select would set
+   * the width of the row from its longest option at that size. The size is named instead so
+   * the control reads as a control rather than as small print. */
+  font-family: inherit;
+  font-size: 0.85rem;
+
+  /*
+   * A cap, because the longest option here is "Indonesia · Indonesian" and a select sizes
+   * itself to its widest one -- which on a narrow window pushes the hint onto its own line for
+   * a control nobody has touched. The chosen value is short enough that this never clips it;
+   * what it clips is the empty space the widest option was reserving.
+   */
+  max-width: 11rem;
+}
+
+/*
+ * The spoken-language block on a memo card.
+ *
+ * `margin-top` matches `.sheet__retry`, since the two can appear one after the other on a memo
+ * that both failed and was decoded in the wrong language, and an uneven gap between them would
+ * read as one belonging to something else.
+ */
+.sheet__language-control {
+  display: block;
+  margin-top: 0.4rem;
 }
 
 /*

@@ -230,6 +230,13 @@ class ClaimedMemo:
     audio_path: str | None
     attempts: int
 
+    # What to decode this recording in, or None for "detect it". Chosen per memo by
+    # whoever recorded it, so it travels on the row rather than in the worker's
+    # environment -- `STT_LANGUAGE` is the deployment-wide half of the same setting
+    # and cannot answer a user with two languages. 005_memo_language.sql has why
+    # detection is not trusted to work it out.
+    language: str | None
+
     # The fence token. Read here so it can be handed straight back to the result
     # write -- see :meth:`MemoQueue.finish_ready`. `timestamptz` and Python's
     # `datetime` are both microsecond-precision, so the round trip is exact, and that
@@ -250,7 +257,7 @@ class ClaimedMemo:
 #
 # The other half is that `class_row` above would then need a field per column,
 # including the tsvector, and adding a column to the table would break the worker.
-_CLAIM_COLUMNS = "id, source, transcript, audio_path, attempts, locked_at"
+_CLAIM_COLUMNS = "id, source, transcript, audio_path, attempts, language, locked_at"
 
 # The claim. One statement, and it must stay one statement.
 #
