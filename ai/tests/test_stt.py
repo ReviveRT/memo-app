@@ -35,6 +35,17 @@ def test_fake_records_no_model():
     assert stt.resolve("fake", SETTINGS).transcribe(Path("/x.webm")).model is None
 
 
+def test_fake_records_no_timing_and_no_cost():
+    # The same rule for MEMO-22's other two columns, and `inference_ms` is the one
+    # where a plausible answer would do real damage: this provider returns instantly
+    # without opening the file, so a near-zero timing in the table would drag down a
+    # median that is supposed to describe how long real transcription takes.
+    result = stt.resolve("fake", SETTINGS).transcribe(Path("/x.webm"))
+
+    assert result.inference_ms is None
+    assert result.cost_micro_usd is None
+
+
 def test_fake_never_touches_the_filesystem():
     # The path below does not exist, and it must not matter. This is what lets
     # MEMO-08 (build order 9) prove the queue before MEMO-11 (build order 14) can

@@ -15,7 +15,7 @@ from memo_ai.config import Settings
 CONNECT_TIMEOUT_SECONDS = 5
 
 
-def connect(settings: Settings) -> psycopg.Connection:
+def connect(settings: Settings, role: str = "worker") -> psycopg.Connection:
     """
     ``autocommit=True`` is the line that makes MEMO-08's claim a *committed*
     claim, and it is not a performance setting.
@@ -44,10 +44,16 @@ def connect(settings: Settings) -> psycopg.Connection:
     ``application_name`` costs nothing and answers "are both replicas actually
     working?" from ``pg_stat_activity`` without adding a healthcheck or a metrics
     endpoint. The hostname is the container id under compose.
+
+    ``role`` is what that name is built from, and it exists because this is no
+    longer only the worker's door to the database: ``python -m memo_ai.costs``
+    (MEMO-22) runs its aggregates over the same connection settings and would
+    otherwise appear in ``pg_stat_activity`` as a third replica. The default keeps
+    every existing caller writing the name it always wrote.
     """
     return psycopg.connect(
         settings.database_url,
         autocommit=True,
-        application_name=f"memo-worker@{socket.gethostname()}",
+        application_name=f"memo-{role}@{socket.gethostname()}",
         connect_timeout=CONNECT_TIMEOUT_SECONDS,
     )

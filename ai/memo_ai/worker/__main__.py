@@ -9,7 +9,7 @@ import time
 
 import psycopg
 
-from memo_ai import audio, db, enrich, log, pipeline, stt
+from memo_ai import audio, db, enrich, log, pipeline, rss, stt
 from memo_ai.config import ConfigError, Settings
 from memo_ai.enrich import Enricher
 from memo_ai.memos import MemoQueue, Reaped, RetryPolicy
@@ -70,10 +70,15 @@ def main() -> int:
     # `stt_model` is logged too, as of MEMO-14. It is inert on `fake` and the whole
     # of the local provider's cost and quality, and nothing else in the logs would
     # say which model a slow transcription was running.
+    # `rss` is the baseline for MEMO-22's memory figures, and it is only meaningful
+    # because it is taken *here* -- before either model is touched. Both load
+    # lazily, so this line is the 18 MB an idle worker costs, and every later `rss=`
+    # on a ready memo is measured against it. Without the baseline in the same log,
+    # "1,708 MB" is a number with nothing to compare it to.
     logger.info(
         "ai-worker starting: stt_provider=%s stt_fallback=%s stt_model=%s stt_language=%s "
         "enrich_provider=%s audio_dir=%s max_audio=%.0fs poll=%.1fs attempts=%d "
-        "backoff=%.0fs lease=%.0fs",
+        "backoff=%.0fs lease=%.0fs rss=%s",
         settings.stt_provider,
         settings.stt_fallback,
         settings.stt_model,
@@ -88,6 +93,7 @@ def main() -> int:
         settings.max_attempts,
         settings.retry_backoff_seconds,
         settings.reap_after_seconds,
+        rss.describe(),
     )
 
     _warn_if_lease_is_too_short(settings, enricher)
