@@ -19,6 +19,54 @@
 # version, so the prediction this comment made is settled rather than pending --
 # committing to glibc early cost nothing and saved discovering it on the task that
 # also bakes model weights.
+
+# --- llama.cpp, compiled in a stage that is thrown away (MEMO-21) ------------
+#
+# `llama-cpp-python` publishes an sdist and no wheels to PyPI, so installing it
+# means compiling llama.cpp -- which needs cmake and a C++ toolchain that the
+# shipped image has no other use for. Debian's `build-essential` and `cmake`
+# together are **369 MB** installed, measured on this base rather than guessed,
+# against the 19 MB the built package actually contributes.
+#
+# So it is built here and only the wheel crosses over. The final stage bind-mounts
+# this stage's output rather than COPYing it, so the wheel is never a layer in the
+# image that ships -- `--mount=type=bind,from=` needs BuildKit, which the `syntax`
+# directive at the top of this file already requires.
+#
+# Same base image as the final stage, deliberately and not incidentally: a wheel
+# is tagged with the Python version and the platform's libc, and one built on a
+# different base would either be rejected by pip or -- worse -- accepted and then
+# fail to load a symbol at runtime.
+FROM python:3.12-slim AS llama
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential cmake \
+    && rm -rf /var/lib/apt/lists/*
+
+# GGML_NATIVE=OFF, which is a deliberate trade rather than a default left alone.
+#
+# ON is llama.cpp's default and compiles with `-march=native`, baking whatever
+# instruction set the *build* machine happens to have into the binary. That is
+# free speed as long as the image is only ever run where it was built, and a
+# SIGILL the first time it is not -- an illegal-instruction crash inside a shared
+# object, which is about the least legible failure this stack could produce.
+#
+# What it costs is measured rather than assumed: with it off, the longest memo
+# this app accepts enriches in 36 seconds against a 300-second deadline. There is
+# no latency budget here that native kernels would rescue, so the reproducible
+# build wins. Every number in memo_ai/enrich/local.py was taken with this off.
+ENV CMAKE_ARGS="-DGGML_NATIVE=OFF"
+
+# **This version and the pin in requirements.txt are one decision in two places.**
+# Building `-r requirements.txt` here instead would remove the duplication, and was
+# declined: it would key this two-minute compile to every line of that file, so
+# editing a comment in it would recompile llama.cpp. The drift is safe because it
+# cannot be silent -- a wheel that does not match the pin is a wheel pip ignores,
+# and it then tries to build the sdist in a final stage with no compiler in it,
+# which fails the build rather than shipping the wrong version.
+RUN pip wheel --no-cache-dir --wheel-dir /wheels llama-cpp-python==0.3.34
+
+# --- the image that ships ----------------------------------------------------
 FROM python:3.12-slim
 
 # PYTHONUNBUFFERED because stdout to a pipe is block-buffered, so the last log
@@ -76,8 +124,19 @@ WORKDIR /app
 
 # Dependencies before application code, so editing the claim loop does not
 # re-resolve and re-download the driver.
+#
+# `--find-links` points at the stage above, so the one package with no wheel on
+# PyPI is installed from the one built there and pip never sees an sdist to
+# compile. Everything else resolves from PyPI as before.
+#
+# **Editing this file's requirements refetches the model weights below**, because
+# Docker chains layer cache and the bake sits after this line. That is the cost of
+# keeping one dependency list rather than splitting llama-cpp-python into a second
+# file installed after the bake -- paid once, by whoever pulls the commit that
+# added it, and worth it against a requirements.txt that is not the whole answer.
 COPY requirements.txt ./
-RUN pip install -r requirements.txt
+RUN --mount=type=bind,from=llama,source=/wheels,target=/wheels \
+    pip install --find-links /wheels -r requirements.txt
 
 # --- Model weights, fetched at build and never at runtime (MEMO-15) ----------
 #
@@ -112,12 +171,11 @@ RUN pip install -r requirements.txt
 #     big one leaves an image that reaches the network anyway, for 78 MB, and the
 #     acceptance criterion fails on a detail nobody would look for.
 #
-#   * ${ENRICH_MODEL_FILE}, 1,117 MB. Enrichment is MEMO-21 and does not exist
-#     yet -- memo_ai/enrich.py is a contract and a null implementation. The
-#     weights are baked now anyway, because this is the task that owns "no
-#     surprise runtime download" and doing it later would mean a second 1.1 GB
-#     layer landing on whoever is already holding a built image. MEMO-21 finds it
-#     at ${ENRICH_MODEL_PATH} and writes the loader.
+#   * ${ENRICH_MODEL_FILE}, 1,117 MB. Baked by MEMO-15 before there was anything
+#     to read it, on the argument that this is the task that owns "no surprise
+#     runtime download" and that deferring it would land a second 1.1 GB layer on
+#     everyone already holding a built image. MEMO-21 has since written the
+#     loader: memo_ai/enrich/local.py opens exactly ${ENRICH_MODEL_PATH} below.
 #
 # `download_model` rather than a hand-written repo id, because the mapping from
 # `large-v3-turbo` to a HuggingFace repository lives in faster-whisper and has
@@ -229,10 +287,14 @@ PY
 # not become executable.
 RUN chmod -R a+rX ${MODEL_DIR}
 
-# Read by nothing today. It is set here so MEMO-21's enricher has one documented
-# place to look and does not have to reconstruct this filename from a build arg
-# that will not exist by then, and so `docker inspect` answers "which model did
-# this image bake" without a shell in the container.
+# The contract with memo_ai/config.py's ENRICH_MODEL_PATH, and the reason it is an
+# environment variable where the whisper directory is a Python literal: this path
+# ends in the filename `--build-arg ENRICH_MODEL_FILE` chose, which nothing at
+# runtime could reconstruct. The image writes the answer down; the worker reads it.
+#
+# It also means `docker inspect` says which model this image bakes, without a
+# shell in the container. config.py carries the same default for a bare
+# `docker run`, so an unmodified image and an unmodified config agree.
 ENV ENRICH_MODEL_PATH=${MODEL_DIR}/llm/${ENRICH_MODEL_FILE}
 
 COPY . .

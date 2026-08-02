@@ -75,6 +75,33 @@ DEFAULT_STT_MODEL = "large-v3-turbo"
 DEFAULT_STT_LANGUAGE = None
 DEFAULT_AUDIO_DIR = "/data/audio"
 
+# Mirrors docker-compose.yml. `local` rather than `none`, on the same argument
+# DEFAULT_STT_PROVIDER makes: the committed default must mean "the feature works",
+# because a stack that silently ships without titles and summaries is
+# indistinguishable from one whose enrichment is broken.
+#
+# `none` is the other name, and it is a real configuration rather than a way to
+# turn the feature off in anger -- the local model adds about 1.7 GB to a
+# worker's RSS on the first memo that needs it, of which ~0.6 GB is per-replica
+# and the rest is a shared mapping of the weight file. On a small machine that
+# is worth declining. See memo_ai/enrich/__init__.py for the set.
+DEFAULT_ENRICH_PROVIDER = "local"
+
+# Where ai/Dockerfile bakes the enrichment weights (MEMO-15).
+#
+# Read from the environment, unlike memo_ai/stt/local.py's BAKED_MODEL_DIR, which
+# is a literal on the argument that it is a fact about the image rather than a
+# knob. The difference is that this one is a *filename* and the whisper one is a
+# directory named after STT_MODEL: this path ends in the GGUF that
+# `--build-arg ENRICH_MODEL_FILE` chose, which nothing at runtime could
+# reconstruct. So the Dockerfile writes the answer into the image as an ENV and
+# this reads it, which is the contract that file states at the line.
+#
+# The default repeats what the shipped build args produce, like every other
+# default here, so a bare `docker run` of an image built without changes still
+# finds its model.
+DEFAULT_ENRICH_MODEL_PATH = "/opt/models/llm/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+
 # Ten minutes, mirroring docker-compose.yml and .env.example. Enforced in the
 # worker rather than at the API edge because it cannot be enforced there: the cap
 # is a duration, and the duration of a browser recording is not known until
@@ -121,12 +148,14 @@ DEFAULT_RETRY_BACKOFF_SECONDS = 30.0
 # reaper requeues work that is still in progress -- so it is derived rather than
 # picked, and memo_ai/pipeline.py's `job_budget_seconds` is the derivation.
 #
-# At the shipped defaults that budget is 2,880s: 180s of ffprobe and ffmpeg, 300s
-# waiting for a model load, and 2,400s of decode deadline for a 600-second memo.
-# 3,600 clears it by twelve minutes.
+# At the shipped defaults that budget is 3,300s: 180s of ffprobe and ffmpeg, 300s
+# waiting for a model load, 2,400s of decode deadline for a 600-second memo, and
+# 420s of enrichment. 3,600 clears it by five minutes -- or by twelve on
+# ENRICH_PROVIDER=none, which drops the last term.
 #
 # The margin is not the interesting part -- the coupling is. Raise
-# MAX_AUDIO_SECONDS and the budget moves with it, so this number has to move too.
+# MAX_AUDIO_SECONDS and the budget moves with it, and so does switching
+# ENRICH_PROVIDER, so this number has to move too.
 # The worker recomputes the budget at boot and says so in the log rather than
 # leaving that to whoever edits the .env; see `_warn_if_lease_is_too_short`.
 DEFAULT_REAP_AFTER_SECONDS = 3600.0
@@ -176,6 +205,12 @@ class Settings:
     # empty variable back into its default.
     stt_language: str | None
 
+    # The enrichment pass (MEMO-21). Two settings and no fallback name, unlike
+    # transcription: there is one enricher and giving up on it is not a failure,
+    # so there is nothing for a second provider to be a second opinion about.
+    enrich_provider: str
+    enrich_model_path: Path
+
     max_audio_seconds: float
     poll_seconds: float
 
@@ -210,6 +245,15 @@ class Settings:
             stt_fallback=_string(source, "STT_FALLBACK", DEFAULT_STT_FALLBACK),
             stt_model=_string(source, "STT_MODEL", DEFAULT_STT_MODEL),
             stt_language=_optional(source, "STT_LANGUAGE", DEFAULT_STT_LANGUAGE),
+            # Not validated here, deliberately, and the same way STT_PROVIDER is
+            # not: the set of names lives in memo_ai/enrich/__init__.py beside the
+            # classes it maps to, and a second copy of it in config parsing is a
+            # second thing to forget. The worker resolves the name at boot and
+            # exits 2 on an unknown one, which is the same outcome one line later.
+            enrich_provider=_string(source, "ENRICH_PROVIDER", DEFAULT_ENRICH_PROVIDER),
+            enrich_model_path=Path(
+                _string(source, "ENRICH_MODEL_PATH", DEFAULT_ENRICH_MODEL_PATH)
+            ),
             # Float rather than int, and refused at zero for the same reason the
             # poll interval is: `MAX_AUDIO_SECONDS=0` is not a strict cap, it is a
             # configuration under which every voice memo fails and no text says

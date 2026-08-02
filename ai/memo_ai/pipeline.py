@@ -186,9 +186,10 @@ def run_job(
     #
     # `text` goes to the write as well as to the enricher, and for the same reason it
     # was computed that way: it is whichever transcript the row now holds. The write
-    # cuts a fallback title out of it when the enricher produced none, which is every
-    # memo until MEMO-21 wires one up. Passing it rather than letting the statement
-    # read `memo.transcript` is what makes that work for a *fresh* voice memo, whose
+    # cuts a fallback title out of it when the enricher produced none -- which since
+    # MEMO-21 is the enrichment-failed path and `ENRICH_PROVIDER=none`, rather than
+    # every memo. Passing it rather than letting the statement read
+    # `memo.transcript` is what makes that work for a *fresh* voice memo, whose
     # claim predates its own transcript.
     if queue.finish_ready(memo, enrichment, enrichment_error, text=text):
         log.info(
@@ -239,7 +240,7 @@ def _enriched(
         return None, UNEXPECTED_ENRICHMENT_ERROR
 
 
-def job_budget_seconds(max_audio_seconds: float) -> float:
+def job_budget_seconds(max_audio_seconds: float, enricher: Enricher = NO_ENRICHMENT) -> float:
     """
     The longest one job can legitimately take, summed from the deadlines that bound it.
 
@@ -252,10 +253,11 @@ def job_budget_seconds(max_audio_seconds: float) -> float:
 
     Worst case rather than typical, deliberately -- reaping a live job costs the
     work it was doing, so the bound has to hold for the slowest run that is still
-    working correctly, not the median. At the shipped defaults that is 2,880s: 30s
+    working correctly, not the median. At the shipped defaults that is 3,300s: 30s
     of ffprobe on the upload, 120s of ffmpeg, 30s of ffprobe on the result, 300s
-    waiting for a model to load, and 2,400s of decode deadline for a ten-minute
-    recording. The real numbers are two orders of magnitude smaller.
+    waiting for a model to load, 2,400s of decode deadline for a ten-minute
+    recording, and the 420s of enrichment below. The real numbers are two orders of
+    magnitude smaller.
 
     The STT terms come from the ``local`` provider, which is the only configured
     provider that can spend real time: ``fake`` is instant, and the hosted adapter
@@ -273,12 +275,19 @@ def job_budget_seconds(max_audio_seconds: float) -> float:
     seconds of a state the reaper cannot see. What the backoff does bound is how
     long a memo takes end to end, which is a different question and not this one.
 
-    **Enrichment is not in this sum either, and will have to be.** It runs between
-    the two commit points, inside the same claim, so whatever deadline MEMO-21
-    gives its model call is time this budget currently does not account for. It is
-    zero today because ``NoEnrichment`` returns immediately; the day that changes,
-    its bound belongs here, and the boot check is what will make that visible
-    rather than a comment nobody re-reads.
+    **Enrichment is in this sum as of MEMO-21**, which the previous version of this
+    docstring predicted and left undone. It runs between the two commit points,
+    inside the same claim, so its deadlines are time the row spends in
+    ``processing`` and time the reaper would otherwise count against the lease.
+
+    It is read off the enricher rather than imported from a module, and that is
+    what keeps the sum honest under both configurations. ``NoEnrichment`` returns
+    immediately and contributes nothing -- it has no ``budget_seconds`` at all,
+    which is a stronger statement of "costs no time" than an attribute set to zero
+    -- while the local model contributes its load timeout plus its generation
+    deadline. So ``ENRICH_PROVIDER=none`` gets the 2,880s bound it had before this
+    task, and the shipped configuration gets 3,300s, without either being written
+    down twice.
     """
     return (
         # audio.normalize: probe the upload, transcode it, probe the result.
@@ -292,6 +301,10 @@ def job_budget_seconds(max_audio_seconds: float) -> float:
             local.DEADLINE_FLOOR_SECONDS,
             max_audio_seconds * local.DEADLINE_REALTIME_FACTOR,
         )
+        # getattr rather than a branch on the type, so an enricher written later
+        # opts in by declaring what it can spend -- the same shape the worker uses
+        # for the STT providers' optional `prefetch`.
+        + float(getattr(enricher, "budget_seconds", 0.0))
     )
 
 

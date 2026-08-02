@@ -563,10 +563,11 @@ class MemoRepository
      * alternative -- a stale title in a language the memo is no longer in, with no way to
      * refresh it except editing by hand -- is the worse default.
      *
-     * `summary`, `tags` and `category` go for the same reason and are free today: MEMO-21
-     * has not been built, so they are always null. Clearing them here means it cannot land
-     * with this bug already in it. `tags` is `NOT NULL DEFAULT '{}'`, so it resets to the
-     * empty array rather than to NULL.
+     * `summary`, `tags` and `category` go for the same reason, and since MEMO-21 they are
+     * no longer free: the enrichment pass fills all three, so a retranscribe that left
+     * them would describe the old transcript beside the new one. Clearing them means the
+     * worker's second commit rewrites them from what was actually said this time.
+     * `tags` is `NOT NULL DEFAULT '{}'`, so it resets to the empty array, not to NULL.
      */
     public function retranscribe(string $memoId, ?string $language): ?Memo
     {

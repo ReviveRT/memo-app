@@ -22,8 +22,9 @@ use stdClass;
  * table and is never sent; the queue bookkeeping (attempts, locked_at,
  * next_attempt_at) is the worker's business and no client renders it; and
  * `enrichment_error` is separate from `last_error` on purpose (a failed enrichment
- * still reaches 'ready'), which is a distinction MEMO-21 owns and can surface when
- * there is something to surface.
+ * still reaches 'ready'). Since MEMO-21 there is an enricher that can fail, so that
+ * column now carries sentences -- and a client rendering it must not treat one as a
+ * failed memo, because the transcript is there.
  */
 final class Memo
 {
