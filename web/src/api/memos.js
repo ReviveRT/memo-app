@@ -327,12 +327,48 @@ export async function createMemo(text) {
  *   browser will not disclose -- see below.
  * @returns {Promise<object>}
  */
-export async function createVoiceMemo(blob, filename, onProgress = null) {
+export async function createVoiceMemo(blob, filename, onProgress = null, language = null) {
   const form = new FormData()
 
   form.append('audio', blob, filename)
 
+  // Appended only when there is one, rather than as an empty part. The two are the same
+  // thing to the API -- `nullable` plus ConvertEmptyStringsToNull turns an empty part into
+  // the null that means "detect it" -- but a request with no `language` part reads in a
+  // network log as a memo nobody chose a language for, which is what it is.
+  if (language) {
+    form.append('language', language)
+  }
+
   return storedMemo(await upload('/api/memos', form, onProgress))
+}
+
+/**
+ * POST /api/memos/{id}/retranscribe -- decode a recording again, in a named language.
+ *
+ * Separate from retryMemo, and the difference is which memos it is for. Retry is for a memo
+ * that failed; this is for one that *succeeded* and got the language wrong -- the reason it
+ * exists is that a 2.76-second Romanian memo came back transliterated into Cyrillic, and nine
+ * language-ID approaches across three model architectures all mis-identified the same clip.
+ * Auto-detect stays the default; this is how a person overrules it.
+ *
+ * The 409 is the interesting failure and, as with retry, it is not a client error: it means
+ * the memo is mid-flight, or was typed rather than recorded. request() throws it carrying the
+ * API's own sentence, which names which of the two it was.
+ *
+ * @param {string} id
+ * @param {?string} language A Whisper code, or null to put the memo back on auto-detect --
+ *   the way out for somebody who pinned the wrong language.
+ * @returns {Promise<object>} The memo, back in the queue with its old transcript cleared.
+ */
+export async function retranscribeMemo(id, language) {
+  return storedMemo(
+    await request(`/api/memos/${encodeURIComponent(id)}/retranscribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ language: language ?? null }),
+    }),
+  )
 }
 
 /**

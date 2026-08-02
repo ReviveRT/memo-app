@@ -102,7 +102,11 @@ def run_job(
         with owed_audio(memo, provider, audio_dir, max_audio_seconds) as prepared:
             # None means this memo owes no transcript -- see owed_audio.
             duration_ms = None if prepared is None else prepared.duration_ms
-            transcript = None if prepared is None else provider.transcribe(prepared.path)
+            transcript = (
+                None
+                if prepared is None
+                else provider.transcribe(prepared.path, memo.language)
+            )
     except audio.AudioTooLong as error:
         # Before AudioError and SttError, which it subclasses. It is the one
         # failure that carries its own duration, because the duration is what

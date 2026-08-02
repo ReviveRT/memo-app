@@ -30,7 +30,7 @@ final class FakeMemoRepository extends MemoRepository
     /** Every insert() call, in order, as the repository received it.
      *
      * @var list<array{id: string, source: string, status: string, transcript: ?string,
-     *                 audio_path: ?string, audio_mime: ?string}>
+     *                 language: ?string, audio_path: ?string, audio_mime: ?string}>
      */
     public array $inserted = [];
 
@@ -104,12 +104,14 @@ final class FakeMemoRepository extends MemoRepository
         ?string $transcript,
         ?string $audioPath = null,
         ?string $audioMime = null,
+        ?string $language = null,
     ): Memo {
         $this->inserted[] = [
             'id' => $id,
             'source' => $source,
             'status' => $status,
             'transcript' => $transcript,
+            'language' => $language,
 
             // Recorded under the column names rather than the parameter names, because
             // what the assertions are about is the row -- `audio_path` holds a storage
@@ -139,6 +141,7 @@ final class FakeMemoRepository extends MemoRepository
             durationMs: null,
             lastError: null,
             lastErrorCode: null,
+            language: $language,
             createdAt: '2026-07-31T09:00:00.000Z',
         );
     }
@@ -237,6 +240,60 @@ final class FakeMemoRepository extends MemoRepository
                 durationMs: $memo->durationMs,
                 lastError: $memo->lastError,
                 lastErrorCode: $memo->lastErrorCode,
+                language: $memo->language,
+                createdAt: $memo->createdAt,
+                collectionId: $memo->collectionId,
+                reminders: $memo->reminders,
+            );
+
+            $this->rows[$at] = $queued;
+
+            return $queued;
+        }
+
+        return null;
+    }
+
+    /**
+     * Mirrors the real statement's three conditions, because they are what the endpoint's
+     * two 409 messages are about and a fake that accepted anything would let both pass
+     * untested. See MemoRepository::retranscribe.
+     */
+    public function retranscribe(string $memoId, ?string $language): ?Memo
+    {
+        foreach ($this->rows as $at => $memo) {
+            if ($memo->id !== $memoId) {
+                continue;
+            }
+
+            if ($memo->source !== Memo::SOURCE_VOICE) {
+                return null;
+            }
+
+            if (! in_array($memo->status, ['ready', 'failed'], true)) {
+                return null;
+            }
+
+            // `transcript: null` is the part worth copying rather than glossing: the
+            // worker decides whether a claimed memo owes a transcript by asking whether it
+            // already has one, so a fake that kept the old text would hide the bug where
+            // the real UPDATE forgets to clear it.
+            //
+            // `title`, `summary` and `tags` go the same way, and that is a bug this fake
+            // once hid: the title is cut out of the transcript, so a Romanian memo
+            // re-decoded from Cyrillic kept the title `Салют`.
+            $queued = new Memo(
+                id: $memo->id,
+                source: $memo->source,
+                status: Memo::STATUS_QUEUED,
+                transcript: null,
+                title: null,
+                summary: null,
+                tags: [],
+                durationMs: $memo->durationMs,
+                lastError: null,
+                lastErrorCode: null,
+                language: $language,
                 createdAt: $memo->createdAt,
                 collectionId: $memo->collectionId,
                 reminders: $memo->reminders,

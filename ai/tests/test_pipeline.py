@@ -84,6 +84,28 @@ def test_a_voice_memo_is_normalized_from_audio_dir_joined_to_the_key(audio_dir, 
     assert normalizer.calls[0].max_seconds == MAX_SECONDS
 
 
+def test_the_language_on_the_row_is_handed_to_the_provider(audio_dir, normalizer):
+    """
+    The whole path of the setting: a language chosen in the browser, stored on the memo
+    by the API, read by the claim projection, and passed to the provider for this job
+    only. Broken anywhere along it, the user's choice is silently ignored and the memo
+    comes back in whatever the detector guessed.
+    """
+    provider = RecordingStt()
+
+    run(FakeQueue(), claimed_memo(language="ro"), provider, audio_dir)
+
+    assert provider.languages == ["ro"]
+
+
+def test_a_row_with_no_language_leaves_the_provider_to_detect(audio_dir, normalizer):
+    provider = RecordingStt()
+
+    run(FakeQueue(), claimed_memo(language=None), provider, audio_dir)
+
+    assert provider.languages == [None]
+
+
 def test_the_provider_is_handed_the_normalized_copy_not_the_original(audio_dir, normalizer):
     # The whole point of the module: one decode path, so a provider never sees
     # Chrome WebM, Firefox Ogg and Safari MP4 as three different problems.

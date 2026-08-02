@@ -7,6 +7,7 @@ import {
   createReminder,
   patchMemo,
   renameMemo,
+  retranscribeMemo,
   retryMemo,
 } from '../api/memos'
 import { applyMemoEverywhere, createMemoList, removeMemoEverywhere } from './useMemoList'
@@ -177,21 +178,29 @@ function submit(text) {
  * @param {string} filename
  * @returns {Promise<boolean>}
  */
-function submitAudio(blob, filename) {
+function submitAudio(blob, filename, language = null) {
   // Reset before the request rather than after it, so a second recording never shows
   // the first one's finished bar for the instant before its own first progress event.
   uploadProgress.value = null
 
   return store(
     (toast) =>
-      createVoiceMemo(blob, filename, (fraction) => {
-        uploadProgress.value = fraction
+      createVoiceMemo(
+        blob,
+        filename,
+        (fraction) => {
+          uploadProgress.value = fraction
 
-        // The same number to two places, and they are not redundant: this one is the bar
-        // under the Record button, which is where somebody who has just pressed Submit is
-        // looking, and the toast is what carries the wait once that bar has gone.
-        toast.uploading(fraction)
-      }),
+          // The same number to two places, and they are not redundant: this one is the bar
+          // under the Record button, which is where somebody who has just pressed Submit is
+          // looking, and the toast is what carries the wait once that bar has gone.
+          toast.uploading(fraction)
+        },
+
+        // Null unless the recorder chose one, and null means detect -- which is the default
+        // and right for most memos. See web/src/languages.js for why the choice exists.
+        language,
+      ),
     uploading,
     audioError,
     'Could not upload the recording',
@@ -475,6 +484,53 @@ async function retry(memo) {
 }
 
 /**
+ * Decode a memo's recording again, in a language the user names.
+ *
+ * The same shape as `retry` above and for the same reasons -- per-memo re-entry guard rather
+ * than the page-wide `working` flag, toasts rather than `memoError`, and the returned row
+ * applied everywhere it is rendered. `retrying` is reused as that guard: from the user's side
+ * both buttons mean "do this memo again", and a memo with one of them in flight should not
+ * accept the other.
+ *
+ * What differs is which memos it is offered on. Retry is for a memo that failed; this is for
+ * one that came back with the wrong words because the language was misdetected, which is a
+ * `ready` memo the API will happily requeue. web/src/languages.js has the measurements behind
+ * why that case is common enough to build a control for.
+ *
+ * The old transcript is cleared server-side, so the card goes back to `queued` and the poll
+ * that was already watching it shows the replacement arriving. Nothing here has to blank it.
+ *
+ * @param {object} memo The memo to decode again, as the caller is rendering it.
+ * @param {?string} language A Whisper code, or null to put it back on auto-detect.
+ * @returns {Promise<?object>} The memo, now queued, or null if it was refused or a press for
+ *   this memo was already in flight.
+ */
+async function retranscribe(memo, language) {
+  if (retrying.has(memo.id)) {
+    return null
+  }
+
+  retrying.add(memo.id)
+
+  const toast = startMemoToast('retry')
+
+  try {
+    const updated = await retranscribeMemo(memo.id, language)
+
+    applyMemoEverywhere(updated)
+    toast.stored(updated)
+
+    return updated
+  } catch (error) {
+    toast.rejected(error.message)
+
+    return null
+  } finally {
+    retrying.delete(memo.id)
+  }
+}
+
+/**
  * Set a reminder on a memo.
  *
  * @param {object} memo The memo being reminded about, as the caller is rendering it.
@@ -523,6 +579,7 @@ export function useMemos() {
     rename,
     remove,
     retry,
+    retranscribe,
     addReminder,
     dropReminder,
   }

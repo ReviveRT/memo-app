@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import ReminderFields from './ReminderFields.vue'
 import { canRetry, failureReason } from '../memoFailure'
+import { AUTO_DETECT, LANGUAGES, languageName } from '../languages'
 import { memoLabel } from '../memoLabel'
 import { useCollections } from '../composables/useCollections'
 import { ask } from '../composables/useConfirm'
@@ -38,7 +39,29 @@ const emit = defineEmits(['close', 'changed'])
  */
 const MAX_TITLE_LENGTH = 200
 
-const { moveMemo, rename, remove, retry, dropReminder, memoError, working } = useMemos()
+const { moveMemo, rename, remove, retry, retranscribe, dropReminder, memoError, working } =
+  useMemos()
+
+/**
+ * Send the memo back through transcription in the chosen language.
+ *
+ * Guarded against a no-op change, because a `change` event fires on any commit the browser
+ * considers one -- including a keyboard user arrowing back to where they started. Re-decoding a
+ * memo into the language it is already in would spend a worker to produce the same transcript
+ * and blank the card while doing it.
+ *
+ * The empty option is Auto-detect, which becomes null: that is a real request rather than a
+ * cancel, and it is the way back for somebody who pinned the wrong language.
+ */
+function onLanguageChange(memo, chosen) {
+  const language = chosen || null
+
+  if (language === (memo.language ?? null)) {
+    return
+  }
+
+  return retranscribe(memo, language)
+}
 const { collections } = useCollections()
 
 const dialogEl = ref(null)
@@ -433,6 +456,52 @@ async function removeReminder(reminderId) {
           — this puts it back at the front of the queue.
         </p>
       </div>
+
+      <!--
+        Wrong language rather than no transcript.
+
+        Offered on a memo that *succeeded*, which is what makes it a separate control from Retry
+        above rather than an option on it. A Romanian memo transliterated into Cyrillic is a
+        `ready` row with a full transcript on it: nothing failed, and the only thing that knows
+        it is wrong is the person who spoke. web/src/languages.js has the measurements — nine
+        language-ID approaches across three model architectures, all wrong on the same clip.
+
+        Voice memos only, and that is the whole of the condition worth having here: a typed memo
+        has no recording to decode, and the API refuses one with a 409 saying so. Showing the
+        control and letting the server refuse would be a button that exists to fail.
+
+        A submit-on-change select rather than a picker plus an Apply button. There is one field
+        and choosing a value *is* the instruction, so a second click would only be a chance to
+        change your mind about a decode that takes a few seconds and can be redone. The current
+        language is what the select shows, so this doubles as the display of what the memo was
+        last decoded as -- which is why `language` is on the wire at all.
+      -->
+      <section v-if="memo.source === 'voice'" class="sheet__section sheet__language">
+        <h3 class="sheet__label">Spoken language</h3>
+
+        <label class="sheet__language-control">
+          <select
+            class="sheet__select"
+            :value="memo.language ?? AUTO_DETECT"
+            :disabled="working"
+            @change="onLanguageChange(memo, $event.target.value)"
+          >
+            <option :value="AUTO_DETECT">Auto-detect</option>
+
+            <option v-for="option in LANGUAGES" :key="option.code" :value="option.code">
+              {{ option.name }}
+            </option>
+          </select>
+
+          <span class="sheet__hint">
+            {{
+              memo.language
+                ? `Decoded as ${languageName(memo.language)}. Choose another to transcribe it again.`
+                : 'The language was detected automatically. Choose one to transcribe it again.'
+            }}
+          </span>
+        </label>
+      </section>
 
       <section v-if="memo.tags?.length" class="sheet__section">
         <h3 class="sheet__label">Tags</h3>

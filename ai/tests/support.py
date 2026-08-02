@@ -40,6 +40,9 @@ def claimed_memo(**overrides) -> ClaimedMemo:
         "transcript": None,
         "audio_path": "2026/07/31/memo.webm",
         "attempts": 1,
+        # None is the interesting default here too: nobody named a language, so the
+        # provider detects. Tests about the override pass `language=` explicitly.
+        "language": None,
         "locked_at": LOCKED_AT,
     }
 
@@ -53,11 +56,16 @@ class RecordingStt:
 
     def __init__(self, text: str = "transcribed", error: Exception | None = None) -> None:
         self.calls: list[Path] = []
+
+        # Kept beside `calls` rather than folded into it as tuples, so the existing
+        # assertions on paths stay assertions on paths.
+        self.languages: list[str | None] = []
         self._text = text
         self._error = error
 
-    def transcribe(self, audio: Path) -> Transcript:
+    def transcribe(self, audio: Path, language: str | None = None) -> Transcript:
         self.calls.append(audio)
+        self.languages.append(language)
 
         if self._error is not None:
             raise self._error

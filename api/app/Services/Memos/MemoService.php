@@ -72,7 +72,7 @@ final class MemoService
      * already in recording order, and the id is what a row and its blob are matched by
      * when something has gone wrong.
      */
-    public function createFromAudio(AudioUpload $audio): Memo
+    public function createFromAudio(AudioUpload $audio, ?string $language = null): Memo
     {
         $id = Str::uuid7()->toString();
         $key = "{$id}.{$audio->extension}";
@@ -92,7 +92,41 @@ final class MemoService
 
             audioPath: $key,
             audioMime: $audio->mimeType,
+
+            // Null unless the recorder chose one, and null means detect. Not defaulted
+            // to anything: 005_memo_language.sql has why guessing on the user's behalf
+            // is the failure this column exists to stop.
+            language: $language,
         );
+    }
+
+    /**
+     * Send a voice memo back through transcription in a named language.
+     *
+     * Separate from `retry` below, which answers a different question -- see
+     * `MemoRepository::retranscribe` for why the two SQL statements are not one. What
+     * they do share is :class:`RetryOutcome`, and that is reuse rather than a shortcut:
+     * its three cases are "it went back to the queue", "the memo is in a state where it
+     * cannot" and "there is no such memo", which is exactly this call's answer set too.
+     * The alternative was a second identical class differing only in the word Retry.
+     *
+     * `$language` may be null, which re-runs the memo on auto-detect. That is worth
+     * having rather than refusing: it is the way back for somebody who pinned the wrong
+     * language and wants the model to try again on its own.
+     */
+    public function retranscribe(string $memoId, ?string $language): RetryOutcome
+    {
+        $requeued = $this->repository->retranscribe($memoId, $language);
+
+        if ($requeued !== null) {
+            return RetryOutcome::requeued($requeued);
+        }
+
+        $current = $this->repository->find($memoId);
+
+        return $current === null
+            ? RetryOutcome::missing()
+            : RetryOutcome::refused($current);
     }
 
     /**

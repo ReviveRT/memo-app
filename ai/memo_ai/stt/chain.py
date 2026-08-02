@@ -80,9 +80,14 @@ class FallbackStt:
         if warm is not None:
             warm()
 
-    def transcribe(self, source: Path) -> Transcript:
+    def transcribe(self, source: Path, language: str | None = None) -> Transcript:
+        # Passed to both, unchanged. The memo's language is a fact about the
+        # recording rather than about which provider answered, so a fallback that
+        # decoded in a different language than the primary was asked for would be
+        # the one thing this class exists to prevent: a result whose `provider`
+        # field no longer describes what produced it.
         try:
-            return self.primary.transcribe(source)
+            return self.primary.transcribe(source, language)
         except SttUnavailable as unavailable:
             # Warning, not error: the fallback may well succeed, and this line is
             # then the only record that the configured provider did not. It is
@@ -96,4 +101,4 @@ class FallbackStt:
                 self.fallback.name,
             )
 
-        return self.fallback.transcribe(source)
+        return self.fallback.transcribe(source, language)

@@ -483,7 +483,7 @@ class LocalWhisperStt:
         self._model: object | None = None
         self._load: "_BackgroundCall | None" = None
 
-    def transcribe(self, source: Path) -> Transcript:
+    def transcribe(self, source: Path, language: str | None = None) -> Transcript:
         engines = self._ready_model()
 
         try:
@@ -522,7 +522,22 @@ class LocalWhisperStt:
             # measured here. The two settings did produce different text on that
             # file; which is *better* is not something a character count answers,
             # so the library's tuned default stands.
-            language = self.language or _detected(engines.detector, source)
+            # Three sources, in order of how much they know about this recording:
+            # the person who made it, the deployment, then a model guessing.
+            #
+            # The argument comes first because it is the only one of the three that
+            # is about *this memo*. It exists because detection cannot be relied on:
+            # a 2.76-second Romanian memo was called `en` 0.14 by `tiny`, `lt` 0.99
+            # by VoxLingua107 and `rus` 0.98 by Meta's MMS-LID, and nine approaches
+            # across three architectures all failed on it while every one of them
+            # identified clean Romanian and the same speaker's Russian correctly.
+            # 005_memo_language.sql has the table. Sub-3-second language ID is a
+            # known limit rather than a model to swap out, so the user gets to say.
+            #
+            # `_detected` still runs when nobody said, and is still skipped entirely
+            # when somebody did -- naming the language is worth about 30 percent of
+            # the job because it removes a whole encoder pass.
+            language = language or self.language or _detected(engines.detector, source)
 
             options = {
                 "language": language,

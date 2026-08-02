@@ -59,6 +59,44 @@ final class AudioUploadEdgeTest extends TestCase
         parent::tearDown();
     }
 
+    public function test_a_language_chosen_in_the_browser_lands_on_the_row(): void
+    {
+        // The whole point of the field: it has to be on the row before a worker claims it,
+        // which can be a poll interval after this INSERT commits. Anything that stored it
+        // afterwards would race the claim and lose on a fast queue.
+        $this->post('/api/memos', [
+            StoreMemoRequest::AUDIO_FIELD => $this->recording(4_096),
+            'language' => 'ro',
+        ])->assertCreated();
+
+        $this->assertSame('ro', $this->repository->inserted[0]['language']);
+    }
+
+    public function test_no_language_is_stored_as_null_rather_than_guessed(): void
+    {
+        $this->post('/api/memos', [
+            StoreMemoRequest::AUDIO_FIELD => $this->recording(4_096),
+        ])->assertCreated();
+
+        // Null means detect. A default of 'en' here would silently pin every memo from
+        // anyone who never opened the picker, which is the failure the column exists to
+        // stop -- see 005_memo_language.sql.
+        $this->assertNull($this->repository->inserted[0]['language']);
+    }
+
+    public function test_an_unknown_language_is_refused_and_nothing_is_written(): void
+    {
+        $this->post('/api/memos', [
+            StoreMemoRequest::AUDIO_FIELD => $this->recording(4_096),
+            'language' => 'ro-RO',
+        ])->assertStatus(422)->assertJsonValidationErrors('language');
+
+        // Refused before the blob is written, like every other rejection on this route: a
+        // recording stored under a memo that was never inserted is an orphan on the volume.
+        $this->assertSame([], $this->repository->inserted);
+        $this->assertSame([], $this->storage->written);
+    }
+
     public function test_a_file_that_is_not_a_recording_is_refused_however_it_is_labelled(): void
     {
         // The acceptance criterion, in the words the task uses: a .txt renamed to .webm

@@ -57,7 +57,7 @@ final class MemoTest extends TestCase
             [
                 'id', 'source', 'status', 'transcript', 'title',
                 'summary', 'tags', 'duration_ms', 'last_error', 'last_error_code',
-                'created_at', 'collection_id', 'reminders',
+                'language', 'created_at', 'collection_id', 'reminders',
             ],
             array_keys(Memo::fromRow($this->row())->toArray()),
         );
@@ -251,6 +251,11 @@ final class MemoTest extends TestCase
             'duration_ms' => null,
             'last_error' => null,
             'last_error_code' => null,
+
+            // Null is "detect it", which is what every memo means unless the person who
+            // recorded it said otherwise. See 005_memo_language.sql.
+            'language' => null,
+
             // Already formatted; the query does this with to_char so nothing here has
             // to guess at the server's DateStyle. Named created_at_iso rather than
             // created_at so that ORDER BY in the list query cannot bind to it -- see

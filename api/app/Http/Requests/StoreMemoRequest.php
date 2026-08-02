@@ -7,6 +7,7 @@ namespace App\Http\Requests;
 use App\Exceptions\StorageException;
 use App\Http\Rules\NoNullBytes;
 use App\Http\Rules\SniffedAudioType;
+use App\Http\Rules\SupportedLanguage;
 use App\Services\Memos\AudioUpload;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Http\UploadedFile;
@@ -388,7 +389,37 @@ final class StoreMemoRequest extends FormRequest
                 // rejectUnacceptableUpload().
                 new SniffedAudioType,
             ],
+
+            // Absent means "detect it", which is why there is no default and no `en`
+            // fallback: the absence is the instruction, exactly as STT_LANGUAGE's empty
+            // value is in memo_ai/config.py. `nullable` so a client that sends the field
+            // empty -- a <select> whose "Auto-detect" option has value="" -- means the
+            // same thing as one that omits it, since ConvertEmptyStringsToNull turns
+            // that into a present null.
+            //
+            // Accepted on a text memo as well as a recording, and it is simply ignored
+            // there: a typed memo is never transcribed, so there is no decode for it to
+            // steer. Refusing the pair would mean the browser had to strip the field
+            // depending on which control the user used, to no benefit.
+            'language' => [
+                'nullable',
+                'string',
+                new SupportedLanguage,
+            ],
         ];
+    }
+
+    /**
+     * The language this memo should be decoded in, or null to detect it.
+     *
+     * Null for both "absent" and "present but empty", because the browser's
+     * "Auto-detect" option sends an empty value and means the same thing.
+     */
+    public function language(): ?string
+    {
+        $language = $this->validated()['language'] ?? null;
+
+        return is_string($language) && $language !== '' ? $language : null;
     }
 
     /**

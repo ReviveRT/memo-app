@@ -1,7 +1,8 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import ProgressBar from './ProgressBar.vue'
 import { CLOUD_ANCHOR_ID } from '../cloudAnchor'
+import { AUTO_DETECT, LANGUAGES } from '../languages'
 import { useMemos } from '../composables/useMemos'
 import { useRecorder } from '../composables/useRecorder'
 
@@ -30,6 +31,21 @@ const {
 } = useRecorder()
 
 const elapsed = computed(() => formatElapsed(elapsedMs.value))
+
+/**
+ * What to decode the next recording in. Empty means detect it, which is the default.
+ *
+ * Component state rather than a store, and it deliberately survives a submission: somebody who
+ * has just told the app they are speaking Romanian is probably about to record another Romanian
+ * memo, and resetting to Auto-detect after every one would make the control something you have
+ * to set every single time. It resets on reload, which is the right amount of stickiness for a
+ * setting with no account behind it.
+ *
+ * Not persisted to localStorage for the same reason it is not global: a language silently
+ * remembered from last week, applied to a memo in a different one, is the failure this whole
+ * control exists to fix -- just with the app doing the misdetecting instead of the model.
+ */
+const language = ref(AUTO_DETECT)
 
 /**
  * Whichever went wrong: the microphone would not open, or the upload failed.
@@ -71,7 +87,10 @@ async function onSubmit() {
   // the button reads and the flag that guards re-entry are the same one. Set here, the
   // two could disagree -- and it is the guard, not the label, that decides whether this
   // recording is posted at all.
-  await submitAudio(recorded.blob, recorded.filename)
+  // `|| null`, so the Auto-detect option's empty string reaches the API as an absent field
+  // rather than as an empty one. Both mean "detect it" server-side, but the request is more
+  // legible without it -- see createVoiceMemo.
+  await submitAudio(recorded.blob, recorded.filename, language.value || null)
 }
 
 /**
@@ -150,6 +169,42 @@ function formatElapsed(ms) {
         {{ elapsed }}
       </span>
     </template>
+
+    <!--
+      The language for the next recording.
+
+      **Visible before recording and not during it**, which is the opposite of what a first
+      draft does. The choice has to be made before Submit to have any effect, so offering it
+      mid-recording would invite somebody to change it while talking and expect the change to
+      apply -- and it would, but only because the value is read at Submit, which is a coupling
+      nobody should have to reason about. Hidden while uploading too: by then the memo is gone
+      and the field would be describing the next one while looking like it described this one.
+
+      Disabled rather than hidden during `uploading` would keep the layout stable, and is worse:
+      a greyed-out control that reappears enabled a second later reads as something the app is
+      doing, not as something waiting for you.
+
+      A plain <select> rather than a search-as-you-type combobox. Thirty-odd options is inside
+      what a native select handles well, and the native one is the only version that gets
+      keyboard support, screen-reader announcement and the platform's own scrolling for free --
+      on a phone it becomes the OS picker, which is better than anything here would be.
+    -->
+    <label v-if="!recording && !uploading" class="recorder__language">
+      <span class="recorder__language-label">Language</span>
+
+      <select v-model="language" class="recorder__language-select">
+        <!--
+          First, and the default. Detection is right most of the time and this control exists
+          for when it is not -- so the honest ordering puts the automatic choice at the top
+          rather than making everyone pick from a list on every memo.
+        -->
+        <option :value="AUTO_DETECT">Auto-detect</option>
+
+        <option v-for="option in LANGUAGES" :key="option.code" :value="option.code">
+          {{ option.name }}
+        </option>
+      </select>
+    </label>
 
     <span v-if="!recording && !uploading" class="recorder__hint">
       Speak a memo — it is transcribed after you submit.

@@ -1,0 +1,54 @@
+-- 005_memo_language.sql — what language to decode this memo in, when the models cannot
+-- be trusted to work it out.
+--
+-- Same two rules as every file in this directory, because db/migrate.sh wraps it and
+-- its ledger row in one `psql --single-transaction` call:
+--
+--   * no BEGIN/COMMIT in here
+--   * nothing illegal inside a transaction block: CREATE INDEX CONCURRENTLY,
+--     CREATE DATABASE, VACUUM
+--
+-- `STT_LANGUAGE` already existed and was the wrong shape for this. It is one value for
+-- the whole deployment, so it answers "everyone here speaks Romanian" and cannot answer
+-- "this memo was Romanian and the last one was Russian" — which is the case for anyone
+-- who speaks more than one language, i.e. the case that made this column necessary.
+--
+-- **Why a column rather than better detection.** A 2.76-second Romanian memo recorded
+-- into this app came back transliterated into Cyrillic, because the language was
+-- detected as Russian. Nine approaches were measured on that one recording:
+--
+--   whisper tiny         `en` 0.14        VoxLingua107 ECAPA      `lt` 0.99
+--   whisper base         `el` 0.39        Meta MMS-LID-256        `rus` 0.98
+--   whisper small        `lt` 0.63        CommonLanguage ECAPA    no signal
+--   whisper medium       `lt` 0.23        avg_logprob rescoring   `uk`
+--   whisper large-v3-turbo `ru` 0.19
+--
+-- Not one returned `ro`, and two were confidently wrong at 0.98 and 0.99. Three
+-- unrelated architectures — OpenAI's, SpeechBrain's ECAPA, Meta's wav2vec2 — trained on
+-- different corpora, all landing on Slavic or Baltic. Every one of them identifies clean
+-- Romanian TTS and the same speaker's Russian correctly, so the models are fine and
+-- those 2.76 seconds are the problem: sub-3-second language ID is a known hard limit,
+-- and the accent plus "mă numesc" run into one word leaves little for it to key on.
+--
+-- That is not a gap to out-engineer. Whisper's own API exposes a `language` parameter
+-- for the same reason, and every shipping dictation product asks the user. Auto-detect
+-- stays the default; this column is the override.
+--
+-- Nullable, and NULL is the load-bearing value: it means "detect it", which is what
+-- every existing row means and what every new memo means unless the user says otherwise.
+-- So there is no backfill and no DEFAULT — a DEFAULT of 'en' would silently pin every
+-- memo written before the user chose anything, which is the failure this column exists
+-- to stop.
+--
+-- **No CHECK constraint**, for the reason 004_last_error_code.sql gives about
+-- `last_error_code` and it applies here with one addition of its own: the valid set
+-- belongs to whichever model is configured, and it changes with the model. Whisper knows
+-- 99 codes today; a provider added later may know more or fewer, and a code this build
+-- has never heard of is a configuration to reject at the edge rather than a corrupt row.
+-- api/app/Http/Rules/SupportedLanguage.php holds the list the API will accept, so a typo
+-- is refused with a readable sentence before it reaches this column.
+--
+-- No index. It is read as part of the row wherever a memo is read and nothing filters or
+-- groups by it.
+
+ALTER TABLE memos ADD COLUMN IF NOT EXISTS language text;

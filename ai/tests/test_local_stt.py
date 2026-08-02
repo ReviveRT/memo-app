@@ -240,6 +240,60 @@ def test_english_still_gets_the_primer():
     assert model.calls[0][1]["initial_prompt"] == PUNCTUATION_PRIMER
 
 
+def test_the_memos_own_language_outranks_the_configured_one():
+    """
+    Three sources can name a language and this is the order: the person who recorded
+    the memo, then STT_LANGUAGE, then a model guessing. The argument is the only one
+    of the three that is about *this* recording.
+    """
+    model = StubModel()
+    provider(model, language="en").transcribe(AUDIO, "ro")
+
+    assert model.calls[0][1]["language"] == "ro"
+
+
+def test_a_named_language_skips_detection_entirely():
+    """
+    The detector is the expensive part -- a whole extra encoder pass, worth about 30
+    percent of a short job -- so being told the language has to be worth something.
+    """
+    detector = StubDetector(language="en", probability=0.99)
+    model = StubModel()
+    provider(model, detector=detector).transcribe(AUDIO, "ro")
+
+    assert model.calls[0][1]["language"] == "ro"
+    assert detector.calls == 0
+
+
+def test_the_detector_still_runs_when_nobody_named_a_language():
+    """The other side of that: None means detect, which is the default path."""
+    detector = StubDetector(language="en", probability=0.99)
+    model = StubModel()
+    provider(model, detector=detector).transcribe(AUDIO)
+
+    assert model.calls[0][1]["language"] == "en"
+    assert detector.calls == 1
+
+
+def test_a_memo_named_as_non_english_is_not_primed():
+    """
+    The primer bound holds against the per-memo language too. Choosing Romanian and
+    still being handed an English primer would reproduce the translation bug through
+    the new setting -- see PUNCTUATION_PRIMER.
+    """
+    model = StubModel()
+    provider(model).transcribe(AUDIO, "ro")
+
+    assert "initial_prompt" not in model.calls[0][1]
+
+
+def test_a_memo_named_as_english_is_primed():
+    model = StubModel()
+    provider(model).transcribe(AUDIO, "en")
+
+    assert model.calls[0][1]["initial_prompt"] == PUNCTUATION_PRIMER
+
+
 def test_decoding_is_deterministic_and_discourages_repetition():
     # The two settings are a pair and neither works alone: a penalty under the
     # default temperature ladder swings between losing the transcript and not
