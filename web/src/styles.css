@@ -65,24 +65,22 @@ body {
  * a grid whose whole specification is "as many columns as the screen allows". At 44rem that
  * grid is two columns on any monitor, which makes the three-row cap meaningless.
  *
- * The reading column is preserved where it still matters -- the composer and the recorder cap
- * themselves below, because a textarea the width of a desktop screen is unusable for the same
- * reason a newspaper has columns.
+ * This is now the measure for the whole screen, the two writing controls included. They used
+ * to keep the old 44rem column for a newspaper-column argument about reading length, and that
+ * argument was about the wrong text: what is typed into the box is a memo of a line or two,
+ * and what comes back out of it is read on a card. All the cap actually did was leave the
+ * textarea visibly short of the grid beneath it, which read as a leftover rather than as a
+ * measure.
+ *
+ * The bloom is unaffected by the change, which is worth saying because it is anchored to the
+ * Record button (MemoBackdrop). That button is the first item of a left-aligned flex row, so
+ * widening the row does not move it: the hot core still sits in the left third of a wide
+ * window rather than dead centre, which is where the cards are.
  */
 .app {
   max-width: 72rem;
   margin: 0 auto;
   padding: 2rem 1rem 4rem;
-}
-
-/*
- * The two writing controls keep the old measure. The bloom is anchored to the Record button
- * (MemoBackdrop), so this also keeps the hot core in the left third of a wide window rather
- * than dead centre, which is where the cards are.
- */
-.recorder,
-.composer {
-  max-width: 44rem;
 }
 
 /*
@@ -307,6 +305,26 @@ h1,
 .recorder__elapsed {
   color: var(--muted);
   font-size: 0.85rem;
+}
+
+/*
+ * Pushed to the far end of the row, so it ends where the textarea below it ends rather than
+ * sitting against the Record button. Two things are being kept apart by that gap: a label for
+ * the button, which is what it looks like beside it, and a line about what the screen is for,
+ * which is what it is.
+ *
+ * `margin-left: auto` rather than `justify-content: space-between` on the row, because the row
+ * has four other children -- Submit, Discard and the timer are a group that has to stay
+ * together while recording, and space-between would fling them apart. The auto margin belongs
+ * to the one element that wants the space, and the hint is not on screen at the same time as
+ * any of them.
+ *
+ * `text-align: right` for the wrap. The row wraps, and on a narrow window this sentence takes
+ * two lines; without it the second line would start at the left of a right-hand block.
+ */
+.recorder__hint {
+  margin-left: auto;
+  text-align: right;
 }
 
 /*
