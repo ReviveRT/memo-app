@@ -126,6 +126,54 @@ final class MemoController extends Controller
     }
 
     /**
+     * Send a failed memo back to the worker (MEMO-17).
+     *
+     * **The one 409 in this project, and the argument for it is what the client does next.**
+     * Every other write here answers a request naming something that is not there with a 404,
+     * and this route has that case too -- but it also has a second one that is not it: the
+     * memo is right there and is simply not failed, because the worker finished it, or
+     * because the other tab pressed Retry a second ago. Flattening that into a 404 would put
+     * "That memo no longer exists" under a memo the user is looking at, and the frontend
+     * renders these sentences verbatim. 409 says the request was well-formed and the
+     * resource's state is what refused it, which is exactly true.
+     *
+     * The message names the state it found, so the answer to "why did nothing happen" is in
+     * the response rather than in a second request. A 200 for the refused case was the other
+     * candidate -- retry-as-idempotent, "it is queued or better, which is what you wanted" --
+     * and it was rejected because it is not idempotent underneath: `ready` and `processing`
+     * are refused for real reasons (see MemoRepository::requeue), and reporting a refusal as
+     * a success would hide a `ready` memo's title being spared, not describe it.
+     *
+     * No body, and no FormRequest. There is nothing to send: the id is in the path and the
+     * new state is not the client's to choose. ValidateJsonBody lets a bodyless POST through,
+     * and one carrying broken JSON is still a 400 -- which is right, since a client sending a
+     * body here has misunderstood the route.
+     */
+    public function retry(string $memo): JsonResponse
+    {
+        $outcome = $this->memos->retry($memo);
+
+        if ($outcome->memo === null) {
+            abort(Response::HTTP_NOT_FOUND, 'That memo no longer exists.');
+        }
+
+        if (! $outcome->requeued) {
+            abort(
+                Response::HTTP_CONFLICT,
+                "Only a failed memo can be retried, and this one is {$outcome->memo->status}."
+                    .' Refresh to see where it got to.',
+            );
+        }
+
+        // 200 with the whole memo, like every other write on this resource, and it earns its
+        // keep here more than most: the row comes back `queued`, which is what flips the
+        // frontend's `pending` and restarts the poll that will show the retry finishing. A
+        // 204 would leave the card sitting on `failed` until something else happened to
+        // refresh it.
+        return response()->json(['memo' => $outcome->memo->toArray()]);
+    }
+
+    /**
      * Delete a memo, its recording, and any reminders hanging off it.
      *
      * **200 with the deleted memo rather than 204.** Every other write on this resource

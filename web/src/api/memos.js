@@ -14,7 +14,7 @@
  * `from`, `to` and `collection`. Nothing already read here has changed type -- `query`
  * is still a string or null -- see api/app/Http/Controllers/MemoController.php.
  */
-import { JSON_CONTENT_TYPE, request } from './request'
+import { JSON_CONTENT_TYPE, errorMessage, request } from './request'
 
 /**
  * Builds a query string from a filter, leaving out everything that is not set.
@@ -171,6 +171,29 @@ export async function renameMemo(id, title) {
 export async function deleteMemo(id) {
   return storedMemo(
     await request(`/api/memos/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  )
+}
+
+/**
+ * POST /api/memos/{id}/retry -- send a failed memo back to the worker (MEMO-17).
+ *
+ * Answers with the memo, now `queued`, which is the part that matters to the caller rather
+ * than a formality: `queued` is non-terminal, so merging this row into a list flips that
+ * list's `pending` and restarts the poll. Without the body the card would sit on `failed`
+ * until something else happened to refresh it, and the press would look like it did nothing.
+ *
+ * **A 409 is the interesting failure and it is not an error in the client.** It means the memo
+ * is no longer failed -- the worker finished it, or another tab pressed this first -- and the
+ * API's sentence names the state it found instead. request() throws it like any other non-2xx,
+ * carrying that sentence, which is the right thing to put in front of somebody whose button
+ * appeared to do nothing. A 404 is the same shape for a memo that has since been deleted.
+ *
+ * @param {string} id
+ * @returns {Promise<object>} The memo, back in the queue.
+ */
+export async function retryMemo(id) {
+  return storedMemo(
+    await request(`/api/memos/${encodeURIComponent(id)}/retry`, { method: 'POST' }),
   )
 }
 
@@ -382,13 +405,12 @@ function upload(path, form, onProgress) {
       }
 
       if (xhr.status < 200 || xhr.status >= 300) {
-        reject(
-          new Error(
-            typeof body?.message === 'string' && body.message !== ''
-              ? body.message
-              : `The API answered HTTP ${xhr.status}.`,
-          ),
-        )
+        // The one branch of the three that is shared as code rather than restated. The other
+        // two are one sentence each and read better written out in XHR's vocabulary; this one
+        // now carries a rule -- a 5xx body is never shown, whatever it says (MEMO-17) -- and a
+        // rule stated twice is a rule that will be true in one place. A recording is the
+        // *most* likely request to hit a 500, since it is the one that writes to a volume.
+        reject(new Error(errorMessage(xhr.status, body)))
 
         return
       }

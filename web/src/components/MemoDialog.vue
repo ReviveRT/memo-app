@@ -1,7 +1,7 @@
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue'
 import ReminderFields from './ReminderFields.vue'
-import { failureReason } from '../memoFailure'
+import { canRetry, failureReason } from '../memoFailure'
 import { memoLabel } from '../memoLabel'
 import { useCollections } from '../composables/useCollections'
 import { ask } from '../composables/useConfirm'
@@ -38,7 +38,7 @@ const emit = defineEmits(['close', 'changed'])
  */
 const MAX_TITLE_LENGTH = 200
 
-const { moveMemo, rename, remove, dropReminder, memoError, working } = useMemos()
+const { moveMemo, rename, remove, retry, dropReminder, memoError, working } = useMemos()
 const { collections } = useCollections()
 
 const dialogEl = ref(null)
@@ -410,6 +410,29 @@ async function removeReminder(reminderId) {
       >
         {{ failureReason(memo) }}
       </p>
+
+      <!--
+        And the way out of it (MEMO-17). Directly under whichever of the two above showed the
+        reason, because the reason is what somebody acts on and the action should not be
+        somewhere else on the card.
+
+        The hint is not filler: most of these sentences describe something the reader can fix,
+        and the worker's own retries are long over by the time they have read one -- three
+        attempts inside a couple of minutes of the recording. Without saying so, "Retry" looks
+        like the thing that has already been tried and failed.
+
+        A filled button rather than a `.ghost`, unlike Rename and Delete beside it. Those are
+        edits to a memo that is fine; this is the offered fix for a memo that is not, and it is
+        the only thing on this card the user is being invited to do.
+      -->
+      <div v-if="canRetry(memo)" class="sheet__retry">
+        <button type="button" @click="retry(memo)">Try transcribing again</button>
+
+        <p class="sheet__hint">
+          The worker gave up on this one. If you have changed something since — a setting, a key
+          — this puts it back at the front of the queue.
+        </p>
+      </div>
 
       <section v-if="memo.tags?.length" class="sheet__section">
         <h3 class="sheet__label">Tags</h3>

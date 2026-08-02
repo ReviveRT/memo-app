@@ -38,12 +38,11 @@ export const JSON_CONTENT_TYPE = /^application\/(?:[\w.+-]+\+)?json\b/i
  *      ..." -- straight to the screen, and it is why those messages are written for a
  *      reader rather than for a log.
  *
- *      A 500 is the weak case and deliberately not improved here: with APP_DEBUG off
- *      the API answers `{"message":"Server Error"}` -- checked, by stopping the db
- *      container -- so that is what the user sees, and the detail is on the api
- *      container's stderr where LOG_CHANNEL puts it. MEMO-17 owns failure UX and is
- *      where a better answer belongs; inventing one here would be a second, different
- *      story about the same 500.
+ *      A 500 used to be the weak case and is no longer passed through at all: with
+ *      APP_DEBUG off the API answers `{"message":"Server Error"}` -- checked, by stopping
+ *      the db container -- which says nothing, and with it on the same body carries the
+ *      exception and its trace. MEMO-17 owns failure UX and this is the answer it chose;
+ *      see errorMessage below for why the 4xx half is still verbatim.
  *
  * @returns {Promise<?object>} The decoded body, or null for a 204.
  */
@@ -82,12 +81,58 @@ export async function request(path, init) {
   }
 
   if (!response.ok) {
-    throw new Error(
-      typeof body?.message === 'string' && body.message !== ''
-        ? body.message
-        : `The API answered HTTP ${response.status}.`,
-    )
+    throw new Error(errorMessage(response.status, body))
   }
 
   return body
+}
+
+/**
+ * What to put in front of the user for a non-2xx, which is not always what the body says.
+ *
+ * **The split is at 500, and MEMO-17 is what closed it.** A 4xx message is authored: the
+ * FormRequests and the controllers write those sentences for a reader, and passing them
+ * through unchanged is the whole reason this file reads `message` at all -- "You already have
+ * a collection called Work", "Only a failed memo can be retried, and this one is ready."
+ * Rewording those here would throw away the wording chosen next to the rule.
+ *
+ * A 5xx message is not authored by anybody, and which useless thing it is depends on a
+ * setting:
+ *
+ *   * with `APP_DEBUG=false`, the shipped configuration, Laravel answers
+ *     `{"message":"Server Error"}` -- true, and it tells the reader nothing at all, not even
+ *     that looking in a log would help.
+ *   * with `APP_DEBUG=true`, which .env.example documents as off and a developer may well
+ *     turn on, the same body carries the raw exception message alongside `exception`, `file`,
+ *     `line` and a full `trace`. Rendering `message` verbatim then puts a PHP internal --
+ *     "SQLSTATE[08006] [7] connection to server at ..." -- into a memo card, complete with
+ *     whatever the DSN contained.
+ *
+ * So neither is passed through. This is MEMO-17's rule applied to the API the way the worker
+ * applies it to a provider: the detail goes to the log and the row gets a sentence this code
+ * wrote (memo_ai/audio.py's `_run` makes the same argument about ffmpeg's stderr). The
+ * sentence names the log rather than apologising, because a 5xx is the one failure the person
+ * reading it cannot fix from the page they are on -- and on this project that log is one
+ * command away.
+ *
+ * The status is included because it is the one part of a 5xx worth telling apart: a 500 and a
+ * 503 send someone to different places, and it is the string they will paste into an issue.
+ *
+ * Nothing authored is being thrown away by that, checked before widening the rule this far:
+ * the one route in this API that answers a *deliberate* 5xx is `GET /api/health`, whose 503 is
+ * a report rather than a `message` -- and no browser code calls it. It is the compose
+ * healthcheck's, over curl. A health panel added later would want the report, not this.
+ *
+ * @param {number} status
+ * @param {?object} body The decoded error body. Trusted for its `message` on a 4xx only.
+ * @returns {string}
+ */
+export function errorMessage(status, body) {
+  if (status >= 500) {
+    return `The app server failed to handle that (HTTP ${status}). The reason is in its log: docker compose logs api`
+  }
+
+  return typeof body?.message === 'string' && body.message !== ''
+    ? body.message
+    : `The API answered HTTP ${status}.`
 }

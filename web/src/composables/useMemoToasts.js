@@ -62,6 +62,20 @@ const READY_DISMISS_MS = 6_000
 const PHASES = {
   UPLOADING: 'uploading',
   SAVING: 'saving',
+
+  /**
+   * The third shape of "bytes going out", and the one that is not a submission at all: a
+   * failed memo being handed back to the worker (MEMO-17).
+   *
+   * It gets its own value rather than borrowing SAVING because the wording has to differ --
+   * nothing is being saved, the memo has existed for some time -- and because it is the stage
+   * a retry can be *refused* in, which a submission cannot be. Everything after it is shared:
+   * once the API answers, a retried memo is a memo in the queue and there is nothing left to
+   * tell apart. That is the whole reason this hooks into the toasts rather than growing a
+   * second mechanism beside them.
+   */
+  RETRYING: 'retrying',
+
   QUEUED: 'queued',
   PROCESSING: 'processing',
   READY: 'ready',
@@ -69,6 +83,19 @@ const PHASES = {
 
   /** The write itself did not land: no row, no memo id, nothing to watch. */
   REJECTED: 'rejected',
+}
+
+/**
+ * Which stage each control opens on, before the API has answered anything.
+ *
+ * A table rather than the ternary this used to be, because there are three of them now and a
+ * nested conditional over a string is where a fourth one gets added wrong. The `?? SAVING`
+ * fallback at the call site keeps an unknown kind rendering something rather than a blank card.
+ */
+const OPENING_PHASE = {
+  voice: PHASES.UPLOADING,
+  text: PHASES.SAVING,
+  retry: PHASES.RETRYING,
 }
 
 const TERMINAL_STATUSES = new Set(['ready', 'failed'])
@@ -96,8 +123,11 @@ const machinery = new Map()
  * Called by useMemos at the top of the write path, before the request goes out, so the corner
  * says something from the first frame rather than from whenever the server answers.
  *
- * @param {'voice'|'text'} kind Which control started this. Only decides the opening wording and
- *   whether the first stage draws a bar.
+ * Also called when a failed memo is sent back to the worker, which is not a submission but is
+ * the same wait with the same three endings -- see PHASES.RETRYING.
+ *
+ * @param {'voice'|'text'|'retry'} kind Which control started this. Decides the opening wording,
+ *   whether the first stage draws a bar, and how a rejection is described.
  * @returns {{
  *   uploading: (fraction: number) => void,
  *   stored: (memo: object) => void,
@@ -111,7 +141,17 @@ export function startMemoToast(kind) {
     ...toasts.value,
     {
       id,
-      phase: kind === 'voice' ? PHASES.UPLOADING : PHASES.SAVING,
+      phase: OPENING_PHASE[kind] ?? PHASES.SAVING,
+
+      /**
+       * Kept on the toast, and read by exactly one thing: what to call a rejection.
+       *
+       * `phase` cannot answer it. REJECTED means "the write did not land", which is true of a
+       * memo that was never stored and of a retry that was refused, and "Not saved" under the
+       * second one describes something nobody was trying to do. The stage is shared and the
+       * verb is not, so the verb is carried separately rather than by splitting the stage.
+       */
+      kind,
 
       /** Set once the API has answered with a row. Null until then, and null forever on a rejection. */
       memoId: null,

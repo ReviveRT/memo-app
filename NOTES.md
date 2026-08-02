@@ -534,3 +534,61 @@ contents survive it, so the interesting fact about that request is what happened
 *memos*, and no response can say. Deleting the same memo twice gives 200 and then 404 —
 non-idempotent in its status code, on purpose, because the second request is a client
 telling us about a memo it believes exists and it should find out that it does not.
+
+## Retry is guarded on `status = 'failed'` inside the UPDATE, and answers 409 otherwise
+
+**Decision.** `POST /api/memos/{id}/retry` is one statement — `UPDATE memos SET status =
+'queued', attempts = 0, next_attempt_at = now(), locked_at = NULL WHERE id = ? AND status
+= 'failed' RETURNING ...`. A row comes back and it is a 200; no row comes back and a second
+read decides between 404 (no such memo) and **409** (there is one, and it is not failed).
+
+**The status predicate is safety, not a tidy way to reach a 404.** Two of the four states
+are actively dangerous to requeue:
+
+- `processing` means a live claim. The worker's writes are fenced on `locked_at`, not on
+  the status, so a row put back to `queued` underneath its owner is claimable by the other
+  replica while the first is still transcribing it — two workers, one recording, and on a
+  hosted provider two bills. The fence protects the *writes*; nothing protects the claim
+  predicate from a third party moving the status out from under it.
+- `ready` means finished. Requeueing re-runs enrichment for nothing and overwrites `title`
+  — which may be the one the owner typed, since renaming is the one content write a client
+  has.
+
+Doing the check in the `WHERE` rather than in a `SELECT` in front of the `UPDATE` is what
+makes it hold: a check and a write in two statements is a window, and this is precisely a
+route two tabs will press at once.
+
+**Why `attempts = 0` is load-bearing rather than tidy.** A failed memo sits at the cap, and
+the claim increments *before* any worker code runs (that is what makes the count survive a
+`SIGKILL`). Requeued at `attempts = MAX_ATTEMPTS`, a memo would get exactly one more go:
+`fail_or_retry` reads it as already exhausted, so any failure is immediately terminal with
+no backoff, and the reaper's `attempts < max_attempts` requeue never matches it either.
+Zero gives it the budget a new memo has, which is what a person pressing Retry means.
+`next_attempt_at = now()` is the same argument from the other side — the column may hold a
+backoff from the attempt that failed, and a press that produced no visible change for
+thirty seconds reads as a button that does not work.
+
+**`last_error` is deliberately left where it is.** It is the *last* error, not the current
+state; the worker's own retry path writes it onto a `queued` row for exactly that reason.
+The frontend gates the sentence on `status === 'failed'`, so a requeued memo stops showing
+it without the column being touched, and the next successful transcription clears it —
+which is the write that knows the error is over.
+
+**Why 409 and not a 404 or a cheerful 200.** This is the one route in the project that
+answers 409, and the argument is what the client does next. Everywhere else, "you named
+something that is not there" collapses into one 404 because the remedy is the same; here
+the second case is a memo that is right there and has simply moved on — the worker finished
+it, or the other tab pressed first. The frontend renders these sentences verbatim, so a 404
+would put "That memo no longer exists" under a memo the user is looking at. A 200 was the
+other candidate — retry-as-idempotent — and it would report a refusal as a success, which
+hides the `ready` case rather than describing it.
+
+**A 5xx body is never rendered, which is the same rule one layer out.** `request()` replaces
+the body of any 500 with a sentence naming the log: with `APP_DEBUG=false` Laravel answers
+`{"message":"Server Error"}`, and with it on the same body carries the exception, the file,
+the line and a trace — so passing `message` through would put a DSN in a memo card the day
+somebody debugged something. 4xx messages stay verbatim, because those are written next to
+the rule that rejected the request and are the whole reason the client reads `message` at
+all. It is the rule `memo_ai/audio.py` applies to ffmpeg's stderr and `pipeline.py` to an
+unclassified exception, applied to the API itself: the detail goes to the log, and the user
+gets a sentence this project wrote.

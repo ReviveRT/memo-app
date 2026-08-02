@@ -30,13 +30,23 @@ const { toasts, dismiss, PHASES } = useMemoToasts()
  */
 const { progressFor } = useProcessingProgress()
 
-/** What the card says it is doing, one line, from the stage alone. */
+/**
+ * What the card says it is doing, one line, from the stage -- and, for the last one, from what
+ * was being attempted.
+ *
+ * The default arm is REJECTED, and it is the one place the stage is not enough. "The write did
+ * not land" covers a memo that was never stored and a retry the API refused, and those are not
+ * the same sentence: nothing was being saved in the second case, so "Not saved" would describe
+ * an action nobody took. See the `kind` field in useMemoToasts.
+ */
 function title(toast) {
   switch (toast.phase) {
     case PHASES.UPLOADING:
       return 'Sending recording…'
     case PHASES.SAVING:
       return 'Saving memo…'
+    case PHASES.RETRYING:
+      return 'Sending it back…'
     case PHASES.QUEUED:
       return 'Waiting for a worker…'
     case PHASES.PROCESSING:
@@ -46,7 +56,7 @@ function title(toast) {
     case PHASES.FAILED:
       return 'Could not transcribe'
     default:
-      return 'Not saved'
+      return toast.kind === 'retry' ? 'Could not retry' : 'Not saved'
   }
 }
 
@@ -63,7 +73,13 @@ const isDone = (toast) => isError(toast) || toast.phase === PHASES.READY
  * meaning something else.
  */
 function fraction(toast) {
-  if (toast.phase === PHASES.UPLOADING || toast.phase === PHASES.SAVING) {
+  // RETRYING alongside the two write stages, and it is the clearest case for null of the
+  // three: the request is one bodyless POST, so there is not even a byte count to not know.
+  if (
+    toast.phase === PHASES.UPLOADING ||
+    toast.phase === PHASES.SAVING ||
+    toast.phase === PHASES.RETRYING
+  ) {
     // null here is not "no progress": it is what a request whose total size the browser will
     // not disclose reports, and what a typed memo's POST never reports at all. ProgressBar
     // draws motion rather than a number for it. See api/memos.js.

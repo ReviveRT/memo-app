@@ -21,6 +21,12 @@
  * pipeline.py's UNEXPECTED_ERROR for the rule the worker applies about what may go in the
  * column at all -- an unclassified exception's text never does, so what arrives here was
  * written to be read by a person.
+ *
+ * `canRetry` joined it for MEMO-17 and belongs in the same file rather than beside the button,
+ * because the two are one idea: a failed memo is only *visible* if there is a reason, and only
+ * *recoverable* if there is an action, and the three places that render one of those render
+ * both. Keeping them together is what stops a card offering Retry over a memo it is describing
+ * as finished.
  */
 
 /**
@@ -46,4 +52,35 @@ export function failureReason(memo) {
       // writer -- so it says that it does not know rather than leaving the card blank, which is
       // the state this whole module exists to remove.
       'This memo could not be transcribed, and no reason was recorded.'
+}
+
+/**
+ * Whether this memo can be sent back to the worker (MEMO-17).
+ *
+ * The other half of the same idea: a reason nobody can act on is only half an improvement, and
+ * most of the sentences on the other side of `failureReason` describe something the person
+ * reading them can fix. A key that was not set, a model that had not finished downloading, a
+ * microphone that was muted -- the worker's own retries all happen within a couple of minutes
+ * of the recording, so by the time anyone has read the reason and done something about it the
+ * memo is terminal and nothing left in the stack will touch it again. This is what puts it back
+ * in play.
+ *
+ * `failed` and nothing else, which is the API's rule rather than a second one invented here --
+ * MemoRepository::requeue guards the UPDATE on the same status and answers 409 otherwise, and
+ * there are real hazards behind that (requeueing a `processing` row puts two workers on one
+ * memo). So this is the *button's* predicate: it decides whether to offer the action, and the
+ * server decides whether to perform it. They agree, and when they disagree -- a card holding a
+ * status the worker has since moved on from -- the 409's sentence is what the user sees.
+ *
+ * Deliberately not `failureReason(memo) !== null`, even though the two answer the same today.
+ * That one is about having something to *say* and falls back to a sentence when the column is
+ * empty; this is about what may be *done*, and reading a button's availability out of a
+ * message's presence is the kind of coupling that turns a future empty-string fallback into a
+ * disabled control.
+ *
+ * @param {object} memo
+ * @returns {boolean}
+ */
+export function canRetry(memo) {
+  return memo?.status === 'failed'
 }
