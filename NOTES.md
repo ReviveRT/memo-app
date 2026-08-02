@@ -1120,9 +1120,44 @@ than speed. The one real unlock is that a larger model resists the injection tha
 made the multilingual instruction unsafe on the 1.5B local one — worth revisiting,
 not worth a second hosted dependency in the same change.
 
-**One caveat, stated because this project has a rule about it.** `unimplemented.py`
-declines to ship the `openai` adapter on the grounds that a hosted code path nobody
-has run is the worst kind to ship. This provider is unit-tested against a stubbed
-transport but has **not** yet been exercised against the live Groq API — no key was
-available at the time of writing. Until it has been, it carries exactly the caveat
-that file describes.
+**It has been run against the live API, and that is what caught the bugs.**
+`unimplemented.py` declines to ship the `openai` adapter because a hosted code path
+nobody has run is the worst kind to ship. That rule earned its keep here: the
+provider passed all twenty stubbed tests and then failed on the first real request,
+twice over.
+
+  * **Cloudflare blocks `urllib`'s default User-Agent.** Groq sits behind a WAF that
+    refuses `Python-urllib/3.12` on browser signature — HTTP 403 with a body of
+    `error code: 1010`, which is a Cloudflare code, not a Groq one. The request
+    never reached Groq. An explicit `User-Agent` makes the identical request with
+    the identical key answer 200. The second-order lesson is worth more than the
+    fix: `requests` or `httpx` would have *hidden* this by sending their own agent,
+    so the dependency this module declines to take is also the one that would have
+    masked the problem until a user hit it.
+  * **A 403 from the edge was reported as a bad API key.** The first classifier
+    collapsed 401 and 403 onto "check GROQ_API_KEY", so a Cloudflare block sent
+    somebody to regenerate a credential that was perfectly valid. Groq answers
+    errors in JSON and a CDN answers in plain text, so the body is what tells them
+    apart — parsed rather than matched on "cloudflare", because a corporate proxy or
+    captive portal belongs on the same side without naming itself.
+
+**Two claims made before it ran turned out to be wrong.** The speedup is not a flat
+145x: measured, it is ~10–30x on a five-second memo and over 100x on a long one,
+because a fixed ~0.3s round trip dominates short clips and vanishes on long ones.
+And the transcript is *not* byte-identical to the local one — same weights, two
+runtimes, different decoding defaults, so `chrome.webm` comes back as
+`One two three … ten.` where local gives `1, 2, 3, … 10.`.
+
+**That second finding produced a real fix.** Groq's raw text was reaching the row
+unshaped — untrimmed, uncapitalized, unterminated — while the local path ran through
+`prose.shape`. Two providers behind one interface were producing visibly different
+memos, and on a fallback chain a user would have seen the style change mid-stream
+for no reason they could name. Routing Groq through the same shaping takes two of
+the three committed fixtures to byte-identical; the third still differs on how it
+spells numbers, which is a decoding default rather than formatting. It needed
+`response_format=verbose_json` for the `language` field, since `prose`'s terminator
+and capitalization rules are language-gated — and a small name-to-code map, because
+the API says `"English"` where `prose` keys on `"en"`.
+
+`tests/test_groq_live.py` is the regression net: skipped without `GROQ_API_KEY`, so
+a clean checkout and CI never run it, and the offline default stays the tested path.

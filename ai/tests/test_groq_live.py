@@ -50,11 +50,19 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # provider, and asserting on it here would make a green suite depend on a bug.
 RECORDING = FIXTURES / "chrome.webm"
 
-# What all three fixtures say: somebody counting to ten. Whisper renders it as
-# digits rather than words at the default beam size, in either language --
-# tests/test_local_whisper.py makes the same observation and declines to assert on
-# the exact string for the same reason.
-EXPECTED_DIGITS = ("1", "2", "3")
+# What all three fixtures say: somebody counting to ten.
+#
+# **Digits *or* words, because the two runtimes disagree and that is a measured
+# fact rather than a hedge.** Against the live API, local renders `chrome.webm` as
+# `1, 2, 3, ... 10.` and Groq as `One two three ... ten.` -- same weights, same
+# audio, different decoding defaults (the local provider also feeds whisper an
+# English punctuation primer, which Groq is not given). The first version of this
+# test asserted digits, and it failed on a response that was entirely correct.
+#
+# So the assertion is "it counted to ten in some rendering", which is the strongest
+# claim that is actually true of both. tests/test_local_whisper.py declines to
+# assert the exact string for a related reason.
+COUNTED_TO_TEN = ("10", "ten")
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("GROQ_API_KEY"),
@@ -88,7 +96,17 @@ def test_the_live_api_accepts_the_request_this_build_constructs(result):
     # wrong field name -- every one of those passes tests/test_groq_stt.py and
     # fails here with a 400.
     assert result.text.strip()
-    assert any(digit in result.text for digit in EXPECTED_DIGITS), result.text
+    assert any(form in result.text.lower() for form in COUNTED_TO_TEN), result.text
+
+
+def test_the_response_is_shaped_the_way_a_local_transcript_would_be(result):
+    # Groq's raw text arrives untrimmed, uncapitalized and unterminated -- measured:
+    # `' one two three ... ten'`. Routing it through memo_ai/prose.py is what stops
+    # a fallback chain producing visibly different memos depending on which
+    # provider happened to answer, and this pins that it is still routed.
+    assert result.text == result.text.strip()
+    assert result.text[0].isupper() or result.text[0].isdigit()
+    assert result.text.rstrip()[-1] in ".?!。।۔။"
 
 
 def test_it_reports_itself_and_the_model_that_ran(result):

@@ -25,6 +25,7 @@ from memo_ai.stt.groq import (
     DEFAULT_MODEL,
     MAX_UPLOAD_BYTES,
     REQUEST_TIMEOUT_SECONDS,
+    USER_AGENT,
     GroqStt,
     _classified,
     _multipart,
@@ -142,6 +143,24 @@ def test_the_request_carries_the_key_the_model_and_the_audio(monkeypatch, record
     assert http.requests[-1][1] == REQUEST_TIMEOUT_SECONDS
 
 
+def test_the_request_sends_an_explicit_user_agent(monkeypatch, recording):
+    # Not courtesy — required. Groq sits behind Cloudflare, which blocks urllib's
+    # default `Python-urllib/3.12` on browser signature: 403 with a body of
+    # `error code: 1010`, before the request reaches Groq at all. Measured against
+    # the live API; with the header the identical request answers 200.
+    #
+    # This assertion exists because the stub could not catch it. It is here so a
+    # future edit that drops the header fails in the fast suite rather than in
+    # somebody's stack.
+    groq, http = provider(monkeypatch)
+    groq.transcribe(recording)
+
+    agent = http.last.get_header("User-agent")
+
+    assert agent == USER_AGENT
+    assert "urllib" not in agent.lower()
+
+
 def test_a_named_language_is_sent_and_an_unnamed_one_is_omitted(monkeypatch, recording):
     # An empty `language` is not the same request as no `language` — only the
     # second asks the model to detect. 005_memo_language.sql has why the override
@@ -217,12 +236,36 @@ def test_an_empty_key_is_treated_as_a_missing_one(monkeypatch, recording):
     ],
 )
 def test_each_status_lands_on_the_side_of_the_line_it_belongs(status, expected):
-    error = _classified(status)
+    error = _classified(status, '{"error": {"message": "..."}}')
 
     assert isinstance(error, expected)
     # Terminal cases must NOT be SttUnavailable — walking the chain over a file
     # every provider is handed identically buys nothing.
     assert isinstance(error, SttUnavailable) is (expected is SttUnavailable)
+
+
+def test_a_403_from_the_edge_is_not_reported_as_a_bad_key():
+    # The second defect the live run exposed. Cloudflare answers a blocked request
+    # with `error code: 1010` and a 403; the first version of this file read that
+    # as "check your API key" about a key that was valid — sending somebody to
+    # regenerate a working credential. Groq's own errors are JSON, so the body is
+    # what tells the two apart.
+    edge = _classified(403, "error code: 1010")
+    api = _classified(403, '{"error": {"message": "insufficient permissions"}}')
+
+    assert "not the API key" in str(edge)
+    assert "GROQ_API_KEY" in str(api)
+    # Both still fall back — the chain behaviour is right either way; it is the
+    # sentence a person reads that was wrong.
+    assert isinstance(edge, SttUnavailable) and isinstance(api, SttUnavailable)
+
+
+@pytest.mark.parametrize("body", ["", "error code: 1020", "<html>Access denied</html>", "null"])
+def test_any_non_json_403_body_is_treated_as_an_edge_block(body):
+    # Parsing rather than matching on "cloudflare": the question is whether the API
+    # answered, and a corporate proxy or captive portal belongs on the same side
+    # without naming itself.
+    assert "not the API key" in str(_classified(403, body))
 
 
 def test_a_network_failure_falls_back_rather_than_failing_the_memo(monkeypatch, recording):

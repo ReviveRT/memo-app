@@ -8,13 +8,27 @@ runs in the container with no key and no network; `STT_PROVIDER=groq` is opt-in,
 machine when somebody turns this on. Nothing about this module changes what a
 clean `docker compose up` does.
 
-**What it buys is latency, not accuracy.** Groq serves `whisper-large-v3-turbo` --
-the same weights memo_ai/stt/local.py loads -- so the transcript is the one this
-app already produces. What changes is the clock: the local model runs at 38.4
-seconds of CPU per minute of audio (measured, MEMO-22), and Groq's published
-figure is 217-228x realtime, about 0.26 seconds per audio-minute. On the longest
-memo this app accepts that is six minutes of a worker's CPU against a couple of
-seconds of somebody else's.
+**What it buys is latency, and the win scales with the recording.** Groq serves
+`whisper-large-v3-turbo` -- the same weights memo_ai/stt/local.py loads. Measured
+against the live API on this project's own fixtures:
+
+    5.3s of audio    local 4.8-9.5s     groq 0.20-0.34s    ~10-30x
+    600s of audio    local ~384s        groq ~3s           ~100x+
+
+The shape of that is a fixed ~0.3s round trip plus inference at roughly 220x
+realtime, against a local model at 38.4 seconds of CPU per audio-minute (MEMO-22's
+measurement). So a short memo is dominated by the network and a long one is not --
+the headline number is not one number, and quoting the long-memo figure for every
+memo would be the flattering version rather than the true one.
+
+**The transcript is not byte-identical to the local one, and that was measured
+rather than assumed.** Same weights, but two runtimes with different decoding
+defaults: on `chrome.webm` the local path renders `1, 2, 3, ... 10.` where Groq
+renders `One two three ... ten.`. Same words, different surface. Two of the three
+committed fixtures now match exactly, and the third differs only in how it spells
+numbers -- the local provider also feeds whisper an English punctuation primer that
+Groq is not given. Anything that needs the two to agree character for character
+should not assume they do.
 
 **What it does not buy is language detection**, which is worth stating because it
 is the first thing anyone asks. The table in db/migrations/005_memo_language.sql
@@ -46,7 +60,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-from memo_ai import failures
+from memo_ai import failures, prose
 from memo_ai.stt.base import SttError, SttUnavailable, Transcript
 
 log = logging.getLogger(__name__)
@@ -80,6 +94,22 @@ DEFAULT_MODEL = "whisper-large-v3-turbo"
 # without adding a term for this provider -- see the note there.
 REQUEST_TIMEOUT_SECONDS = 120.0
 
+# What this build calls itself on the wire, and it is **load-bearing rather than
+# courtesy**.
+#
+# Groq's API sits behind Cloudflare, which blocks `urllib`'s default
+# `Python-urllib/3.12` on browser signature: the request never reaches Groq and
+# comes back **403 with a body of `error code: 1010`** -- a Cloudflare code, not a
+# Groq one. Measured against the live API, and the reason this constant exists:
+# with the header, the identical request and the identical key answer 200.
+#
+# This is the defect that justifies tests/test_groq_live.py existing at all. Every
+# assertion in tests/test_groq_stt.py passed the whole time, because a stubbed
+# transport has no edge in front of it. `requests` and `httpx` would have hidden
+# it by sending their own agent -- so the dependency this module declines to take
+# is also the one that would have masked the problem until a user hit it.
+USER_AGENT = "memo-app/1.0 (+https://github.com/ReviveRT/memo-app)"
+
 # What Groq accepts in one request. 25 MB is the free tier's limit; paid tiers are
 # higher, and taking the lower number means this refuses before the network does.
 #
@@ -102,6 +132,18 @@ _NO_KEY = (
 _REJECTED_KEY = (
     "Groq rejected the configured API key. Check GROQ_API_KEY, or set "
     "STT_PROVIDER=local to transcribe on this machine."
+)
+
+# Separate from the sentence above, and the separation was earned the hard way.
+#
+# A 403 from Groq's CDN and a 403 from Groq mean opposite things, and the first
+# version of this file collapsed them: a Cloudflare block reported "check your API
+# key" about a key that was perfectly valid, which is precisely the quiet kind of
+# wrong this project keeps trying not to ship. Anyone who saw it would go and
+# regenerate a working key.
+_EDGE_BLOCKED = (
+    "Groq's network refused the request before it reached the API. This is not "
+    "the API key. Retry, or set STT_PROVIDER=local to transcribe on this machine."
 )
 
 _RATE_LIMITED = (
@@ -187,14 +229,28 @@ class GroqStt:
         payload = self._post(_multipart(audio, source.name, self.model, language))
         elapsed_ms = round((time.monotonic() - started) * 1000)
 
-        text = payload.get("text") if isinstance(payload, dict) else None
+        raw = payload.get("text") if isinstance(payload, dict) else None
 
-        if not isinstance(text, str):
+        if not isinstance(raw, str):
             log.warning("groq: response had no usable text field: %r", type(payload).__name__)
 
             raise SttError(_BAD_ANSWER)
 
-        text = text.strip()
+        # **The same shaping the local provider applies, and it is the difference
+        # between two providers and one provider with two backends.** Measured
+        # against the live API before this line existed: on `chrome.webm` the local
+        # path produced `1, 2, 3, ... 10.` and Groq produced
+        # `one two three ... ten` -- same model, same audio, visibly different
+        # memos, and on a fallback chain a user would see the style change
+        # mid-stream for no reason they could name. memo_ai/prose.py owns hygiene,
+        # sentence splitting, capitalization and terminators; nothing about that is
+        # local-specific and it should not have been reachable from only one
+        # provider.
+        #
+        # It also subsumes the empty check below: `shape` answers `""` for input
+        # with no words in it, which is a better test than `strip()` -- a
+        # transcript of "..." is not speech either.
+        text = prose.shape(raw, _language_code(payload.get("language")))
 
         if not text:
             # The same classification the local provider gives an empty decode, and
@@ -235,6 +291,9 @@ class GroqStt:
             headers={
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": content_type,
+                # See USER_AGENT. Without this the request is refused by
+                # Cloudflare before Groq ever sees it.
+                "User-Agent": USER_AGENT,
             },
         )
 
@@ -242,7 +301,11 @@ class GroqStt:
             with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
                 return json.loads(response.read())
         except urllib.error.HTTPError as error:
-            raise _classified(error.code) from None
+            # The body is read for classification only and never reaches the row.
+            # It is a third party's text -- Groq's JSON on an API error, Cloudflare's
+            # plain `error code: NNNN` on an edge block -- and telling those two
+            # apart is the whole reason it is read at all.
+            raise _classified(error.code, _body_of(error)) from None
         except urllib.error.URLError as error:
             # DNS, TLS, connection refused, and the timeout -- all of them arrive
             # here, and all of them mean the same thing to the chain. `error.reason`
@@ -260,13 +323,39 @@ class GroqStt:
             raise SttUnavailable(_UNAVAILABLE) from None
 
 
-def _classified(status: int) -> SttError:
+def _body_of(error: urllib.error.HTTPError) -> str:
+    """
+    The error body, or an empty string. Never raises, never reaches the row.
+
+    Reading a response body can itself fail on a truncated connection, and a
+    failure *while classifying a failure* would surface as the generic unexpected
+    error memo_ai/pipeline.py writes for anything it cannot classify -- burying the
+    real cause under a worse message.
+    """
+    try:
+        return error.read().decode("utf-8", "replace")[:200]
+    except Exception:
+        return ""
+
+
+def _classified(status: int, body: str = "") -> SttError:
     """
     One HTTP status, as the exception the pipeline knows what to do with.
 
     A function rather than a dict, so each branch can carry the reason it is on the
     side of the line it is on.
     """
+    if status == 403 and not _looks_like_groq(body):
+        # A 403 that did not come from Groq. Their API answers errors in JSON;
+        # Cloudflare answers `error code: 1010` in plain text, which is what a
+        # blocked User-Agent gets -- measured, and the reason USER_AGENT exists.
+        # Checked before the key branch because the first version of this file
+        # reported a Cloudflare block as a bad key and sent somebody looking at a
+        # credential that was fine.
+        log.warning("groq: request refused at the edge (403): %s", body.strip()[:120])
+
+        return SttUnavailable(_EDGE_BLOCKED)
+
     if status in (401, 403):
         # Unavailable rather than terminal even though a bad key will not fix
         # itself. What makes that right is the chain: this is precisely the case
@@ -299,6 +388,72 @@ def _classified(status: int) -> SttError:
     return SttUnavailable(_SERVICE_ERROR)
 
 
+# Whisper's language *names* for the languages memo_ai/prose.py treats specially,
+# mapped back to the codes it keys on.
+#
+# The response says `"English"`, not `"en"` -- measured against the live API, and
+# the reason this table exists. It is deliberately not the full 99: `prose.shape`
+# gates exactly two things on language, its terminator table (12 languages) and
+# the `i` capitalization rule (English), plus Greek's semicolon question mark. Every
+# other code would map to identical behaviour, so carrying them would be 85 rows
+# that cannot change an outcome.
+#
+# The aliases are whisper's own second names for the same code, not invented ones.
+# Anything unlisted resolves to None, which `prose.shape` documents as "unknown"
+# and handles by declining the language-gated rules -- the same thing the local
+# provider does when detection comes back unsure.
+_LANGUAGE_CODES = {
+    "english": "en",
+    "chinese": "zh",
+    "mandarin": "zh",
+    "japanese": "ja",
+    "hindi": "hi",
+    "bengali": "bn",
+    "marathi": "mr",
+    "nepali": "ne",
+    "punjabi": "pa",
+    "panjabi": "pa",
+    "urdu": "ur",
+    "myanmar": "my",
+    "burmese": "my",
+    "thai": "th",
+    "lao": "lo",
+    "khmer": "km",
+    "greek": "el",
+}
+
+
+def _language_code(name: object) -> str | None:
+    """
+    Groq's language *name* as the ISO code memo_ai/prose.py keys on, or ``None``.
+
+    ``None`` for anything unrecognised rather than a guess, and that is the safe
+    direction: an unknown language declines the `i` rule and takes the default
+    terminator, while a *wrong* code would bolt a Devanagari danda onto an English
+    sentence.
+    """
+    if not isinstance(name, str):
+        return None
+
+    return _LANGUAGE_CODES.get(name.strip().lower())
+
+
+def _looks_like_groq(body: str) -> bool:
+    """
+    Whether an error body came from the API rather than from something in front of it.
+
+    Groq answers errors as JSON with an ``error`` object; a CDN answers with plain
+    text. Parsing rather than substring-matching on "cloudflare", because the
+    question is "did the API answer this" and the set of things that might sit in
+    front of it is open -- a corporate proxy or a captive portal should land on the
+    same side as Cloudflare, and neither says so by name.
+    """
+    try:
+        return isinstance(json.loads(body), dict)
+    except (ValueError, TypeError):
+        return False
+
+
 def _multipart(audio: bytes, filename: str, model: str, language: str | None) -> tuple[bytes, str]:
     """
     The request body, encoded by hand.
@@ -320,7 +475,15 @@ def _multipart(audio: bytes, filename: str, model: str, language: str | None) ->
     # sending the real suffix matters more than the type header.
     content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
-    fields = {"model": model, "response_format": "json"}
+    # `verbose_json` rather than `json`, for one field: `language`. The plain form
+    # returns only `text`, and memo_ai/prose.py's terminator and capitalization
+    # rules are language-gated -- so without it every Groq transcript would be
+    # shaped as "unknown language" and a Japanese memo would get a Latin full stop
+    # bolted on. It also carries `duration` and `segments`, neither of which this
+    # module reads: ffprobe already measured the audio (memo_ai/audio.py), and a
+    # duration from the provider would be a second answer to a question that
+    # already has one.
+    fields = {"model": model, "response_format": "verbose_json"}
 
     if language:
         # Omitted rather than sent empty when nobody chose one. An empty `language`

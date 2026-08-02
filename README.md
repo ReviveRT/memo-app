@@ -764,16 +764,28 @@ defaults the two are equal and there is no chain at all.
 > **Do not turn this on for recordings you would not hand to a stranger.** `local`
 > is the default so that this is a decision you make, never one you inherit.
 
-With that said, the trade is unusually clean, because **it is the same model**.
-Groq serves `whisper-large-v3-turbo` — the identical weights faster-whisper loads
-locally — so the transcript does not change. Only the clock does:
+The trade is unusually clean, because **it is the same model**. Groq serves
+`whisper-large-v3-turbo` — the identical weights faster-whisper loads locally.
+Measured against the live API on this repo's own fixtures:
 
 | | `local` | `groq` |
 | --- | --- | --- |
-| Rate | 38.4s of CPU per audio-minute | ~220× realtime |
-| A 9m12s memo | **361 seconds** | **~2.4 seconds** |
-| Worker RSS | +1.65 GB for the model | unchanged |
+| A 5s memo | 4.8–9.5s | **0.20–0.34s** |
+| A 9m12s memo | ~353s | **~3s** |
+| Worker RSS | +1.65 GB for the model | **unchanged** |
 | Cost | $0 | $0 on the free tier — 2,000 recordings and 8 hours of audio a day |
+
+The speedup is **~10–30× on a short memo and over 100× on a long one**, because a
+fixed ~0.3s round trip dominates a five-second clip and disappears on a nine-minute
+one. Quoting the long-memo figure for every memo would be the flattering number
+rather than the true one.
+
+**The transcript is not byte-identical**, and that was measured rather than
+assumed: two runtimes, different decoding defaults. Two of the three committed
+fixtures match exactly; on the third, local renders `1, 2, 3, … 10.` where Groq
+renders `One two three … ten.` — same words, different spelling of numbers. Groq's
+output goes through the same `prose.shape()` hygiene, capitalization and
+terminators as the local path, so the two agree on everything except that.
 
 ```bash
 GROQ_API_KEY=gsk_... STT_PROVIDER=groq docker compose up
