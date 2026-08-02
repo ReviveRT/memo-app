@@ -91,6 +91,44 @@ the API has stored it, and the transcript fills in when the worker gets to it.
 **Discard** throws a recording away before it is uploaded — once it is sent there
 is no delete yet.
 
+### Telling it what language you are speaking
+
+Next to **Record** is a language picker, set to **Auto-detect**. Leave it there
+most of the time: detection is right on ordinary recordings, and it is what lets
+one stack take memos in several languages without being configured for any of them.
+
+Choose a language when you are about to record something detection is likely to get
+wrong, and it is worth knowing what that looks like, because the failure is quiet.
+A wrong guess does not produce a worse transcript — it produces a *confident* one in
+the wrong language. A Romanian memo recorded into this app came back as
+`Салют, Манамеск Василий!`: the right sounds, transliterated into Cyrillic, because
+the language was decided as Russian.
+
+**Short recordings are where it happens.** Language ID reads the first window of
+audio, and under about three seconds there is not much in it — accent, a name, or
+two words run together are enough to tip it. That case was measured across nine
+approaches on one 2.76-second clip, and not one of them answered Romanian:
+
+| | | | |
+| --- | --- | --- | --- |
+| whisper `tiny` (the shipped detector) | `en` 0.14 | SpeechBrain VoxLingua107 | `lt` 0.99 |
+| whisper `base` | `el` 0.39 | Meta MMS-LID-256 | `rus` 0.98 |
+| whisper `small` | `lt` 0.63 | SpeechBrain CommonLanguage | no signal |
+| whisper `medium` | `lt` 0.23 | decode-and-rescore, no new model | `uk` |
+| whisper `large-v3-turbo` | `ru` 0.19 | | |
+
+Three unrelated model families, trained on different corpora, two of them
+confidently wrong. The same models identify this speaker's *Russian* correctly, and
+clean Romanian speech correctly — so this is a limit of short-audio language ID
+rather than a model worth swapping, which is why the app asks you instead of trying
+harder. Whisper's own API exposes a `language` parameter for the same reason.
+
+The picker applies to the **next** recording and stays where you put it, so a run of
+memos in one language is set once rather than every time. It is per memo: choosing
+Romanian does not stop the next one being detected as English if you set it back.
+`STT_LANGUAGE` is the same setting for the whole deployment — see
+[Transcription](#transcription).
+
 The elapsed timer next to the button is there so you know the length before you
 send it. A recording longer than `MAX_AUDIO_SECONDS` (10 minutes) is **accepted,
 stored, and then failed by the worker** rather than refused at the door — the memo
@@ -364,7 +402,7 @@ reference and contains no real credentials.
 | `STT_PROVIDER` | `local` | Transcription provider: `local` \| `fake` \| `openai`. `openai` is recognised but not built — see below |
 | `STT_FALLBACK` | `local` | Provider used when the primary cannot run at all. Not used when a recording simply produced no words |
 | `STT_MODEL` | `large-v3-turbo` | Whisper size for the `local` provider. The accuracy lever — see the table below before changing it |
-| `STT_LANGUAGE` | _(empty)_ | ISO code of your recordings (`en`, `ru`, …). Empty detects it per recording. Setting it is ~30% faster and safer on short or accented audio |
+| `STT_LANGUAGE` | _(empty)_ | ISO code for **every** recording (`en`, `ru`, …). Empty detects it per recording. ~30% faster and safer on short or accented audio. Overridden per memo by the picker beside **Record** |
 | `ENRICH_PROVIDER` | `local` | Who writes the title, summary, tags and category: `local` \| `none`. `local` runs Qwen2.5-1.5B-Instruct in the worker from weights baked into the image. `none` skips the pass and falls back to a heuristic title — see [Enrichment](#enrichment) |
 | `ENRICH_MODEL_PATH` | _(from the image)_ | Where the enrichment GGUF is. Set by `ai/Dockerfile`; **deliberately not listed in `docker-compose.yml`**, because any line there replaces the image's value with an empty string. Change the model with a build arg instead |
 | `OPENAI_API_KEY` | _(empty)_ | Read by nothing. Passed through for whoever writes a hosted adapter |
@@ -406,8 +444,21 @@ install. It is where a model you asked for but nobody baked gets cached — see
 
 The language is detected per recording rather than configured, so one stack takes
 memos in several languages; the Russian test recording is identified as Russian
-with nothing told to it. Set `STT_LANGUAGE=en` if you only ever speak one — it is
-about 30% faster and removes a misdetection risk that is real on short clips.
+with nothing told to it.
+
+There are two ways to overrule that, and they answer different questions:
+
+- **The picker beside Record**, per memo, for a stack whose user speaks more than
+  one language. See [Telling it what language you are
+  speaking](#telling-it-what-language-you-are-speaking) for when detection is worth
+  overruling and the measurements behind it.
+- **`STT_LANGUAGE`**, per deployment, for one that does not. It is about 30% faster,
+  because naming the language skips a whole encoder pass, and it removes the
+  misdetection risk entirely.
+
+Set `STT_LANGUAGE` if everyone using this stack speaks the same language; use the
+picker if you switch. Setting both is fine — the memo's own choice wins, and
+`STT_LANGUAGE` is what applies when the picker is left on Auto-detect.
 
 ### Choosing a model
 
@@ -497,7 +548,10 @@ waiting for a comma — so the threshold is where it is.
 **`STT_LANGUAGE=en`** is still worth setting if you only ever dictate in one
 language, but it is now a small win rather than a large one — it skips `tiny`'s
 0.2 s and, more usefully, removes any chance of a wrong guess. Language detection
-is unreliable on short or accented audio whatever model does it.
+is unreliable on short or accented audio whatever model does it, which was measured
+across nine of them rather than assumed — see [Telling it what language you are
+speaking](#telling-it-what-language-you-are-speaking). If you dictate in several
+languages, the picker beside **Record** buys the same certainty one memo at a time.
 
 Raising CTranslate2's thread count is *not* worth it: it was tried, and bought 10%
 on a long memo while making short memos slower and costing 890 MB per replica.
@@ -812,6 +866,7 @@ server so the browser sees one origin. No authentication — see Assumptions.
 | `POST` | `/memos` | Create one: JSON `{text}`, or `multipart/form-data` with `audio` |
 | `PATCH` | `/memos/{memo}` | `{collection_id}` — file it, or `null` to unfile. `{title}` — rename it, or `null` to clear. Either field, or both |
 | `POST` | `/memos/{memo}/retry` | Send a failed memo back to the queue. No body. 409 if it is not `failed` |
+| `GET` | `/memos/{memo}/audio` | The original recording, with byte ranges. 404 for a typed memo |
 | `DELETE` | `/memos/{memo}` | 200 with the memo it removed. Takes the recording and any reminders with it |
 | `GET` | `/collections` | The grid, with each collection's memo count and newest labels |
 | `POST` | `/collections` | `{name}` |
@@ -834,7 +889,50 @@ server so the browser sees one origin. No authentication — see Assumptions.
 `GET /collections` takes `q`, `from`, `to` and `limit` (max 100), spelled the same
 way and meaning the same things.
 
-Two response conventions worth knowing before writing a client:
+### Playing a recording back
+
+`GET /api/memos/{id}/audio` answers with the file as it was uploaded, under the
+media type it was sniffed as, and it honours `Range`:
+
+```bash
+curl -s -D- -o /dev/null -H 'Range: bytes=0-1023' http://localhost:8080/api/memos/<id>/audio
+```
+
+```
+HTTP/1.1 206 Partial Content
+Accept-Ranges: bytes
+Content-Length: 1024
+Content-Range: bytes 0-1023/24775
+Content-Type: video/webm
+```
+
+That is not a refinement — Safari refuses to play audio from an endpoint that
+answers a ranged request with the whole file, and no browser can seek without it.
+A range past the end of the file is a `416` carrying the real size and no body.
+`HEAD` answers the length and `Accept-Ranges` with no body, for `curl -I` and
+anything sizing a file before fetching it; browsers do not use it — Chrome's media
+element opens with a ranged `GET` and issues no `HEAD` at all.
+
+Two 404s, with different sentences on purpose: a typed memo has no recording and
+never did, while a row naming a blob the volume does not have is a stack that has
+lost data — `docker compose down -v` does exactly that, since the database and the
+recordings are on separate volumes.
+
+The recordings are cached hard (`private, max-age=31536000, immutable`). Nothing
+rewrites `audio_path`, so the bytes under a memo id cannot change; the URL either
+answers with the same file or stops existing with the memo.
+
+**Chrome and Edge recordings declare no duration, and the player works around it.**
+A WebM from `MediaRecorder` carries no Duration element — the same fact that makes
+the worker measure length with `ffprobe` after normalization instead of at the
+upload edge — so `audio.duration` is `Infinity` and a native scrubber has nothing
+to size itself from. Opening a memo seeks once past the end of the file, which is
+what makes the element discover the real length, and then resets to the start. On
+a memo small enough for the browser to have buffered whole that costs nothing; on a
+larger one it is a single range request for the tail rather than a second download
+of the whole file, which is the other half of why this endpoint supports ranges.
+
+A few response conventions worth knowing before writing a client:
 
 - **Every write about a reminder answers with the memo**, not the reminder —
   `{"memo": {...}}` — because the memo already carries its reminders and the
@@ -842,11 +940,23 @@ Two response conventions worth knowing before writing a client:
   it is a read across every memo by a caller holding none of them.
 - **Lists echo the filters they answered for** alongside the rows, so a response
   that arrives after the search box has moved on can still be captioned correctly.
-- **`title` is the only content a client may write.** The transcript is a record of
-  what was said and nothing in this app edits one — the formatter will not respell a
-  word of it, and there is a test asserting so. A title is *generated*, which makes it
-  a guess, and a guess the owner disagrees with is a memo they cannot find again. So
-  the guess is the default and the owner has the last word.
+- **`title` and `transcript` are the content a client may write.** Both are guesses a
+  model made, and the owner has the last word on each: a title is *generated*, and a
+  wrong one is a memo they cannot find again; a transcript is what a speech model
+  thought it heard, and a wrong one is a memo that no longer says what was said. The
+  recording itself is what is kept as evidence — the transcript is a derivative of it.
+  Nothing in the app rewrites either: the formatter will not respell a word, and there
+  is a test asserting so. Only a person may. `status`, `tags` and the rest stay out for
+  a different reason — they belong to the queue and the worker, and a client setting
+  `status` would be a client claiming a job.
+- **`category` is on every memo, and null on all of them today.** It is the enrichment
+  pass's answer to what kind of thing a memo is — `task`, `idea` or `note` — and
+  MEMO-21 owns the enricher that writes it, so nothing fills the column on the shipped
+  configuration. It is in the projection regardless, which is what makes landing that
+  enricher a worker change rather than a worker change and an API change. Nothing
+  constrains the value either: the column has no CHECK behind it and the vocabulary
+  belongs to the enricher, so render what arrives rather than switching on those three.
+  `summary` and `tags` are empty for the same reason, and fill in the same way.
 - **A 5xx body is never shown to the user, whatever it says.** With `APP_DEBUG=false`
   it is `{"message":"Server Error"}`, which tells nobody anything; with it on, it is
   the exception and its trace. The frontend replaces both with a sentence naming the

@@ -502,6 +502,27 @@ h1,
   color: var(--error);
 }
 
+/*
+ * The enrichment pass's answer to what kind of thing the memo is. Outside the block
+ * above rather than inside it: those are two closed sets with a CHECK constraint each
+ * in 001_init.sql, and this column has nothing behind it at all.
+ *
+ * One rule for every value, for the same reason the source has one -- 'task', 'idea'
+ * and 'note' are three answers to one question and none of them is the exception, so
+ * colouring one would read as a warning about it. A value the enricher invents and this
+ * file has never heard of therefore still gets a badge rather than an unstyled word.
+ *
+ * Filled rather than outlined, which is what tells it apart from the source badge
+ * beside it: both are quiet facts in the same muted ink, and at this size a second
+ * outlined pill reads as one more of the same. colour-mix against the border rather
+ * than a new custom property, so it stays a tint of whatever the scheme's lines are.
+ */
+.badge--category {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--border) 55%, transparent);
+  color: var(--muted);
+}
+
 .tags {
   display: flex;
   flex-wrap: wrap;
@@ -1562,6 +1583,53 @@ h1,
   font-style: italic;
 }
 
+/*
+ * The transcript, being corrected.
+ *
+ * Same border, radius and background as the rename field, because they are the same kind of
+ * control on the same card and two spellings of one input is the sort of difference that reads
+ * as a bug. What differs is the size: this holds a memo rather than a label.
+ *
+ * `font: inherit` so the text being edited looks like the text it replaces -- a textarea
+ * defaults to a monospace stack, which would make the same words look like a different memo
+ * the moment Edit was pressed.
+ *
+ * `resize: vertical` rather than the browser default of `both`. Six rows is a guess about a
+ * memo whose length nothing here knows, so being able to make it taller matters; making it
+ * *wider* only pushes it out of the card.
+ */
+.sheet__transcript-input {
+  display: block;
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+/* Matches .sheet__retry's gap, so the two rows of buttons on one card sit on one rhythm. */
+.sheet__transcript-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+/*
+ * The button that opens the field, under the transcript rather than beside the heading.
+ *
+ * Beside the heading is where Rename sits, and putting a second one there would make the two
+ * compete for the same corner while acting on different things. Below the text it is next to
+ * what it edits.
+ */
+.sheet__section > .ghost {
+  margin-top: 0.6rem;
+}
+
 /* The reason, standing where the transcript would have been. See .memo-card__preview--failed. */
 .sheet__transcript--failed {
   color: var(--error);
@@ -1630,23 +1698,42 @@ h1,
   font: inherit;
 }
 
-/*
- * The spoken-language block on a memo card. The select itself is a `.sheet__select`; this is
- * only the gap above it.
- *
- * `margin-top` matches `.sheet__retry`, since the two can appear one after the other on a memo
- * that both failed and was decoded in the wrong language, and an uneven gap between them would
- * read as one belonging to something else.
- */
-.sheet__language-control {
-  display: block;
-  margin-top: 0.4rem;
-}
 
 .sheet__hint {
   margin: 0.4rem 0 0;
   color: var(--muted);
   font-size: 0.8rem;
+}
+
+/*
+ * A hint that is reporting a fault rather than explaining a control.
+ *
+ * The one use is the player's missing-recording line. Not a `.notice--error`, which is the
+ * boxed, role="alert" treatment this card gives to a write that failed: nothing failed here,
+ * and nothing the reader did caused it -- the memo simply has no audio behind it any more. So
+ * it keeps the hint's size and position under the control it is about, and only takes the
+ * colour that says something is wrong.
+ */
+.sheet__hint--error {
+  color: var(--error);
+}
+
+/*
+ * The native audio player, given the width of the card (MEMO-23).
+ *
+ * `width: 100%` because a <audio controls> is laid out at a fixed intrinsic width -- around
+ * 300px in Chrome, and different in every browser -- so left alone it sits as a short bar in
+ * the middle of a full-width card with the scrubber squeezed into whatever the transport
+ * buttons leave. Seeking is the point of this element and the scrubber is what it is done
+ * with, so the width is worth taking.
+ *
+ * `display: block` so the margin below it applies: an <audio> is inline by default, which also
+ * makes it sit on a text baseline and leaves a descender's worth of gap under it.
+ */
+.sheet__player {
+  display: block;
+  width: 100%;
+  margin-top: 0.4rem;
 }
 
 .sheet__past {

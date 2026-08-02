@@ -34,18 +34,44 @@ Route::get('/health', [HealthController::class, 'show'])->name('health');
 // one list. `?collection=none` is the fast strip; see ListMemosRequest for why the scope is
 // one parameter with three readings instead of two that can contradict each other.
 //
-// Still to attach here: the audio range endpoint (MEMO-23).
 Route::get('/memos', [MemoController::class, 'index'])->name('memos.index');
 Route::post('/memos', [MemoController::class, 'store'])->name('memos.store');
+
+// The original recording, with byte ranges (MEMO-23). The one route in this file that does
+// not answer JSON, and the one whose response the frontend never fetches: it is the `src` of
+// an <audio> element, so the browser issues the requests itself and expects a 206 to a Range
+// header. MemoController::audio has what serves them, and why it is not Caddy.
+//
+// A sub-resource rather than a field on the memo, because it is bytes and a memo is JSON --
+// there is no shape of `GET /api/memos` that can carry a recording. Under the memo rather
+// than at a `/api/audio/{key}` of its own for the reason App\Contracts\AudioStorage gives: a
+// storage key is not a client's to hold, so the memo id it already has is what addresses
+// this.
+//
+// GET only, and Laravel registers the matching HEAD for free. Symfony answers it from this
+// same method with the headers and no body, which is the correct thing for `curl -I` and for
+// anything sizing a file before fetching it. Not, as it turns out, what a browser does: the
+// Chrome media element opens with a ranged GET and issues no HEAD at all -- measured over
+// CDP, one request for one playback. HEAD is here because it is free and right, not because
+// the feature depends on it.
+//
+// whereUuid for the reason spelled out over the writes below -- there is no implicit route
+// binding in this project, so an id that is not a uuid would otherwise reach Postgres and
+// come back as a 500. It is placed here, ahead of that paragraph rather than under it,
+// because this is a read and the writes are grouped together after it.
+Route::get('/memos/{memo}/audio', [MemoController::class, 'audio'])
+    ->whereUuid('memo')
+    ->name('memos.audio');
 
 // Filing a memo into a collection, taking it back out, or renaming it. PATCH rather than PUT
 // because the body is a change and not a replacement -- a PUT carrying only `collection_id`
 // would be asking the API to discard the transcript.
 //
-// Two fields on one route rather than a `/memos/{memo}/title` of its own, because both are
-// small edits to the same row answering with the same shape, and the client already has one
-// function for "PATCH a memo and merge the result". UpdateMemoRequest has the argument for why
-// `title` is the only *content* a client may write and `transcript` is not.
+// Three fields on one route rather than a `/memos/{memo}/title` and a `/transcript` of their
+// own, because all three are small edits to the same row answering with the same shape, and the
+// client already has one function for "PATCH a memo and merge the result". UpdateMemoRequest has
+// the argument for which of a memo's columns a client may write, and why `transcript` -- which
+// this note used to name as the example of one they may not -- is now among them.
 //
 // whereUuid on every id below, and it is doing real work rather than tidying: there is no
 // Eloquent in this project (MEMO-05) and therefore no implicit route binding, so without it
@@ -71,14 +97,6 @@ Route::patch('/memos/{memo}', [MemoController::class, 'update'])
 Route::post('/memos/{memo}/retry', [MemoController::class, 'retry'])
     ->whereUuid('memo')
     ->name('memos.retry');
-
-// Beside retry rather than merged with it: same verb and shape, different question. Retry
-// asks "this failed, try again"; this one asks "the language was wrong, do it again in
-// Romanian" about a memo that usually succeeded. MemoController::retranscribe has why one
-// route could not safely answer both.
-Route::post('/memos/{memo}/retranscribe', [MemoController::class, 'retranscribe'])
-    ->whereUuid('memo')
-    ->name('memos.retranscribe');
 
 // Deleting a memo takes its recording and its reminders with it. The reminders go through
 // `ON DELETE CASCADE` inside Postgres; the audio blob is unlinked by MemoService, which has

@@ -115,6 +115,23 @@ final class LocalAudioStorage implements AudioStorage
         return is_file($path) && @unlink($path);
     }
 
+    public function localPath(string $key): ?string
+    {
+        $path = $this->path($key);
+
+        // Before the test rather than after, for the reason size() clears it: PHP caches
+        // stat results, and a file this same request replaced or deleted would otherwise
+        // still answer from the cached entry.
+        clearstatcache(true, $path);
+
+        // is_file rather than file_exists, and it is the same check exists() makes: a
+        // directory is not a recording, and handing one to BinaryFileResponse is a 500
+        // from inside the framework rather than the 404 a caller can read. Nothing in this
+        // app creates a directory under a key -- keys are `{uuid}.{ext}` -- so this is
+        // about what the volume might hold rather than about what we put there.
+        return is_file($path) ? $path : null;
+    }
+
     /**
      * Write to a sibling temp file, flush it to disk, then rename into place.
      *

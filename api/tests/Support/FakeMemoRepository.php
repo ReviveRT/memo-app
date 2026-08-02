@@ -7,6 +7,7 @@ namespace Tests\Support;
 use App\Repositories\MemoRepository;
 use App\Services\Memos\DeletedMemo;
 use App\Services\Memos\Memo;
+use App\Services\Memos\MemoAudio;
 use App\Services\Memos\MemoQuery;
 
 /**
@@ -78,6 +79,15 @@ final class FakeMemoRepository extends MemoRepository
     /** What rename() answers with. Null is the "no such memo" case the controller 404s. */
     public ?Memo $renameResult = null;
 
+    /** Every correctTranscript() call, in order, as `[memoId, transcript]`.
+     *
+     * @var list<array{0: string, 1: string}>
+     */
+    public array $corrected = [];
+
+    /** What correctTranscript() answers with. Null is the "no such memo" case the controller 404s. */
+    public ?Memo $correctResult = null;
+
     /** Every delete() call, in order.
      *
      * @var list<string>
@@ -87,13 +97,25 @@ final class FakeMemoRepository extends MemoRepository
     /**
      * The audio key each memo carries, keyed by memo id.
      *
-     * Only delete() reads it. `audio_path` is not on Memo -- see DeletedMemo for why it stays
-     * off the wire -- so a test that wants to assert the blob was unlinked has to say here
-     * which blob the row pointed at.
+     * Read by delete() and by audioFor(). `audio_path` is not on Memo -- see DeletedMemo for
+     * why it stays off the wire -- so a test that wants to assert the blob was unlinked, or
+     * to play one back, has to say here which blob the row pointed at.
      *
      * @var array<string, string>
      */
     public array $audioPaths = [];
+
+    /**
+     * The media type stored alongside each of those, keyed by memo id.
+     *
+     * A second map rather than a pair in the one above, so the tests that predate playback do
+     * not have to say anything about a mime they are not asserting on. Absent means the column
+     * is NULL, which is a row this build did not write and which MemoController::playbackType
+     * answers as octet-stream -- so the gap is itself a case worth being able to set up.
+     *
+     * @var array<string, string>
+     */
+    public array $audioMimes = [];
 
     public function __construct() {}
 
@@ -138,6 +160,7 @@ final class FakeMemoRepository extends MemoRepository
             title: null,
             summary: null,
             tags: [],
+            category: null,
             durationMs: null,
             lastError: null,
             lastErrorCode: null,
@@ -184,6 +207,26 @@ final class FakeMemoRepository extends MemoRepository
         return null;
     }
 
+    /**
+     * The audio pair for a memo that both exists in `$rows` and has a key set.
+     *
+     * Both halves of that condition are the real statement's, not conveniences: the query is
+     * `SELECT ... WHERE id = ?`, so an unknown memo answers null, and a memo with a NULL
+     * `audio_path` -- every typed memo -- answers null as well. Keeping them apart here would
+     * let the endpoint's "there is nothing to play" 404 pass while the SQL only handled one
+     * of them.
+     */
+    public function audioFor(string $id): ?MemoAudio
+    {
+        if ($this->find($id) === null) {
+            return null;
+        }
+
+        $key = $this->audioPaths[$id] ?? null;
+
+        return $key === null ? null : new MemoAudio($key, $this->audioMimes[$id] ?? null);
+    }
+
     public function moveToCollection(string $memoId, ?string $collectionId): ?Memo
     {
         $this->moved[] = [$memoId, $collectionId];
@@ -196,6 +239,13 @@ final class FakeMemoRepository extends MemoRepository
         $this->renamed[] = [$memoId, $title];
 
         return $this->renameResult;
+    }
+
+    public function correctTranscript(string $memoId, string $transcript): ?Memo
+    {
+        $this->corrected[] = [$memoId, $transcript];
+
+        return $this->correctResult;
     }
 
     /**
@@ -237,63 +287,11 @@ final class FakeMemoRepository extends MemoRepository
                 title: $memo->title,
                 summary: $memo->summary,
                 tags: $memo->tags,
+                category: $memo->category,
                 durationMs: $memo->durationMs,
                 lastError: $memo->lastError,
                 lastErrorCode: $memo->lastErrorCode,
                 language: $memo->language,
-                createdAt: $memo->createdAt,
-                collectionId: $memo->collectionId,
-                reminders: $memo->reminders,
-            );
-
-            $this->rows[$at] = $queued;
-
-            return $queued;
-        }
-
-        return null;
-    }
-
-    /**
-     * Mirrors the real statement's three conditions, because they are what the endpoint's
-     * two 409 messages are about and a fake that accepted anything would let both pass
-     * untested. See MemoRepository::retranscribe.
-     */
-    public function retranscribe(string $memoId, ?string $language): ?Memo
-    {
-        foreach ($this->rows as $at => $memo) {
-            if ($memo->id !== $memoId) {
-                continue;
-            }
-
-            if ($memo->source !== Memo::SOURCE_VOICE) {
-                return null;
-            }
-
-            if (! in_array($memo->status, ['ready', 'failed'], true)) {
-                return null;
-            }
-
-            // `transcript: null` is the part worth copying rather than glossing: the
-            // worker decides whether a claimed memo owes a transcript by asking whether it
-            // already has one, so a fake that kept the old text would hide the bug where
-            // the real UPDATE forgets to clear it.
-            //
-            // `title`, `summary` and `tags` go the same way, and that is a bug this fake
-            // once hid: the title is cut out of the transcript, so a Romanian memo
-            // re-decoded from Cyrillic kept the title `Салют`.
-            $queued = new Memo(
-                id: $memo->id,
-                source: $memo->source,
-                status: Memo::STATUS_QUEUED,
-                transcript: null,
-                title: null,
-                summary: null,
-                tags: [],
-                durationMs: $memo->durationMs,
-                lastError: null,
-                lastErrorCode: null,
-                language: $language,
                 createdAt: $memo->createdAt,
                 collectionId: $memo->collectionId,
                 reminders: $memo->reminders,

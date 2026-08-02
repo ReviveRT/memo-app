@@ -192,17 +192,110 @@ final class MemoEditEndpointsTest extends TestCase
         $this->assertSame([], $this->repository->deleted);
     }
 
-    /** A memo shaped like the row Postgres would have returned. */
-    private function memo(?string $title, ?string $collectionId = null): Memo
+    public function test_a_transcript_can_be_corrected(): void
     {
+        // The case this exists for: a model produced the wrong words, and the person who spoke
+        // them is the only one who can say so. UpdateMemoRequest has why the column stopped
+        // being read-only.
+        $corrected = 'Salut, mă numesc Vasile!';
+        $this->repository->correctResult = $this->memo(title: null, transcript: $corrected);
+
+        $this->patchJson('/api/memos/'.self::MEMO_ID, ['transcript' => $corrected])
+            ->assertOk()
+            ->assertJsonPath('memo.transcript', $corrected);
+
+        $this->assertSame([[self::MEMO_ID, $corrected]], $this->repository->corrected);
+    }
+
+    public function test_a_corrected_transcript_is_trimmed(): void
+    {
+        $this->repository->correctResult = $this->memo(title: null);
+
+        $this->patchJson('/api/memos/'.self::MEMO_ID, ['transcript' => "  Buy milk.  \n"])
+            ->assertOk();
+
+        $this->assertSame([[self::MEMO_ID, 'Buy milk.']], $this->repository->corrected);
+    }
+
+    public function test_a_blank_transcript_is_refused_rather_than_clearing_it(): void
+    {
+        // Unlike `title`, which may be cleared: a memo with no title falls back to the first
+        // line of its transcript, while a memo with no transcript has no text at all -- it is
+        // unfindable by search and indistinguishable from one whose recording produced nothing.
+        // Somebody who wants that wants Delete.
+        $this->patchJson('/api/memos/'.self::MEMO_ID, ['transcript' => '   '])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('transcript');
+
+        $this->assertSame([], $this->repository->corrected);
+    }
+
+    public function test_an_oversized_or_null_byte_transcript_is_refused(): void
+    {
+        $this->patchJson('/api/memos/'.self::MEMO_ID, [
+            'transcript' => str_repeat('a', UpdateMemoRequest::MAX_TRANSCRIPT_LENGTH + 1),
+        ])->assertStatus(422)->assertJsonValidationErrors('transcript');
+
+        // A NUL is silently destructive rather than fatal -- libpq truncates the bound
+        // parameter at it, so this would store a one-character transcript for a long PATCH.
+        $this->patchJson('/api/memos/'.self::MEMO_ID, ['transcript' => "a\0b"])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('transcript');
+
+        $this->assertSame([], $this->repository->corrected);
+    }
+
+    public function test_correcting_a_memo_that_is_gone_is_a_404(): void
+    {
+        $this->repository->correctResult = null;
+
+        $this->patchJson('/api/memos/'.self::MEMO_ID, ['transcript' => 'Anything.'])
+            ->assertNotFound();
+    }
+
+    public function test_a_title_and_a_transcript_in_one_body_both_apply(): void
+    {
+        // Two statements, one request. The transcript runs last, so the row that comes back
+        // carries both edits -- see MemoController::update.
+        $this->repository->renameResult = $this->memo(title: 'Introduction');
+        $this->repository->correctResult = $this->memo(title: 'Introduction', transcript: 'Salut!');
+
+        $this->patchJson('/api/memos/'.self::MEMO_ID, [
+            'title' => 'Introduction',
+            'transcript' => 'Salut!',
+        ])
+            ->assertOk()
+            ->assertJsonPath('memo.title', 'Introduction')
+            ->assertJsonPath('memo.transcript', 'Salut!');
+
+        $this->assertSame([[self::MEMO_ID, 'Introduction']], $this->repository->renamed);
+        $this->assertSame([[self::MEMO_ID, 'Salut!']], $this->repository->corrected);
+    }
+
+    public function test_a_body_naming_only_a_title_does_not_touch_the_transcript(): void
+    {
+        $this->repository->renameResult = $this->memo(title: 'Just a rename');
+
+        $this->patchJson('/api/memos/'.self::MEMO_ID, ['title' => 'Just a rename'])->assertOk();
+
+        $this->assertSame([], $this->repository->corrected);
+    }
+
+    /** A memo shaped like the row Postgres would have returned. */
+    private function memo(
+        ?string $title,
+        ?string $collectionId = null,
+        string $transcript = 'Buy milk, eggs and bread on the way home.',
+    ): Memo {
         return new Memo(
             id: self::MEMO_ID,
             source: Memo::SOURCE_VOICE,
             status: 'ready',
-            transcript: 'Buy milk, eggs and bread on the way home.',
+            transcript: $transcript,
             title: $title,
             summary: null,
             tags: [],
+            category: null,
             durationMs: 4200,
             lastError: null,
             lastErrorCode: null,

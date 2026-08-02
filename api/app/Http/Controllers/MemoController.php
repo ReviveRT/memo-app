@@ -4,14 +4,17 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
+use App\Contracts\AudioStorage;
 use App\Http\Requests\ListMemosRequest;
-use App\Http\Requests\RetranscribeMemoRequest;
 use App\Http\Requests\StoreMemoRequest;
 use App\Http\Requests\UpdateMemoRequest;
+use App\Http\Responses\AudioFileResponse;
+use App\Http\Rules\SniffedAudioType;
 use App\Services\Memos\Memo;
 use App\Services\Memos\MemoService;
 use Illuminate\Http\JsonResponse;
 use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpFoundation\ResponseHeaderBag;
 
 /**
  * HTTP in, HTTP out. No SQL, and no decisions about what a memo is.
@@ -38,7 +41,23 @@ use Symfony\Component\HttpFoundation\Response;
  */
 final class MemoController extends Controller
 {
-    public function __construct(private readonly MemoService $memos) {}
+    /**
+     * How long a browser may keep a recording it has already fetched, in seconds.
+     *
+     * A year, which is the conventional spelling of "forever" for a URL whose bytes cannot
+     * change -- see audio() for why they cannot. The number is only reachable by a client that
+     * keeps a memo's id, and the id stops resolving the moment the memo is deleted.
+     */
+    private const PLAYBACK_MAX_AGE = 31_536_000;
+
+    /**
+     * AudioStorage is here for `audio()` alone, and MemoService::audioFor has the argument for
+     * why it is not behind the service the way every other blob operation is.
+     */
+    public function __construct(
+        private readonly MemoService $memos,
+        private readonly AudioStorage $storage,
+    ) {}
 
     /**
      * One route, two accepted bodies: a typed memo as JSON, or a recording as
@@ -119,6 +138,21 @@ final class MemoController extends Controller
             }
         }
 
+        // Last of the three, so a body carrying both a title and a transcript returns the row
+        // with both applied. The order is otherwise arbitrary -- they touch different columns
+        // -- but "whichever ran last is what we return" only holds if the last one ran after
+        // the others, and a reader should not have to check that.
+        if ($request->correctsTranscript()) {
+            $updated = $this->memos->correctTranscript($memo, $request->transcript());
+
+            if ($updated === null) {
+                abort(
+                    Response::HTTP_NOT_FOUND,
+                    'That memo no longer exists. Refresh and try again.',
+                );
+            }
+        }
+
         // Unreachable: UpdateMemoRequest refuses a body that asks for neither, so one of the
         // two branches above has run. Asserted rather than assumed, because the alternative
         // is a null dereference one edit to the rules away.
@@ -174,50 +208,6 @@ final class MemoController extends Controller
         // frontend's `pending` and restarts the poll that will show the retry finishing. A
         // 204 would leave the card sitting on `failed` until something else happened to
         // refresh it.
-        return response()->json(['memo' => $outcome->memo->toArray()]);
-    }
-
-    /**
-     * Decode a voice memo again, in a language the user names.
-     *
-     * **Why this is not `retry` with a parameter.** Retry's contract is "this failed, try
-     * again", and its `status = 'failed'` guard is the whole of its safety. The memo this
-     * route is called about is usually `ready`: a Romanian recording transliterated into
-     * Cyrillic is a *successful* job by every measure the worker has, and it is the user
-     * who can see it is wrong. Widening Retry to accept `ready` would mean a Retry click
-     * could discard a transcript somebody is reading. MemoRepository::retranscribe has
-     * the three conditions and what each refuses.
-     *
-     * The 409 is the same shape as Retry's and reachable for more reasons: a text memo has
-     * no audio to decode, and a memo already `queued` or `processing` is mid-flight with a
-     * worker possibly holding its fence token. Both name the state they found, because
-     * these sentences reach the user verbatim.
-     *
-     * 200 with the whole memo, for the reason Retry gives -- the row comes back `queued`
-     * with `transcript` cleared, which is what flips the frontend to pending and restarts
-     * the poll that will show the new transcript arriving. A client that got a 204 here
-     * would sit on the old, wrong transcript with no indication anything was happening.
-     */
-    public function retranscribe(RetranscribeMemoRequest $request, string $memo): JsonResponse
-    {
-        $outcome = $this->memos->retranscribe($memo, $request->language());
-
-        if ($outcome->memo === null) {
-            abort(Response::HTTP_NOT_FOUND, 'That memo no longer exists.');
-        }
-
-        if (! $outcome->requeued) {
-            // Two distinct refusals, and the difference is worth spelling out rather than
-            // reporting both as "wrong state": one is permanent and the other resolves on
-            // its own in a second or two.
-            $reason = $outcome->memo->source === Memo::SOURCE_TEXT
-                ? 'Only a voice memo can be transcribed again, and this one was typed.'
-                : "A memo can only be transcribed again once it has finished, and this one is {$outcome->memo->status}."
-                    .' Refresh to see where it got to.';
-
-            abort(Response::HTTP_CONFLICT, $reason);
-        }
-
         return response()->json(['memo' => $outcome->memo->toArray()]);
     }
 
@@ -288,5 +278,138 @@ final class MemoController extends Controller
             // reasonable; a cached response is not, and no-store is what keeps an
             // intermediary from making that choice for us.
             ->header('Cache-Control', 'no-store');
+    }
+
+    /**
+     * Play back the original recording (MEMO-23).
+     *
+     * **Range support is the feature, not a refinement of it.** Safari refuses to play audio
+     * from an endpoint that answers a `Range` request with the whole file, and without it
+     * nothing can seek anywhere: dragging the scrubber asks for a byte offset, and a server
+     * that cannot answer one leaves the player to download the file again from the start.
+     *
+     * BinaryFileResponse is what does it, and the reason it is that rather than an
+     * `X-Accel-Redirect` handed to Caddy is recorded in NOTES.md with what was measured. The
+     * short version: FrankenPHP has no X-Accel-Redirect of its own -- checked against the
+     * shipped binary, the string is not in it -- so the accelerated path is a Caddy
+     * `intercept` block injected through a compose environment variable, where a typo stops
+     * the server from starting and where no test in this suite can reach the bytes. Symfony's
+     * range handling is framework code rather than the hand-rolled parsing the task warns
+     * against, the cap on a recording is 12 MiB (config/memo.php), and the api container runs
+     * a threaded server so a client holding one of these does not stall the status polls
+     * behind it -- see api/Dockerfile, which names a streaming audio response as the reason it
+     * chose FrankenPHP over `php -S`, before there was anything here to stream.
+     *
+     * That path is still one line away if it is ever wanted, and it needs no change here:
+     * Symfony emits `X-Accel-Redirect` from this same response object once
+     * `BinaryFileResponse::trustXSendfileTypeHeader()` is on and the request carries
+     * `X-Sendfile-Type`. It is deliberately *off*, and not merely unconfigured -- that
+     * setting trusts a header from the **request**, so with it on and no Caddy block to
+     * inject one, any client could send `X-Sendfile-Type: x-accel-redirect` and get back an
+     * empty 200 carrying the absolute path of the file on the volume.
+     *
+     * **Two 404s with different sentences, and the second one is not paranoia.** A memo with
+     * no recording is the ordinary case -- every typed memo -- and reads as "there is nothing
+     * to play". A memo whose row names a blob the volume does not have is a stack that has
+     * lost data: `docker compose down -v` between recording and playing does it, and so does
+     * a restore of the database without the volume. Flattening both into one sentence would
+     * make the second look like the first, and the first is not something to investigate.
+     *
+     * Neither is a 500. The row is intact and the API is working; what is missing is bytes it
+     * never promised in the response it is answering. StorageException is left to become a
+     * 500, which is the distinction MemoController's class docblock draws: a caller can do
+     * nothing about an unmounted volume, and that is not this.
+     */
+    public function audio(string $memo): AudioFileResponse
+    {
+        $audio = $this->memos->audioFor($memo);
+
+        if ($audio === null) {
+            abort(Response::HTTP_NOT_FOUND, 'That memo has no recording to play.');
+        }
+
+        $path = $this->storage->localPath($audio->key);
+
+        if ($path === null) {
+            abort(
+                Response::HTTP_NOT_FOUND,
+                'The recording for that memo is no longer on the audio volume.',
+            );
+        }
+
+        // A BinaryFileResponse in all but one respect -- see AudioFileResponse for the
+        // Content-Length an unsatisfiable range would otherwise go out promising.
+        $response = new AudioFileResponse($path);
+
+        // Explicit, so it wins over BinaryFileResponse's own fallback -- which would sniff
+        // the file again with finfo on every single range request a scrub produces. It is
+        // also the right answer rather than merely the cheap one: what is stored is what
+        // SniffedAudioType read off these same bytes at upload, and that rule is the one
+        // that decided they were a recording at all.
+        $response->headers->set('Content-Type', $this->playbackType($audio->mimeType));
+
+        // Belt and braces on that. This app serves user-supplied bytes from its own origin,
+        // and the whole defence is that `audio_mime` can only be a value the upload rule
+        // vouched for -- so this says "do not go looking for a better answer than the one
+        // in the header" to a browser that would otherwise sniff its way to text/html.
+        $response->headers->set('X-Content-Type-Options', 'nosniff');
+
+        // inline, so the browser plays it where it is asked to rather than offering to save
+        // it. The filename is the last segment of the storage key -- `{memo id}.{ext}` --
+        // which is not a name anybody chose but is the one that answers "which blob is this?"
+        // when a recording has been saved out of a browser and needs matching back to a row.
+        //
+        // **basename, and it is not defensive tidying.** Symfony refuses a disposition
+        // filename containing `/` with an InvalidArgumentException, which is a 500 rather
+        // than a bad header. Keys are flat today, but LocalAudioStorage handles nested ones
+        // and pins the directory modes three levels down, and MemoService::createFromAudio
+        // says date-sharding is available whenever this volume holds enough files to want it.
+        // Taking that option would otherwise turn every playback request into a 500, at the
+        // point furthest from the change that caused it.
+        $response->setContentDisposition(
+            ResponseHeaderBag::DISPOSITION_INLINE,
+            basename($audio->key),
+        );
+
+        // The opposite of the list's `no-store`, and both are right. A memo's recording is
+        // written once and never rewritten: `audio_path` is set by the INSERT and no statement
+        // in MemoRepository updates it, and the edits a client *can* make -- the title, the
+        // transcript, which collection it is in -- all leave the bytes alone. So this URL
+        // either answers with the same file forever or, once the memo is deleted, stops
+        // existing. That is what `immutable` means, and it is what keeps a scrub from
+        // re-fetching ranges the browser already has.
+        //
+        // private, because there is no authentication in this app (README, Assumptions) and
+        // a shared cache holding one user's recordings is not a thing to leave to a default.
+        $response->setPrivate();
+        $response->setMaxAge(self::PLAYBACK_MAX_AGE);
+        $response->setImmutable();
+
+        // Last-Modified comes from the file's mtime, set by BinaryFileResponse's own
+        // constructor default. It is not decoration here: Symfony validates `If-Range`
+        // against it, which is what lets a player resume a seek it started before the
+        // response it was reading was replaced. `Accept-Ranges: bytes` is added in
+        // prepare(), and the 206, the `Content-Range` and the 416 for a range past the end
+        // of the file all come from the same place.
+        return $response;
+    }
+
+    /**
+     * What to serve a recording as: the type stored with it, or octet-stream.
+     *
+     * The stored value cannot be anything but an allowed type today -- SniffedAudioType is
+     * what wrote it, and it refuses everything not on that list -- so this re-check is about
+     * rows this build did not write: an older upload path, a restored dump, a row inserted by
+     * hand. `application/octet-stream` for those rather than passing them through, because
+     * the one thing that must not happen is a memo serving `text/html` from this origin.
+     *
+     * Reusing the rule's constant rather than restating it, so the list of things this app
+     * will serve cannot drift from the list it will accept.
+     */
+    private function playbackType(?string $stored): string
+    {
+        return $stored !== null && in_array($stored, SniffedAudioType::ALLOWED, true)
+            ? $stored
+            : 'application/octet-stream';
     }
 }

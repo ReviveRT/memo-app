@@ -643,6 +643,7 @@ final class MemoEndpointsTest extends TestCase
             title: 'Dentist',
             summary: 'A reminder to call the dentist.',
             tags: ['dentist', 'health'],
+            category: 'task',
             durationMs: 4200,
             lastError: null,
             lastErrorCode: null,
