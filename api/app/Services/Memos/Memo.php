@@ -165,9 +165,15 @@ final class Memo
         /**
          * The language this memo is decoded in, or null for "detect it".
          *
-         * Sent to the browser as well as read by the worker, because the UI has to show
-         * what a memo was last transcribed as -- otherwise "re-transcribe as Romanian" is
-         * a button with no way to tell whether it already happened.
+         * Carried to the browser with the rest of the row. The worker reads the column
+         * too, but through its own claim projection rather than this DTO -- see
+         * `_CLAIM_COLUMNS` in memo_ai/memos.py.
+         *
+         * Nothing in the UI renders it today, so this is a value the browser is handed
+         * and does not use. It had one reader: a "Spoken language" select in MemoDialog
+         * that showed what a memo was decoded as and re-decoded it on change. That went
+         * when a wrong transcript became something you correct by editing rather than
+         * re-run the model on -- web/src/languages.js has the rest.
          *
          * Defaulted, and placed here rather than beside `lastErrorCode` where it belongs
          * by subject, for one uninteresting reason: PHP deprecates an optional parameter
