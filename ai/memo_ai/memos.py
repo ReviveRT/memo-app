@@ -17,6 +17,7 @@ from uuid import UUID
 import psycopg
 from psycopg.rows import class_row
 
+from memo_ai import titles
 from memo_ai.stt.base import Transcript
 
 log = logging.getLogger(__name__)
@@ -124,10 +125,20 @@ _CLAIM = f"""
 #
 # No `next_attempt_at` reset and no `last_error` clear: `ready` is terminal, and
 # MEMO-16 owns the retry bookkeeping that would need either.
+# `title` joins them, and the COALESCE is the *other* way round for a reason: the
+# existing value wins. A title is the one column on this table a person may edit, and
+# a worker that re-claimed a row -- a retry, a reaper handing it back -- must not
+# overwrite what somebody typed with what a regular expression guessed. Written on
+# whichever pass first finds the column NULL, and never again while it holds anything.
+#
+# NULL is a legitimate answer from the titler as well as its "not run yet" state, and
+# the two do not need telling apart here: a transcript with nothing nameable in it
+# leaves the column NULL, and every reader already coalesces past it.
 _FINISH_READY = """
     UPDATE memos
        SET status = 'ready',
            transcript = COALESCE(%(transcript)s, transcript),
+           title = COALESCE(title, %(title)s),
            stt_provider = COALESCE(%(stt_provider)s, stt_provider),
            stt_model = COALESCE(%(stt_model)s, stt_model),
            duration_ms = COALESCE(%(duration_ms)s, duration_ms)
@@ -203,13 +214,24 @@ class MemoQueue:
         transcript: Transcript | None,
         duration_ms: int | None = None,
     ) -> bool:
-        """Commit the result and move the row to ``ready``. False if the fence lost."""
+        """
+        Commit the result and move the row to ``ready``. False if the fence lost.
+
+        The title is derived here rather than in the pipeline, and that is where it
+        belongs: it is a function of the text this statement is about to store, and
+        computing it anywhere else would mean two places deciding which text that is.
+        A voice memo's is the transcript just produced; a text memo's has been on the
+        row since it was inserted, and ``transcript`` is None for it.
+        """
+        text = memo.transcript if transcript is None else transcript.text
+
         return self._fenced(
             _FINISH_READY,
             {
                 "id": memo.id,
                 "locked_at": memo.locked_at,
                 "transcript": None if transcript is None else transcript.text,
+                "title": titles.title_for(text),
                 "stt_provider": None if transcript is None else transcript.provider,
                 "stt_model": None if transcript is None else transcript.model,
                 # None for a text memo, which has no audio and so no length. That

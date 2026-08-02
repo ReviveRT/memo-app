@@ -75,6 +75,42 @@ def test_a_transcript_is_written_with_the_provider_that_actually_produced_it():
     assert connection.last_params["stt_model"] == "base"
 
 
+def test_a_title_is_derived_from_whichever_text_is_being_stored():
+    # The voice path: the transcript that has just come back from the model, because
+    # the row's own `transcript` is still NULL at this point.
+    connection = FakeConnection(rowcount=1)
+    transcript = Transcript(
+        text="Remember to call the dentist about Thursday.", provider="local", model="base"
+    )
+
+    MemoQueue(connection).finish_ready(claimed_memo(), transcript)
+
+    assert connection.last_params["title"] == "Call the dentist"
+
+
+def test_a_text_memos_title_comes_from_the_transcript_already_on_the_row():
+    # The text path hands back no Transcript at all, so a title derived from the
+    # argument would be NULL for every typed memo -- which is the bug this pins.
+    connection = FakeConnection(rowcount=1)
+    memo = claimed_memo(source="text", transcript="Sort the invoices before Friday.")
+
+    MemoQueue(connection).finish_ready(memo, None)
+
+    # "before Friday" is dropped by the trailing-date rule -- see memo_ai/titles.py.
+    assert connection.last_params["title"] == "Sort the invoices"
+
+
+def test_an_existing_title_wins_over_a_generated_one():
+    # The COALESCE is the other way round from the rest of this statement, and
+    # deliberately: `title` is the one column a person may edit, and a re-claim must
+    # not overwrite what they typed with what a regular expression guessed.
+    connection = FakeConnection(rowcount=1)
+
+    MemoQueue(connection).finish_ready(claimed_memo(source="text", transcript="Anything."), None)
+
+    assert "title = COALESCE(title, %(title)s)" in connection.last_sql
+
+
 def test_the_measured_duration_is_written_beside_the_transcript():
     connection = FakeConnection(rowcount=1)
 
