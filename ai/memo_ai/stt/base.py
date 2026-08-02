@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from memo_ai import failures
+
 
 class SttError(Exception):
     """
@@ -24,7 +26,27 @@ class SttError(Exception):
     strings, keys and internal paths out of it. memo_ai/pipeline.py is what
     enforces the other half, by refusing to copy an *unclassified* exception's
     text into the row.
+
+    **And one token beside the sentence.** ``code`` is written to
+    ``memos.last_error_code`` and is what a program branches on, because the message
+    is prose and prose gets reworded -- memo_ai/failures.py has the argument. It is a
+    class attribute so a subclass names its kind once instead of every raise site
+    repeating it, and a constructor keyword so a raise site that knows better can say
+    so: :data:`~memo_ai.failures.NO_SPEECH` and the generic transcription failure are
+    both ``SttError``, and only the raise site can tell them apart.
     """
+
+    code = failures.TRANSCRIPTION_FAILED
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+
+        # Assigned only when overridden, so the class attribute stays visible on the
+        # instance rather than being shadowed by a copy of itself. That matters for
+        # a subclass like AudioTooLong, whose own __init__ calls up to here without
+        # a code and must keep the one its class declares.
+        if code is not None:
+            self.code = code
 
 
 class SttUnavailable(SttError):
@@ -37,6 +59,8 @@ class SttUnavailable(SttError):
     chain.py is the one reader of that distinction, and memo_ai/stt/local.py is
     where a real provider has to choose between them on every failure it has.
     """
+
+    code = failures.PROVIDER_UNAVAILABLE
 
 
 @dataclass(frozen=True)

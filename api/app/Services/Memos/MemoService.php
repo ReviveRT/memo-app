@@ -168,6 +168,41 @@ final class MemoService
     }
 
     /**
+     * Put a failed memo back in the worker's queue.
+     *
+     * The one write on this resource that is about the *pipeline* rather than about the memo's
+     * contents, and it is a client's to make for the same reason a rename is: the failure may
+     * be something only the person in front of the screen can fix. A missing API key, a model
+     * that had not finished downloading, a recording made before the microphone was plugged in
+     * -- the worker's own retries all happen within a couple of minutes of the recording, so
+     * by the time somebody has read the reason and done something about it, the memo is
+     * terminal and nothing left in the stack will touch it again.
+     *
+     * **Two statements, and only the first one is allowed to race.** The requeue is guarded on
+     * `status = 'failed'` inside its own UPDATE, so nothing can slip between the check and the
+     * write -- that is where the correctness is. The read after it exists only to describe a
+     * write that did not happen, and it may legitimately see a row that has moved on again: a
+     * memo requeued by another tab a millisecond earlier is reported as `queued` rather than
+     * as `failed`, which is true, and the caller's remedy -- look at the memo -- is the same
+     * either way. Doing this half in a transaction would buy a more precise account of a
+     * request that changed nothing.
+     */
+    public function retry(string $memoId): RetryOutcome
+    {
+        $requeued = $this->repository->requeue($memoId);
+
+        if ($requeued !== null) {
+            return RetryOutcome::requeued($requeued);
+        }
+
+        $current = $this->repository->find($memoId);
+
+        return $current === null
+            ? RetryOutcome::missing()
+            : RetryOutcome::refused($current);
+    }
+
+    /**
      * Delete a memo and the recording behind it.
      *
      * **The row goes first and the blob second, which is the reverse of how one is created**

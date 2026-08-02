@@ -218,6 +218,7 @@ final class ReminderEndpointsTest extends TestCase
             tags: [],
             durationMs: null,
             lastError: null,
+            lastErrorCode: null,
             createdAt: '2026-07-31T09:00:00.000Z',
             collectionId: null,
             reminders: $reminders,

@@ -34,8 +34,7 @@ Route::get('/health', [HealthController::class, 'show'])->name('health');
 // one list. `?collection=none` is the fast strip; see ListMemosRequest for why the scope is
 // one parameter with three readings instead of two that can contradict each other.
 //
-// Still to attach here: the retry action (MEMO-17) and the audio range endpoint
-// (MEMO-23).
+// Still to attach here: the audio range endpoint (MEMO-23).
 Route::get('/memos', [MemoController::class, 'index'])->name('memos.index');
 Route::post('/memos', [MemoController::class, 'store'])->name('memos.store');
 
@@ -56,6 +55,22 @@ Route::post('/memos', [MemoController::class, 'store'])->name('memos.store');
 Route::patch('/memos/{memo}', [MemoController::class, 'update'])
     ->whereUuid('memo')
     ->name('memos.update');
+
+// Retrying a failed memo (MEMO-17). POST rather than PATCH, and a path segment rather than a
+// field in the body, because this is not an edit to the memo -- it is an action taken *about*
+// it, and the state it produces is not the client's to name. A `PATCH {"status":"queued"}`
+// would invite the next caller to try `{"status":"ready"}`, which is the worker's alone.
+//
+// Here rather than up beside `POST /memos`, and the placement is doing two small jobs: this is
+// a write on one existing memo like the two it now sits between, and it is under the whereUuid
+// paragraph above, which says "every id below" and would otherwise not have covered it.
+//
+// Not idempotent, deliberately: a second press answers 409 rather than shrugging. See
+// MemoController::retry for why "it is already queued" is worth saying out loud, and
+// MemoRepository::requeue for why `processing` and `ready` are refused rather than tolerated.
+Route::post('/memos/{memo}/retry', [MemoController::class, 'retry'])
+    ->whereUuid('memo')
+    ->name('memos.retry');
 
 // Deleting a memo takes its recording and its reminders with it. The reminders go through
 // `ON DELETE CASCADE` inside Postgres; the audio blob is unlinked by MemoService, which has

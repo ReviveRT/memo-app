@@ -56,8 +56,8 @@ final class MemoTest extends TestCase
         $this->assertSame(
             [
                 'id', 'source', 'status', 'transcript', 'title',
-                'summary', 'tags', 'duration_ms', 'last_error', 'created_at',
-                'collection_id', 'reminders',
+                'summary', 'tags', 'duration_ms', 'last_error', 'last_error_code',
+                'created_at', 'collection_id', 'reminders',
             ],
             array_keys(Memo::fromRow($this->row())->toArray()),
         );
@@ -219,11 +219,18 @@ final class MemoTest extends TestCase
             'title' => null,
             'summary' => null,
             'last_error' => null,
+            'last_error_code' => null,
         ]));
 
         $this->assertNull($memo->title);
         $this->assertNull($memo->summary);
         $this->assertNull($memo->lastError);
+
+        // Null together with the sentence, which is the only combination a memo that has
+        // never failed can have. The pair is written by one statement and cleared by one
+        // statement (memo_ai/memos.py), so a row carrying one without the other would mean
+        // the worker and this projection had come apart.
+        $this->assertNull($memo->lastErrorCode);
     }
 
     /**
@@ -243,6 +250,7 @@ final class MemoTest extends TestCase
             'tags' => '["dentist"]',
             'duration_ms' => null,
             'last_error' => null,
+            'last_error_code' => null,
             // Already formatted; the query does this with to_char so nothing here has
             // to guess at the server's DateStyle. Named created_at_iso rather than
             // created_at so that ORDER BY in the list query cannot bind to it -- see

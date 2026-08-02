@@ -62,6 +62,20 @@ const READY_DISMISS_MS = 6_000
 const PHASES = {
   UPLOADING: 'uploading',
   SAVING: 'saving',
+
+  /**
+   * The third shape of "bytes going out", and the one that is not a submission at all: a
+   * failed memo being handed back to the worker (MEMO-17).
+   *
+   * It gets its own value rather than borrowing SAVING because the wording has to differ --
+   * nothing is being saved, the memo has existed for some time -- and because it is the stage
+   * a retry can be *refused* in, which a submission cannot be. Everything after it is shared:
+   * once the API answers, a retried memo is a memo in the queue and there is nothing left to
+   * tell apart. That is the whole reason this hooks into the toasts rather than growing a
+   * second mechanism beside them.
+   */
+  RETRYING: 'retrying',
+
   QUEUED: 'queued',
   PROCESSING: 'processing',
   READY: 'ready',
@@ -69,6 +83,26 @@ const PHASES = {
 
   /** The write itself did not land: no row, no memo id, nothing to watch. */
   REJECTED: 'rejected',
+}
+
+/**
+ * Which stage each control opens on, before the API has answered anything.
+ *
+ * A table rather than the ternary this used to be, because there are three of them now and a
+ * nested conditional over a string is where a fourth one gets added wrong. The `?? SAVING`
+ * fallback at the call site keeps an unknown kind rendering something rather than a blank card.
+ */
+const OPENING_PHASE = {
+  voice: PHASES.UPLOADING,
+  text: PHASES.SAVING,
+  retry: PHASES.RETRYING,
+
+  // The odd one out: it opens on its *last* stage, because a discard is only ever
+  // reported after the fact. reportDiscarded settles it in the next statement anyway, so
+  // this is never rendered -- it is here so the toast is never briefly in a phase that
+  // claims work is happening, and so that `kind` reads as what it is at the one place
+  // that looks at it (the REJECTED title, which a discard cannot reach).
+  discard: PHASES.FAILED,
 }
 
 const TERMINAL_STATUSES = new Set(['ready', 'failed'])
@@ -96,8 +130,12 @@ const machinery = new Map()
  * Called by useMemos at the top of the write path, before the request goes out, so the corner
  * says something from the first frame rather than from whenever the server answers.
  *
- * @param {'voice'|'text'} kind Which control started this. Only decides the opening wording and
- *   whether the first stage draws a bar.
+ * Also called when a failed memo is sent back to the worker, which is not a submission but is
+ * the same wait with the same three endings -- see PHASES.RETRYING.
+ *
+ * @param {'voice'|'text'|'retry'|'discard'} kind Which control started this. Decides the opening
+ *   wording, whether the first stage draws a bar, and how a rejection is described. `discard` is
+ *   not a control at all -- see reportDiscarded, which reports something that already happened.
  * @returns {{
  *   uploading: (fraction: number) => void,
  *   stored: (memo: object) => void,
@@ -111,7 +149,17 @@ export function startMemoToast(kind) {
     ...toasts.value,
     {
       id,
-      phase: kind === 'voice' ? PHASES.UPLOADING : PHASES.SAVING,
+      phase: OPENING_PHASE[kind] ?? PHASES.SAVING,
+
+      /**
+       * Kept on the toast, and read by exactly one thing: what to call a rejection.
+       *
+       * `phase` cannot answer it. REJECTED means "the write did not land", which is true of a
+       * memo that was never stored and of a retry that was refused, and "Not saved" under the
+       * second one describes something nobody was trying to do. The stage is shared and the
+       * verb is not, so the verb is carried separately rather than by splitting the stage.
+       */
+      kind,
 
       /** Set once the API has answered with a row. Null until then, and null forever on a rejection. */
       memoId: null,
@@ -341,6 +389,49 @@ export function forgetMemo(memoId) {
   for (const toast of toasts.value.filter((one) => one.memoId === memoId)) {
     dismiss(toast.id)
   }
+}
+
+/**
+ * Say why a memo was thrown away, and make sure exactly one card says it.
+ *
+ * Called by the discard path in useMemoList, for a recording the worker found nothing in. That
+ * memo is about to stop existing, so this is the *only* place its reason will ever be shown --
+ * there will be no card to open and no row to poll. That is the whole reason the discard is
+ * driven from the browser rather than from the worker: the deletion and the explanation have to
+ * be the same event, and only one of the two runtimes is in front of the user.
+ *
+ * **Reuses the submission's toast when there is one, rather than adding a second.** In the
+ * common case the user recorded the memo seconds ago and a toast is already following it
+ * through "Transcribing…"; settling that one turns it into the failure card in place, which is
+ * exactly what it would have done had the memo stayed. Starting a fresh toast instead would put
+ * two cards in the corner about one recording, one of them stuck mid-wait forever, because the
+ * watcher it depends on is about to lose its row.
+ *
+ * When there is no such toast -- a second tab, a page opened after the fact, a memo recorded
+ * before a reload -- it starts one already settled. A memo disappearing with no word at all is
+ * the failure mode this whole feature exists to avoid, and it would be the easy one to ship:
+ * everything still works, and the user's recording is simply gone.
+ *
+ * @param {object} memo The memo as the list last saw it, still carrying its reason.
+ */
+export function reportDiscarded(memo) {
+  const detail = describe(memo)
+  const following = toasts.value.filter((one) => one.memoId === memo.id)
+
+  if (following.length > 0) {
+    for (const toast of following) {
+      settle(toast.id, PHASES.FAILED, detail)
+    }
+
+    return
+  }
+
+  const started = startMemoToast('discard')
+
+  // `stored` rather than reaching into the internals: it is the documented way to point a
+  // toast at a row, and a `failed` memo is terminal, so follow() settles it immediately
+  // instead of setting up a watcher for a row that is about to be deleted.
+  started.stored(memo)
 }
 
 /** Take one toast off the screen and forget everything hanging off it. */

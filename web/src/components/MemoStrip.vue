@@ -1,8 +1,9 @@
 <script setup>
 import { computed, nextTick, watch } from 'vue'
 import ProgressBar from './ProgressBar.vue'
-import { failureReason } from '../memoFailure'
+import { canRetry, failureReason } from '../memoFailure'
 import { memoLabel } from '../memoLabel'
+import { useMemos } from '../composables/useMemos'
 import { useNewMemoFlash } from '../composables/useNewMemoFlash'
 import { useProcessingProgress } from '../composables/useProcessingProgress'
 
@@ -53,6 +54,25 @@ const emit = defineEmits(['open'])
  * (see useProcessingProgress for why it cannot be one).
  */
 const { progressFor, forget } = useProcessingProgress()
+
+/*
+ * Retrying a failed memo (MEMO-17).
+ *
+ * Called straight out of the singleton rather than emitted to the parent, which is the one
+ * place this otherwise-presentational component reaches for state -- and it is deliberate.
+ * There are two of these strips on the page and neither parent has anything to add: `retry`
+ * writes the memo back into whichever lists hold it (applyMemoEverywhere) and reports itself in
+ * the corner, so a handler routed through MemosView and CollectionDialog would be two
+ * pass-throughs that could disagree. MemoDialog imports the same singleton for the same reason.
+ *
+ * **Only `retry` is taken, and useMemos's `working` ref is deliberately left behind** -- not to
+ * be confused with this file's own `working(memo)` below, which is a different thing and is
+ * declared next. That ref is a single page-wide flag guarding the detail card's controls
+ * against a second click, so reading it here would grey out every Retry button on the strip
+ * because somebody renamed a memo in an open dialog. useMemos.retry declines it for the same
+ * reason and guards per memo instead.
+ */
+const { retry } = useMemos()
 
 /**
  * The same rule the poll applies: anything not terminal is still working.
@@ -245,6 +265,7 @@ function shortCreated(iso) {
           seconds -- see useNewMemoFlash.
         -->
         <button
+          :id="`memo-card-${memo.id}`"
           type="button"
           class="memo-card"
           :class="{ 'memo-card--new': memo.id === flashedId }"
@@ -326,6 +347,50 @@ function shortCreated(iso) {
           :label="waitLabel(memo.status)"
           :value="progressFor(memo.id)"
         />
+
+        <!--
+          Retry, on the failed cards only, and out here for the same HTML reason the bar above
+          it is: a <button> may not contain another one. Being a sibling is also what keeps the
+          two clicks apart -- pressing this cannot bubble through the card and open the detail
+          dialog behind it.
+
+          It takes the bar's slot along the card's lower edge, which the two can never contend
+          for: `working` and `canRetry` are disjoint by definition, since a failed memo is not
+          one still being worked on.
+
+          **`aria-describedby` pointing at the card, rather than an `aria-label` built from
+          memoLabel, and the obvious version was measured before this one was written.** A strip
+          of failures is a column of buttons all called "Retry" to anybody not looking at the
+          screen, so the first attempt labelled each one with its memo's name. Read back out of
+          the rendered page, both buttons announced the identical string "Retry Could not
+          transcribe" -- because that phrase is exactly what memoLabel falls back to for a memo
+          with no title and no transcript, which is what every failed voice memo is. It restated
+          the badge instead of naming the row, which is the same content-free repetition
+          memoFailure.js exists to remove.
+
+          The card is the description because the card is the only thing that differs: it holds
+          the status, the reason, and the date. So the button's *name* stays the verb and its
+          *description* is the memo, which is the arrangement that survives a memo having
+          nothing else to be called. It also cannot go stale -- there is no second copy of the
+          wording to keep in step.
+
+          The card carries the matching id for that, and it is the only id in this template.
+          Two MemoStrips can be mounted at once -- the fast strip and an opened collection --
+          but they hold disjoint memos, since a memo is either filed or unfiled, so the ids
+          cannot collide.
+
+          The class puts it at the right-hand end, clear of the date at the left; the rule is
+          `.strip__item .strip__retry` in styles.css and the ancestor there is load-bearing.
+        -->
+        <button
+          v-if="canRetry(memo)"
+          type="button"
+          class="ghost strip__retry"
+          :aria-describedby="`memo-card-${memo.id}`"
+          @click="retry(memo)"
+        >
+          Retry
+        </button>
       </li>
     </ul>
   </div>

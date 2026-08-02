@@ -97,6 +97,11 @@ class MemoRepository
         to_jsonb(tags) AS tags,
         duration_ms,
         last_error,
+
+        -- The sentence and the token for it always travel together, because a client
+        -- that has one and not the other can either explain a failure or act on it but
+        -- not both. 004_last_error_code.sql has why the token exists at all.
+        last_error_code,
         collection_id,
         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at_iso,
         (
@@ -449,6 +454,72 @@ class MemoRepository
         $rows = $this->db->connection()->selectFromWriteConnection(
             'UPDATE memos SET title = ? WHERE id = ? RETURNING '.self::COLUMNS,
             [$title, $memoId],
+        );
+
+        $row = $rows[0] ?? null;
+
+        return $row instanceof stdClass ? Memo::fromRow($row) : null;
+    }
+
+    /**
+     * Hand a failed memo back to the worker's queue, or answer null if it was not failed.
+     *
+     * **`AND status = 'failed'` is the whole safety of this statement, not a tidy way to
+     * answer 404.** Without it the route would requeue a memo in any state, and two of the
+     * four are actively dangerous:
+     *
+     *   * `processing` -- a claim is live, and its owner's writes are fenced on `locked_at`
+     *     (memo_ai/memos.py). Setting `status='queued'` while that token is still on the row
+     *     makes it claimable again, so a second replica picks up a memo the first is midway
+     *     through and both transcribe it. The fence protects the *writes*; nothing protects
+     *     the claim predicate from a third party moving the status underneath it.
+     *   * `ready` -- a finished memo would be re-enriched for nothing, and its `title` (which
+     *     the owner may have edited by hand -- see rename above) overwritten by a fresh guess.
+     *
+     * So the predicate is the check, done by the same statement that does the work rather
+     * than by a SELECT in front of it -- which would be a race as well as a round trip. The
+     * caller distinguishes "no such memo" from "not failed" with a second read; see
+     * MemoService::retry for why that read is allowed to be racy and this one is not.
+     *
+     * `attempts = 0` is what makes this a retry rather than a gesture. A failed memo sits at
+     * the cap, and the worker's claim increments before any of its code runs (`_CLAIM`), so a
+     * requeued row at `attempts = MAX_ATTEMPTS` gets exactly one more go and `fail_or_retry`
+     * reads it as already exhausted -- no backoff, no second attempt, and the reaper's
+     * `attempts < max_attempts` requeue never matches it either. Zero gives it the same
+     * budget a new memo has, which is the honest meaning of a person pressing Retry.
+     *
+     * `next_attempt_at = now()` for the same reason from the other side: the column may hold
+     * a backoff from the attempt that failed, and the claim predicate is
+     * `next_attempt_at <= now()`. A press that produced no visible change for thirty seconds
+     * would read as a button that does not work.
+     *
+     * `locked_at = NULL` is already true of every row `failed` is reachable from -- both
+     * `_FAIL` and the reaper clear it -- and it is set anyway, because it costs nothing and
+     * the one row it protects against is the one nothing else can: a `failed` row with a
+     * stale token, written by hand or by a future writer, would go back to the queue holding
+     * a fence somebody else could still match.
+     *
+     * `last_error` is deliberately left where it is. It is the *last* error, not the current
+     * state -- the worker's own retry path writes it onto a `queued` row for exactly that
+     * reason -- and the frontend gates the reason on `status === 'failed'`, so a requeued
+     * memo stops showing it without the column being touched. The next successful
+     * transcription clears it (`_COMMIT_TRANSCRIPT`), which is the write that knows the
+     * error is over.
+     */
+    public function requeue(string $memoId): ?Memo
+    {
+        $rows = $this->db->connection()->selectFromWriteConnection(
+            <<<'SQL'
+                UPDATE memos
+                   SET status = 'queued',
+                       attempts = 0,
+                       next_attempt_at = now(),
+                       locked_at = NULL
+                 WHERE id = ?
+                   AND status = 'failed'
+                RETURNING
+                SQL.' '.self::COLUMNS,
+            [$memoId],
         );
 
         $row = $rows[0] ?? null;

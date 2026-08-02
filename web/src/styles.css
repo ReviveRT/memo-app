@@ -879,6 +879,37 @@ h1,
 }
 
 /*
+ * Retry, on a failed card, in the slot the bar would have used (MEMO-17).
+ *
+ * Positioned for the same reason and by the same rule: it lives outside the <button> because a
+ * button may not contain another one, and absolute placement is what puts it back where it
+ * looks like it belongs. The two can never collide -- a memo is either still being worked on or
+ * failed, never both.
+ *
+ * Right-hand end only, unlike the bar, because the card's date is at the left of that same line
+ * and the two share it. The button is opaque rather than transparent, and it is doing real
+ * work: measured in the browser, the button's box overlaps both the date's box and the last
+ * line of the clamped failure text, so an unfilled control would have that text showing through
+ * its letters the first time a card's date or reason ran long. `var(--surface)` is the card's
+ * own background and `.memo-card:hover` only moves the border, so the fill matches in every
+ * state.
+ *
+ * **`.strip__item` is in the selector to win a specificity tie, not for readability, and
+ * collapsing it back to `.strip__retry` silently breaks the paragraph above.** `.ghost` sets
+ * `background: transparent` and is declared ~340 lines further down this file, so at equal
+ * specificity it wins on source order -- the first version of this rule was written without the
+ * ancestor and computed to `rgba(0, 0, 0, 0)` in a real browser. Moving the rule below `.ghost`
+ * would also fix it and was rejected: it would put a strip rule in the shared-button section,
+ * where the next person to tidy the file by section puts it straight back here.
+ */
+.strip__item .strip__retry {
+  position: absolute;
+  right: 0.6rem;
+  bottom: 0.5rem;
+  background: var(--surface);
+}
+
+/*
  * A card is a button, so every inherited button style has to be undone: the shared rule gives
  * it the accent background, white text, centred content and 600 weight, none of which is
  * wanted here.
@@ -1455,6 +1486,35 @@ h1,
 /* The reason, standing where the transcript would have been. See .memo-card__preview--failed. */
 .sheet__transcript--failed {
   color: var(--error);
+}
+
+/*
+ * The way out of a failure, under the reason for it (MEMO-17).
+ *
+ * `align-items: start` so the button keeps its own height instead of stretching to the two
+ * lines of hint beside it -- the default `stretch` on a flex row makes a one-word button as
+ * tall as the longest thing next to it, which reads as a panel rather than as a control.
+ *
+ * `flex: none` on the button for the reason .sheet__move gives about the one beside the select:
+ * the label is a sentence, and letting it shrink wraps "Try transcribing again" across three
+ * lines on a narrow card while the paragraph next to it has room to spare.
+ */
+.sheet__retry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: start;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.sheet__retry button {
+  flex: none;
+}
+
+/* The hint takes whatever is left, down to a width where wrapping under the button is better. */
+.sheet__retry .sheet__hint {
+  flex: 1 1 12rem;
+  margin: 0;
 }
 
 /*

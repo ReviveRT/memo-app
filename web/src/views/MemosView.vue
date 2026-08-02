@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { onMounted, onScopeDispose, ref } from 'vue'
 import CollectionDialog from '../components/CollectionDialog.vue'
 import CollectionGrid from '../components/CollectionGrid.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
@@ -11,6 +11,7 @@ import MemoStrip from '../components/MemoStrip.vue'
 import MemoToasts from '../components/MemoToasts.vue'
 import ReminderBanner from '../components/ReminderBanner.vue'
 import { useCollections } from '../composables/useCollections'
+import { onMemoRemoved } from '../composables/useMemoList'
 import { useMemos } from '../composables/useMemos'
 import { usePolling } from '../composables/usePolling'
 import { startReminders } from '../composables/useReminders'
@@ -82,6 +83,38 @@ const collectionDialog = ref(null)
 function showMemo(memo) {
   openMemo.value = memo
 }
+
+/**
+ * Close the card if the memo it is showing stops existing.
+ *
+ * **Reachable, and it became much more so with the discard path.** Open a voice memo while it
+ * is still transcribing, and if the worker finds nothing in it the row is deleted out from
+ * under the dialog -- which goes on rendering it, with a Delete and a Rename that would both
+ * 404. It was already reachable through a delete in a second tab; that was rare enough to have
+ * gone unnoticed, and this is the same bug arriving on a path people will actually walk.
+ *
+ * Registered rather than watched, because "gone" is not something the list can express. A memo
+ * leaves a list whenever a filter moves, and closing the card for that would be wrong -- the
+ * memo is fine and the user is reading it. Only the code that removed it knows which happened,
+ * which is the same argument useMemoToasts makes about `forgetMemo`.
+ *
+ * **Unsubscribed on unmount, and the first version was not.** It said this view lives for the
+ * life of the page, which is wrong: router.js has two real routes, so every trip to the landing
+ * page and back unmounts and remounts this component. Each visit would add another callback to
+ * a module-scoped Set, each holding a `openMemo` ref belonging to a component that no longer
+ * exists -- harmless to look at and unbounded in number.
+ *
+ * onScopeDispose rather than onUnmounted, because what this belongs to is the setup scope: the
+ * registration happens here at setup time and should end when this scope does, whether that is
+ * an unmount or a scope stopped some other way.
+ */
+onScopeDispose(
+  onMemoRemoved((id) => {
+    if (openMemo.value?.id === id) {
+      openMemo.value = null
+    }
+  }),
+)
 
 /**
  * Something about a memo changed: it moved, or its reminders did.

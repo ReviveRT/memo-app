@@ -138,6 +138,7 @@ final class FakeMemoRepository extends MemoRepository
             tags: [],
             durationMs: null,
             lastError: null,
+            lastErrorCode: null,
             createdAt: '2026-07-31T09:00:00.000Z',
         );
     }
@@ -192,6 +193,61 @@ final class FakeMemoRepository extends MemoRepository
         $this->renamed[] = [$memoId, $title];
 
         return $this->renameResult;
+    }
+
+    /**
+     * Imitates the real guard rather than answering from a stored result, and rewrites `$rows`.
+     *
+     * The same call this fake's find() makes for itself: "the row with this id, if it is
+     * failed" means the same thing in every database, so there is nothing driver-specific to
+     * get wrong and nothing gained by faking it more loosely. What imitating it buys is the
+     * two assertions a recorded result cannot make -- that a second press of Retry is a 409
+     * rather than a second 200, and that the memo the route answers with is `queued`, which is
+     * what restarts the frontend's poll.
+     *
+     * What it deliberately does not imitate is the bookkeeping the real statement also writes:
+     * `attempts = 0`, `next_attempt_at = now()` and `locked_at = NULL` are not on Memo and
+     * never reach a response, so there is nothing here to assert them against. They are the
+     * half of this write that only a live Postgres can show, which is MEMO-25's suite -- and
+     * MemoRepository::requeue has the argument for why each of them is load-bearing.
+     */
+    public function requeue(string $memoId): ?Memo
+    {
+        foreach ($this->rows as $at => $memo) {
+            if ($memo->id !== $memoId) {
+                continue;
+            }
+
+            if ($memo->status !== 'failed') {
+                return null;
+            }
+
+            // A new Memo rather than a mutated one: Memo's properties are readonly, which is
+            // the same reason the real statement answers with RETURNING instead of the row it
+            // was handed. `lastError` is carried over unchanged, matching the SQL -- see the
+            // repository for why the column is left where it is.
+            $queued = new Memo(
+                id: $memo->id,
+                source: $memo->source,
+                status: Memo::STATUS_QUEUED,
+                transcript: $memo->transcript,
+                title: $memo->title,
+                summary: $memo->summary,
+                tags: $memo->tags,
+                durationMs: $memo->durationMs,
+                lastError: $memo->lastError,
+                lastErrorCode: $memo->lastErrorCode,
+                createdAt: $memo->createdAt,
+                collectionId: $memo->collectionId,
+                reminders: $memo->reminders,
+            );
+
+            $this->rows[$at] = $queued;
+
+            return $queued;
+        }
+
+        return null;
     }
 
     /**

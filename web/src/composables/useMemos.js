@@ -7,6 +7,7 @@ import {
   createReminder,
   patchMemo,
   renameMemo,
+  retryMemo,
 } from '../api/memos'
 import { applyMemoEverywhere, createMemoList, removeMemoEverywhere } from './useMemoList'
 import { forgetMemo, startMemoToast, watchMemosIn } from './useMemoToasts'
@@ -389,6 +390,91 @@ function remove(memo) {
 }
 
 /**
+ * Memos with a retry in flight, by id.
+ *
+ * A plain Set and not a ref, because nothing renders it -- it is a re-entry guard and not a
+ * disabled state. The button does not need one: a successful retry makes the row `queued`,
+ * `canRetry` goes false, and the button is gone by the time anything could be pressed twice on
+ * purpose. What this catches is the double click inside that window, which the API would
+ * otherwise answer with a 409 and an error toast reading "this one is queued" -- technically
+ * true and a poor thing to show somebody for clicking a button slightly too enthusiastically.
+ *
+ * Keyed per memo rather than one flag, because two failed memos being retried at once is an
+ * ordinary thing to do with a strip of them and there is no reason for the first to block the
+ * second.
+ *
+ * @type {Set<string>}
+ */
+const retrying = new Set()
+
+/**
+ * Send a failed memo back to the worker (MEMO-17).
+ *
+ * **Through a toast rather than through `memoError`, unlike every other write in this file, and
+ * that is not a style choice -- it is where the button is.** `memoError` is rendered in one
+ * place, inside the open detail card, which is correct for the writes that can only be started
+ * from there. Retry can be pressed on a card in the strip, with no dialog open and none about
+ * to be, so a message put in that ref would be written and never rendered: a button that
+ * appears to do nothing, in the feature whose entire point is that a failure is not a silent
+ * gap. The corner is the one surface that does not depend on which list the memo was in, which
+ * is the same problem `applyMemoEverywhere` solves for state.
+ *
+ * The refusals are worth reading rather than swallowing, and they are ordinary rather than
+ * exceptional: a 409 means the memo is no longer failed -- the worker got to it, or another tab
+ * pressed this first -- and a 404 means it has been deleted. Both carry the API's own sentence
+ * naming what it found instead, which is the answer to the only question the user has.
+ *
+ * On success the toast keeps following the memo -- queued, transcribing, and then ready or
+ * failed again -- because a retried memo is a memo in the queue and the machinery for watching
+ * one already exists. That is what makes this worth wiring to the toasts rather than to a
+ * message: the press is answered, and so is the wait that follows it.
+ *
+ * With one bound worth knowing: toasts watch the fast strip (see watchMemosIn), so retrying a
+ * memo that has been filed into a collection leaves its toast sitting on "Waiting for a
+ * worker…" rather than following it to the end. That degrades rather than breaks -- the memo's
+ * own card is in the collection's list, which polls itself on the same `queued` status this
+ * write produced, so the *card* fills in either way. Widening it would mean the toasts reading
+ * every live list rather than the one a new memo always lands in, which is a bigger change than
+ * the case is worth.
+ *
+ * Deliberately not `writeMemo`, and it costs a little duplication. That helper reports into
+ * `memoError`, which is the thing this cannot use, and `working` is its re-entry guard -- a
+ * page-wide flag that would disable Rename, Move and Delete on an open dialog because somebody
+ * pressed Retry on a card three rows away, and grey out every other Retry button on the strip
+ * for the same reason. The guard here is per memo instead; see `retrying`.
+ *
+ * @param {object} memo The memo to retry, as the caller is rendering it.
+ * @returns {Promise<?object>} The memo, now queued, or null if the retry was refused or a
+ *   press for this memo was already in flight.
+ */
+async function retry(memo) {
+  if (retrying.has(memo.id)) {
+    return null
+  }
+
+  retrying.add(memo.id)
+
+  // After the guard, for the reason store() gives about the same ordering: a press that writes
+  // nothing must not put a card in the corner describing work nobody started.
+  const toast = startMemoToast('retry')
+
+  try {
+    const updated = await retryMemo(memo.id)
+
+    applyMemoEverywhere(updated)
+    toast.stored(updated)
+
+    return updated
+  } catch (error) {
+    toast.rejected(error.message)
+
+    return null
+  } finally {
+    retrying.delete(memo.id)
+  }
+}
+
+/**
  * Set a reminder on a memo.
  *
  * @param {object} memo The memo being reminded about, as the caller is rendering it.
@@ -436,6 +522,7 @@ export function useMemos() {
     moveMemo,
     rename,
     remove,
+    retry,
     addReminder,
     dropReminder,
   }

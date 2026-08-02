@@ -168,6 +168,37 @@ produced a transcript, `ready` if it did. Because there are two replicas, every
 result write is conditional on still holding the claim it started with, so a reaped
 job and the original still running cannot both write.
 
+**A failed memo says why, and you can put it back.** Whatever refused the recording
+wrote a sentence for the person who made it — "No speech was detected in this
+recording. It may be silent, too quiet for the microphone that captured it, or cut
+short before anything was said." — and that is what the card shows in place of a
+transcript, in the detail view, and in the corner toast. None of them ever carry a
+stack trace or a provider's raw error body: ffmpeg's stderr and an unclassified
+exception both go to the log and the row gets a sentence this project wrote.
+
+Under the reason is a **Retry** button, and it is there because most of those
+sentences describe something you can fix. The worker's own three attempts are over
+within a couple of minutes of the recording, so by the time you have read the reason,
+set the key or changed the model, nothing left in the stack will touch that memo
+again. Retry resets its attempts, makes it due immediately, and puts it back in the
+queue — the card goes from `failed` to `queued` and the page starts polling again on
+its own. Only a `failed` memo can be retried; pressing it on one a worker is already
+holding would put two replicas on the same recording, so the API refuses with a 409
+that names the state it actually found.
+
+**An empty recording gets no card at all.** Record four seconds of silence, or with
+the microphone muted, and there is nothing to keep: no words were said, and no retry
+will find any. So that memo is deleted — the row and the recording — and the only
+thing left is the corner toast saying why. Every *other* failure keeps its card,
+because the recording is real and the fault is usually not yours.
+
+The two are told apart by `last_error_code`, a short token the worker writes beside
+the sentence — `no_speech` and `no_audio` are discarded, everything else is kept. The
+sentence is prose meant to be read and reworded; matching on its text to decide
+whether to delete somebody's recording is the mistake that column exists to prevent.
+A code neither side recognises keeps the memo, which is the safe direction to be
+wrong in.
+
 You can watch all of it in `docker compose logs -f ai-worker`.
 
 ## Searching
@@ -615,6 +646,7 @@ server so the browser sees one origin. No authentication — see Assumptions.
 | `GET` | `/memos` | The list, newest first. See the parameters below |
 | `POST` | `/memos` | Create one: JSON `{text}`, or `multipart/form-data` with `audio` |
 | `PATCH` | `/memos/{memo}` | `{collection_id}` — file it, or `null` to unfile. `{title}` — rename it, or `null` to clear. Either field, or both |
+| `POST` | `/memos/{memo}/retry` | Send a failed memo back to the queue. No body. 409 if it is not `failed` |
 | `DELETE` | `/memos/{memo}` | 200 with the memo it removed. Takes the recording and any reminders with it |
 | `GET` | `/collections` | The grid, with each collection's memo count and newest labels |
 | `POST` | `/collections` | `{name}` |
@@ -650,6 +682,11 @@ Two response conventions worth knowing before writing a client:
   word of it, and there is a test asserting so. A title is *generated*, which makes it
   a guess, and a guess the owner disagrees with is a memo they cannot find again. So
   the guess is the default and the owner has the last word.
+- **A 5xx body is never shown to the user, whatever it says.** With `APP_DEBUG=false`
+  it is `{"message":"Server Error"}`, which tells nobody anything; with it on, it is
+  the exception and its trace. The frontend replaces both with a sentence naming the
+  log, the same rule the worker applies to ffmpeg's stderr. A 4xx message *is* shown
+  verbatim — those are written to be read.
 
 ## Architecture
 
