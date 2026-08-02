@@ -1,0 +1,100 @@
+# A Render Blueprint, so a demonstration deployment is "point Render at this repository"
+# rather than twelve fields typed into a form.
+#
+# At the repository root because that is the only place Render looks for it.
+#
+#     https://dashboard.render.com/select-repo?type=blueprint
+#
+# Render is the default here for one reason that outranks the others: its free tier gives a
+# web service *and* a Postgres, so a demo needs no second provider and no credit card. What
+# it does not give is a free background worker -- those bill from the first one -- which is
+# why deploy/Dockerfile runs the worker inside the web service instead. That file has the
+# argument and the 41 MB measurement behind it.
+#
+# Nothing here is Render-specific except the plan names and the port. deploy/README.md has
+# the equivalent settings for Fly.io, Railway and Koyeb, and the image is the same one.
+
+services:
+  - type: web
+    name: memo-app
+    runtime: docker
+
+    # Built from the repository root: the image needs api/, web/, db/ and ai/memo_ai/
+    # together. Building from deploy/ would put four of those outside the context.
+    dockerfilePath: ./deploy/Dockerfile
+    dockerContext: .
+
+    plan: free
+    region: frankfurt
+
+    # Free web services sleep after 15 minutes idle and take roughly a minute to answer the
+    # request that wakes them. Worth knowing before showing this to somebody: open the page
+    # once yourself first, or the demonstration starts with a spinner.
+    #
+    # The worker sleeps with it, which is harmless -- it polls a queue that nobody is filling
+    # while the service is down, and picks up anything left behind on the next boot.
+    healthCheckPath: /api/health
+
+    envVars:
+      # The port, and the one setting most likely to be got wrong. Render assigns 10000 and
+      # injects it as $PORT; Caddy cannot substitute one variable into another's default, so
+      # SERVER_NAME carries the literal. deploy/Caddyfile explains the mechanism.
+      - key: SERVER_NAME
+        value: ":10000"
+
+      # Wired from the database below rather than typed. `property: connectionString` gives
+      # the internal URL, which does not leave Render's network.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: memo-db
+          property: connectionString
+
+      # Transcription. `sync: false` means Render prompts for it at deploy time and stores it
+      # as a secret instead of reading it from this file -- which is what keeps a key out of
+      # git. Get one free at https://console.groq.com/keys.
+      #
+      # **Leaving it blank is a supported answer**, and worth knowing before deciding: typed
+      # memos work completely without it, and a voice memo fails in a few seconds saying this
+      # variable is missing. What it never does is hang -- the worker is running either way.
+      - key: GROQ_API_KEY
+        sync: false
+
+      # Recordings, and the honest default is that they do not survive.
+      #
+      # Free Render web services have no persistent disk, so /data/audio is the container's
+      # own filesystem and every deploy and every wake-from-sleep starts it empty. Transcripts
+      # are in Postgres and survive; the audio behind them does not, so playback on an older
+      # memo 404s.
+      #
+      # For a demonstration that is usually the right trade -- it costs nothing and needs no
+      # fifth account. To keep recordings, create a *private* Cloudflare R2 bucket (10 GB free,
+      # and no egress charge, which for audio is the whole bill) and set these four in the
+      # dashboard. deploy/README.md has the details, including why the bucket must be private.
+      #
+      #   AUDIO_BUCKET, AUDIO_BUCKET_ENDPOINT, AUDIO_BUCKET_KEY, AUDIO_BUCKET_SECRET
+      #
+      # Naming a bucket without the other three is refused at boot rather than half-honoured,
+      # so a typo is one clear error instead of memos failing one at a time.
+
+      # Everything else -- APP_ENV, APP_DEBUG, RUN_WORKER, STT_PROVIDER, STT_FALLBACK,
+      # ENRICH_PROVIDER -- is already correct in deploy/Dockerfile and is deliberately not
+      # repeated here. Two copies of a default are two things to keep in step, and the image
+      # has to be right on its own for the platforms further down deploy/README.md.
+
+databases:
+  - name: memo-db
+    plan: free
+    region: frankfurt
+
+    # postgresql_version, not the image tag compose pins. 16 to match db:postgres:16-alpine
+    # locally, so a migration that passes there is running against the same major here.
+    postgresMajorVersion: "16"
+
+    # Free Postgres on Render **expires 30 days after it is created** and is then deleted.
+    # That is the shortest fuse in this file and the one that will end the demonstration
+    # without warning if nobody is expecting it.
+    #
+    # For a demo that outlives a month, create the database on Neon or Supabase instead --
+    # both have free tiers with no expiry -- and replace the `fromDatabase` block above with
+    # a `sync: false` DATABASE_URL you paste in. Nothing else changes: the entrypoint runs the
+    # migrations against whatever it is pointed at.

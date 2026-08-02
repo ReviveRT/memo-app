@@ -1,0 +1,28 @@
+# The worker's dependencies when every model it would have loaded lives somewhere
+# else. Installed by deploy/Dockerfile; nothing in docker-compose.yml reads this.
+#
+# It is a strict subset of requirements.txt rather than a second opinion about
+# versions, and the psycopg pin below must stay equal to the one there. Kept in
+# this directory, next to the file it subsets, so the two are read together and a
+# bump to one is an obvious prompt to bump the other.
+#
+# What is deliberately absent, and why each is safe to drop:
+#
+#   * faster-whisper (330 MB installed) and the 2.8 GB of weights ai/Dockerfile
+#     bakes. Only memo_ai/stt/local.py needs them, and its `from faster_whisper
+#     import ...` sits inside the function that loads the model rather than at the
+#     top of the module -- so importing the stt package with STT_PROVIDER=groq
+#     never reaches it. Checked, because the whole image depends on it being true.
+#
+#   * llama-cpp-python, for the same reason: memo_ai/enrich/local.py imports
+#     `llama_cpp` inside its loader, and ENRICH_PROVIDER=none never constructs it.
+#
+#   * fastapi and uvicorn, which are the ai-api service's and not the worker's.
+#     deploy/Dockerfile does not ship ai-api -- /api/ask answers 503 without it.
+#
+# What is NOT absent and might look like it should be: nothing for Groq or for S3.
+# memo_ai/stt/groq.py speaks HTTP with `urllib` and memo_ai/blobs.py signs SigV4
+# with `hmac` and `hashlib`, both from the standard library and both saying at the
+# top of the file that this image is the reason. So the hosted path adds no
+# dependency at all, and this file is one line.
+psycopg[binary]==3.3.4

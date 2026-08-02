@@ -1247,14 +1247,19 @@ db/migrations/   numbered SQL migrations, applied in filename order
 api/             PHP API (Laravel on FrankenPHP)
 ai/              Python — the worker (transcription, enrichment) and ai-api (Ask)
 web/             frontend
-deploy/          the production image: one container, SPA and API on one origin
+deploy/          the production image: one container, SPA + API + worker on one origin
 ```
 
 `deploy/` is a second build rather than a replacement for the four above. Compose runs
 Vite's dev server in front of the API so the frontend has hot reload; the production image
 bakes the SPA into `public/` and lets FrankenPHP serve both, which is what keeps the owner
-cookie on one origin and fits a free tier's single web service. `deploy/README.md` has the
-rest, including what that image deliberately leaves out.
+cookie on one origin and fits a free tier's single web service.
+
+It also runs the worker in that same container, which compose would never do — with
+`STT_PROVIDER=groq` and no baked weights the worker costs 41 MB of RSS, and a free tier
+charges for a second service but not for a second process. `render.yaml` at the repository
+root deploys the result; `deploy/README.md` has the reasoning, the measured image cost, and
+the one feature a free tier cannot host.
 
 `ai/` builds **one image behind two services**: `ai-worker` runs `python -m
 memo_ai.worker` and `ai-api` runs `python -m memo_ai.ask`. One build context, one

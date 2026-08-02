@@ -7,11 +7,20 @@
 .gitignore
 .claude
 
-# Not part of the production image at all: deploy/Dockerfile ships the API and the built SPA,
-# and deliberately not the two Python services. Their models will not fit in a free tier's
-# memory, and deploy/README.md has what to set to get transcription from a hosted provider
-# instead.
-ai/
+# The Python source *is* part of the production image, and the two things that make it
+# expensive are not. deploy/Dockerfile runs the worker beside the API with STT_PROVIDER=groq
+# and ENRICH_PROVIDER=none, which needs memo_ai/ and psycopg and nothing else -- so what is
+# excluded here is the build recipe that bakes 2.8 GB of weights, the dependency file that
+# installs faster-whisper and llama-cpp to use them, and the tests.
+#
+# memo_ai/ itself is source: about 500 KB, and no models travel with it. The weights were
+# never in the build context in the first place -- ai/Dockerfile downloads them during its
+# own build -- so the old blanket `ai/` was excluding a directory that was already cheap.
+ai/Dockerfile
+ai/requirements.txt
+ai/requirements-dev.txt
+ai/tests/
+ai/**/__pycache__/
 
 # Rebuilt inside the image by `npm ci` and `composer install`. Copying the host's copies in
 # would be slower *and* wrong -- they are built for the host's platform, and node_modules
