@@ -165,6 +165,73 @@ def test_finishing_with_no_enrichment_falls_back_to_the_transcript_for_a_title()
     assert f"split_part(btrim(transcript, {TRIM_SET}), chr(10), 1)" in connection.last_sql
 
 
+def test_the_text_the_job_holds_is_titled_by_the_heuristic_rather_than_by_the_cut():
+    # `memo_ai/titles.py` sits between the enricher and the SQL fallback: a short
+    # phrase cut out of the transcript, where the SQL gives its first sixty
+    # characters. It is the better answer wherever this process is holding the text.
+    connection = FakeConnection(rowcount=1)
+
+    queue(connection).finish_ready(
+        claimed_memo(),
+        text="Tomorrow I will have a meeting with my friend John at 15am.",
+    )
+
+    assert connection.last_params["heuristic_title"] == "Meeting with my friend John"
+
+
+def test_the_text_is_passed_in_rather_than_read_off_the_claim():
+    # At commit 2 a *fresh* voice memo's transcript is on the row and not on the
+    # claim -- the claim happened before it existed. Reading `memo.transcript` here
+    # would leave the commonest memo in the app falling through to the SQL cut, which
+    # is the whole thing this argument exists to prevent.
+    connection = FakeConnection(rowcount=1)
+
+    queue(connection).finish_ready(claimed_memo(transcript=None), text="Sort the invoices.")
+
+    assert connection.last_params["heuristic_title"] == "Sort the invoices"
+
+
+def test_without_text_the_heuristic_stands_aside_for_the_sql_fallback():
+    # The reaper's salvage branch updates rows in bulk with no job in memory, and a
+    # resumed job that skipped this call entirely is the same shape. NULL here is
+    # what makes the COALESCE fall through rather than writing an empty title.
+    connection = FakeConnection(rowcount=1)
+
+    queue(connection).finish_ready(claimed_memo())
+
+    assert connection.last_params["heuristic_title"] is None
+
+
+def test_the_title_precedence_is_enricher_then_row_then_heuristic_then_cut():
+    # Four sources, and the order is the argument. An existing title ahead of both
+    # fallbacks is what stops a re-run downgrading a real one -- and it is what makes
+    # the column safe for a person to edit, which PATCH /api/memos/{id} allows.
+    connection = FakeConnection(rowcount=1)
+
+    queue(connection).finish_ready(claimed_memo(), text="Anything at all.")
+
+    coalesce = connection.last_sql.split("title = COALESCE(", 1)[1]
+
+    assert coalesce.index("%(title)s") < coalesce.index("title,")
+    assert coalesce.index("title,") < coalesce.index("%(heuristic_title)s")
+    assert coalesce.index("%(heuristic_title)s") < coalesce.index("split_part(")
+
+
+def test_an_enrichers_title_is_not_displaced_by_the_heuristic():
+    # The heuristic is a fallback, not a competitor. A model that read the whole
+    # transcript beats a regular expression that read its first clause.
+    connection = FakeConnection(rowcount=1)
+
+    queue(connection).finish_ready(
+        claimed_memo(),
+        Enrichment(title="Quarterly review"),
+        text="Tomorrow I will have a meeting with my friend John at 15am.",
+    )
+
+    assert connection.last_params["title"] == "Quarterly review"
+    assert connection.last_params["heuristic_title"] == "Meeting with my friend John"
+
+
 def test_the_fallback_title_is_the_rule_the_frontend_already_uses():
     # web/src/memoLabel.js labels an untitled memo from its transcript: first line,
     # truncated to 60 with an ellipsis. A persisted title cut a different way would

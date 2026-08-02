@@ -106,10 +106,10 @@ function echoed(value) {
  * PATCH /api/memos/{id} -- file a memo into a collection, or take it back out.
  *
  * `collectionId` of null is the unfile, and it is sent as an explicit `null` rather than by
- * omitting the key. The API requires the field to be *present* (UpdateMemoRequest uses
- * `present` + `nullable`) precisely so that a body which forgot it is a 422 rather than a
- * 200 that changed nothing -- so JSON.stringify has to emit `{"collection_id":null}`, which
- * it does for null and would not for undefined.
+ * omitting the key -- JSON.stringify emits `{"collection_id":null}` for null and drops the
+ * key entirely for undefined, and the API reads an absent key as "leave the collection
+ * alone". That distinction is load-bearing on this route now that it also takes a title:
+ * sending the field is what says the move was meant.
  *
  * @param {string} id
  * @param {?string} collectionId
@@ -122,6 +122,55 @@ export async function patchMemo(id, collectionId) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ collection_id: collectionId }),
     }),
+  )
+}
+
+/**
+ * PATCH /api/memos/{id} again -- rename a memo.
+ *
+ * A separate function rather than a second argument to patchMemo, because the two are
+ * different operations that happen to share a route, and a combined signature would have to
+ * distinguish "no collection given" from "unfile this" in JavaScript -- exactly the
+ * absent-versus-null problem the API solves by reading the key's presence. Two functions, two
+ * bodies, each naming only the field it means.
+ *
+ * `title` of null clears it, and the memo then falls back to the first line of its own
+ * transcript everywhere it is rendered (memoLabel, and `coalesce` in the API's SQL). That is a
+ * real operation: a generated title the owner disagrees with is worth being able to remove
+ * rather than only to replace.
+ *
+ * @param {string} id
+ * @param {?string} title
+ * @returns {Promise<object>} The memo in its new state.
+ */
+export async function renameMemo(id, title) {
+  return storedMemo(
+    await request(`/api/memos/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    }),
+  )
+}
+
+/**
+ * DELETE /api/memos/{id} -- remove a memo, its recording and its reminders.
+ *
+ * Answers with the memo it removed rather than 204, so this returns one for the same reason
+ * every other write here does: one shape, reconciled by id. Nothing reads it today beyond
+ * logging what went; it is returned rather than discarded because the row is at its last
+ * moment of being available and throwing it away here would be the hard part to undo.
+ *
+ * A 404 means somebody else already deleted it -- a second tab, or a double click that got
+ * past the guard. request() turns that into a thrown Error carrying the API's own sentence,
+ * which is the right thing to show: the memo really is gone, and the list is about to say so.
+ *
+ * @param {string} id
+ * @returns {Promise<object>} The memo as it was.
+ */
+export async function deleteMemo(id) {
+  return storedMemo(
+    await request(`/api/memos/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   )
 }
 

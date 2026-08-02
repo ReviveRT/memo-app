@@ -75,6 +75,26 @@ export function applyMemoEverywhere(updated) {
     list.applyUpdate(updated)
   }
 }
+
+/**
+ * Take a deleted memo out of every list holding it.
+ *
+ * The mirror of applyMemoEverywhere and needed for the same reason: a memo can be deleted from
+ * a card that was opened out of a collection, and the strip behind it may be holding the same
+ * row. Reloading instead would work for the list the caller happens to know about and leave
+ * the other one showing a card whose memo no longer exists -- clicking it then opens a detail
+ * dialog for a 404.
+ *
+ * Immediate rather than waiting for the next poll, because the poll's stop condition is
+ * `pending`, and a list of nothing but `ready` memos is not polling at all.
+ *
+ * @param {string} id
+ */
+export function removeMemoEverywhere(id) {
+  for (const list of lists) {
+    list.removeMemo(id)
+  }
+}
 /**
  * Build one list.
  *
@@ -476,6 +496,34 @@ export function createMemoList({ collection = null } = {}) {
     return true
   }
 
+  /**
+   * Drop a memo this list may be holding, and count the write.
+   *
+   * The revision bump is the same guard prepend() needs and for the same reason: a GET issued
+   * before the DELETE landed describes a page the memo was still in, and merging that response
+   * would put the row back. Synchronous with the assignment, so nothing can resolve into the
+   * gap between them.
+   *
+   * A new array rather than a splice, because `memos` is what the template iterates and an
+   * in-place removal on a `ref`'s array does trigger reactivity but leaves the same reference
+   * -- which replacePage then compares against and can misread as "no change".
+   *
+   * @param {string} id
+   * @returns {boolean} Whether this list was holding it.
+   */
+  function removeMemo(id) {
+    const without = memos.value.filter((memo) => memo.id !== id)
+
+    if (without.length === memos.value.length) {
+      return false
+    }
+
+    memos.value = without
+    revision += 1
+
+    return true
+  }
+
   const api = {
     memos,
     pending,
@@ -498,6 +546,7 @@ export function createMemoList({ collection = null } = {}) {
     applyDateRange,
     prepend,
     applyUpdate,
+    removeMemo,
 
     /**
      * Stop this list receiving updates.

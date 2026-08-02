@@ -142,7 +142,9 @@ class FakeQueue:
 
     ``durations`` is kept beside them rather than added to their tuples, so that
     the assertions about *which* write happened stay readable in tests that do not
-    care about the length. The tests that do care read it by index.
+    care about the length. The tests that do care read it by index. ``titled_from``
+    is beside them for the same reason -- it records the transcript the pipeline
+    handed to commit 2 for the fallback title, which only one test asks about.
     """
 
     def __init__(self, fence_holds: bool = True, transcript_fence_holds: bool = True) -> None:
@@ -150,6 +152,7 @@ class FakeQueue:
         self.finished: list[tuple[ClaimedMemo, Enrichment | None, str | None]] = []
         self.failed: list[tuple[ClaimedMemo, str, bool]] = []
         self.durations: list[int | None] = []
+        self.titled_from: list[str | None] = []
         self._fence_holds = fence_holds
         # Separate, so a test can lose the fence on the first commit alone and
         # prove the second one never runs.
@@ -171,8 +174,10 @@ class FakeQueue:
         memo: ClaimedMemo,
         enrichment: Enrichment | None = None,
         enrichment_error: str | None = None,
+        text: str | None = None,
     ) -> bool:
         self.finished.append((memo, enrichment, enrichment_error))
+        self.titled_from.append(text)
 
         return self._fence_holds
 

@@ -17,6 +17,13 @@ import { useReminders } from '../composables/useReminders'
  * Fixed to the corner rather than in the document flow, so a reminder firing does not reflow
  * the page under the cursor -- and so it is visible whether the reader is at the top of the
  * memo strip or the bottom of the collections grid.
+ *
+ * **The fixed positioning is no longer this component's,** which is the one thing that changed
+ * when MemoToasts arrived: two components each owning `position: fixed; right: 1rem; bottom:
+ * 1rem` would stack on top of each other rather than beside each other. The corner is now one
+ * container in MemosView and this renders a group inside it. The live region stays here, on
+ * the group, because it is this list that gets announced -- a shared region covering both would
+ * read a memo's upload progress out as though it were a reminder.
  */
 
 const { delivered, dismiss, dismissAll } = useReminders()
@@ -39,7 +46,7 @@ function at(iso) {
     regions are actually announced from -- a region inserted along with its text is the less
     dependable of the two, and this one is inserted by a timer with no user action behind it.
   -->
-  <div class="toasts" role="status" aria-live="polite">
+  <div class="toasts__group" role="status" aria-live="polite">
     <div v-for="reminder in delivered" :key="reminder.id" class="toast">
       <div class="toast__body">
         <p class="toast__title">{{ reminder.memo_label }}</p>

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Support;
 
 use App\Repositories\MemoRepository;
+use App\Services\Memos\DeletedMemo;
 use App\Services\Memos\Memo;
 use App\Services\Memos\MemoQuery;
 
@@ -67,6 +68,32 @@ final class FakeMemoRepository extends MemoRepository
      * a successful move.
      */
     public ?Memo $moveResult = null;
+
+    /** Every rename() call, in order, as `[memoId, title]`.
+     *
+     * @var list<array{0: string, 1: ?string}>
+     */
+    public array $renamed = [];
+
+    /** What rename() answers with. Null is the "no such memo" case the controller 404s. */
+    public ?Memo $renameResult = null;
+
+    /** Every delete() call, in order.
+     *
+     * @var list<string>
+     */
+    public array $deleted = [];
+
+    /**
+     * The audio key each memo carries, keyed by memo id.
+     *
+     * Only delete() reads it. `audio_path` is not on Memo -- see DeletedMemo for why it stays
+     * off the wire -- so a test that wants to assert the blob was unlinked has to say here
+     * which blob the row pointed at.
+     *
+     * @var array<string, string>
+     */
+    public array $audioPaths = [];
 
     public function __construct() {}
 
@@ -158,5 +185,36 @@ final class FakeMemoRepository extends MemoRepository
         $this->moved[] = [$memoId, $collectionId];
 
         return $this->moveResult;
+    }
+
+    public function rename(string $memoId, ?string $title): ?Memo
+    {
+        $this->renamed[] = [$memoId, $title];
+
+        return $this->renameResult;
+    }
+
+    /**
+     * Removes the row from `$rows` as well as recording the call.
+     *
+     * The removal matters for one assertion the recording cannot make: that a second DELETE
+     * of the same memo is a 404. Answering from a stored result alone would let the fake
+     * report success twice for a row that can only be deleted once, which is the property
+     * the route's non-idempotent status code depends on.
+     */
+    public function delete(string $memoId): ?DeletedMemo
+    {
+        $this->deleted[] = $memoId;
+
+        foreach ($this->rows as $at => $memo) {
+            if ($memo->id === $memoId) {
+                unset($this->rows[$at]);
+                $this->rows = array_values($this->rows);
+
+                return new DeletedMemo($memo, $this->audioPaths[$memoId] ?? null);
+            }
+        }
+
+        return null;
     }
 }

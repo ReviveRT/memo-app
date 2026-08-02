@@ -18,6 +18,7 @@ from uuid import UUID
 import psycopg
 from psycopg.rows import class_row
 
+from memo_ai import titles
 from memo_ai.config import Settings
 from memo_ai.enrich import Enrichment
 from memo_ai.stt.base import Transcript
@@ -350,15 +351,27 @@ _COMMIT_TRANSCRIPT = """
 # goes to 'ready' carrying its transcript. db/migrations/001_init.sql separates
 # `enrichment_error` from `last_error` for this reason and says so at the column.
 #
-# The title is a COALESCE over three sources, and the order is the argument:
-# whatever the enricher produced, then whatever is already on the row, then
-# `_FALLBACK_TITLE`. Keeping an existing title ahead of the fallback is what stops
-# a re-run from downgrading a real title to sixty characters of transcript.
+# The title is a COALESCE over four sources, and the order is the argument:
+# whatever the enricher produced, then whatever is already on the row, then the
+# heuristic `memo_ai/titles.py` cuts out of the transcript, then `_FALLBACK_TITLE`.
+# Keeping an existing title ahead of both fallbacks is what stops a re-run from
+# downgrading a real title -- and it is also what makes the column safe for a person
+# to edit, which PATCH /api/memos/{id} now lets them do.
 #
-# The fallback is computed in SQL rather than in Python because the transcript may
-# not have passed through this process at all. A job resumed after commit 1 has the
-# text on the row and nothing in memory; Python would fall back to nothing and leave
-# the memo untitled -- which is precisely the case the rule is about.
+# **Two fallbacks rather than one, and the SQL one is still last for the reason it
+# was written.** `_FALLBACK_TITLE` is the first sixty characters of the transcript;
+# `titles.title_for` is a short phrase cut out of it -- "Meeting with my friend John"
+# where the other gives "Tomorrow I will have a meeting with my friend John at 15a…".
+# The heuristic is the better answer wherever it can be had, so it goes first. But it
+# runs in Python, and Python is not always holding the text: the reaper's salvage
+# branch updates rows in bulk with no job in memory at all. So the SQL expression
+# stays as the last resort rather than being replaced, and `_REAP_SALVAGE` still uses
+# it alone.
+#
+# `finish_ready` is handed the text explicitly for the same reason. A job resumed
+# after commit 1 produced no transcript *this time* -- it is on the row and nowhere
+# in memory -- so the pipeline passes whichever of the two it has, which is the
+# expression it already computes for the enricher.
 #
 # `enrichment_error` is assigned outright rather than COALESCEd, unlike everything
 # around it. It is the one column here whose *absence* is information: an
@@ -376,6 +389,7 @@ _FINISH_READY = f"""
            title = COALESCE(
                        %(title)s,
                        title,
+                       %(heuristic_title)s,
                        {_FALLBACK_TITLE}
                    ),
            summary = COALESCE(%(summary)s, summary),
@@ -640,13 +654,22 @@ class MemoQueue:
         memo: ClaimedMemo,
         enrichment: Enrichment | None = None,
         enrichment_error: str | None = None,
+        text: str | None = None,
     ) -> bool:
         """
         Commit point 2: publish the memo, enriched or not. False if the fence lost.
 
-        Both arguments absent is the shipped configuration rather than a degenerate
-        case -- no enricher is wired up until MEMO-21 -- and it writes a memo that
-        is ``ready`` with a fallback title and nothing else claimed about it.
+        Both enrichment arguments absent is the shipped configuration rather than a
+        degenerate case -- no enricher is wired up until MEMO-21 -- and it writes a
+        memo that is ``ready`` with a generated title and nothing else claimed
+        about it.
+
+        ``text`` is the transcript this memo now has, which the caller passes rather
+        than this method reading it off ``memo``: at commit point 2 a fresh voice
+        memo's transcript is on the row and *not* on the claim, because the claim
+        happened before it existed. The pipeline already computes the right one for
+        the enricher, so it hands over the same value. Omitted, the title falls
+        through to the SQL expression, which is what the reaper relies on.
         """
         enriched = enrichment is not None and not enrichment.is_empty()
         complaint = None if enrichment_error is None else _truncate(enrichment_error)
@@ -657,6 +680,12 @@ class MemoQueue:
                 "id": memo.id,
                 "locked_at": memo.locked_at,
                 "title": None if enrichment is None else enrichment.title,
+
+                # The heuristic, ahead of the SQL fallback and behind everything
+                # else. None when this process has no text, which is when the SQL
+                # expression earns its place -- see the statement's own note.
+                "heuristic_title": titles.title_for(text),
+
                 "summary": None if enrichment is None else enrichment.summary,
                 # A list, not the frozen tuple: psycopg maps a Python list to
                 # `text[]`, and an empty one would be an empty array rather than

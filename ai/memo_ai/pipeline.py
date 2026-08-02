@@ -165,7 +165,14 @@ def run_job(
     enrichment, enrichment_error = _enriched(enricher, memo, text)
 
     # Commit 2. Runs on both enrichment outcomes -- that is the rule.
-    if queue.finish_ready(memo, enrichment, enrichment_error):
+    #
+    # `text` goes to the write as well as to the enricher, and for the same reason it
+    # was computed that way: it is whichever transcript the row now holds. The write
+    # cuts a fallback title out of it when the enricher produced none, which is every
+    # memo until MEMO-21 wires one up. Passing it rather than letting the statement
+    # read `memo.transcript` is what makes that work for a *fresh* voice memo, whose
+    # claim predates its own transcript.
+    if queue.finish_ready(memo, enrichment, enrichment_error, text=text):
         log.info(
             "memo %s ready in %.0fms (attempt %d, %s%s%s)",
             memo.id,

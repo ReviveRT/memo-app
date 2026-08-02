@@ -353,6 +353,25 @@ def test_a_resumed_memo_is_enriched_from_the_transcript_already_on_the_row(audio
     assert enricher.calls == ["words committed by an earlier attempt"]
     assert queue.finished[0][1] == Enrichment(title="A title")
 
+    # The same text reaches commit 2, which cuts the fallback title out of it. One
+    # expression feeds both, so the title and the summary can never be about
+    # different text.
+    assert queue.titled_from == ["words committed by an earlier attempt"]
+
+
+def test_a_fresh_voice_memo_titles_itself_from_the_transcript_it_just_produced(
+    audio_dir, normalizer
+):
+    # The other half, and the one the argument is really about: at commit 2 this
+    # memo's transcript is on the row and *not* on the claim, because the claim
+    # happened before the transcript existed. Passing it explicitly is what stops the
+    # commonest memo in the app falling through to the sixty-character SQL cut.
+    queue = FakeQueue()
+
+    run(queue, claimed_memo(transcript=None), RecordingStt(text="spoken words"), audio_dir)
+
+    assert queue.titled_from == ["spoken words"]
+
 
 # ---------------------------------------------------------------------------
 # Enrichment may not fail a memo

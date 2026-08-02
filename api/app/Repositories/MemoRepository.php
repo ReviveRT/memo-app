@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Repositories;
 
+use App\Services\Memos\DeletedMemo;
 use App\Services\Memos\Memo;
 use App\Services\Memos\MemoQuery;
 use Illuminate\Database\DatabaseManager;
@@ -419,6 +420,85 @@ class MemoRepository
         $row = $rows[0] ?? null;
 
         return $row instanceof stdClass ? Memo::fromRow($row) : null;
+    }
+
+    /**
+     * Rename a memo.
+     *
+     * The one column on this table a client may write, and the argument for letting it is
+     * that nothing else can. `title` is filled by the enrichment pass from the transcript,
+     * so it is a *guess* about what a memo is called -- a good one, often, and wrong often
+     * enough that a memo the owner cannot rename is a memo they cannot find later. That is
+     * the opposite of the transcript, which is a record of what was said and is nobody's to
+     * edit; UpdateMemoRequest states the same line from the validation side.
+     *
+     * The same shape as moveToCollection -- one UPDATE, RETURNING the whole row -- and for
+     * the same reason: the trigger from 002 moves `updated_at`, so a caller that wanted the
+     * memo in its new state would otherwise need a second SELECT that could race the first.
+     *
+     * No foreign key to violate here, so there is no QueryException to classify: a null row
+     * back means the memo does not exist, and that is the only failure this can have.
+     *
+     * @param  ?string  $title  Null clears it, which is a real operation: a memo whose title
+     *                          the owner has cleared falls back to the first line of its own
+     *                          transcript everywhere it is rendered, which is a better label
+     *                          than an enrichment guess they disagreed with.
+     */
+    public function rename(string $memoId, ?string $title): ?Memo
+    {
+        $rows = $this->db->connection()->selectFromWriteConnection(
+            'UPDATE memos SET title = ? WHERE id = ? RETURNING '.self::COLUMNS,
+            [$title, $memoId],
+        );
+
+        $row = $rows[0] ?? null;
+
+        return $row instanceof stdClass ? Memo::fromRow($row) : null;
+    }
+
+    /**
+     * Delete a memo, and answer with what it was.
+     *
+     * **RETURNING on a DELETE, which is the whole reason this returns a Memo rather than a
+     * bool.** The caller has to unlink the audio blob afterwards, and `audio_path` only
+     * exists on the row being deleted -- so a `DELETE` that answered "1 row" would force a
+     * SELECT first, and a SELECT-then-DELETE is a race: two clients deleting the same memo
+     * would both read the path and both try to unlink it, and one of them would report a
+     * failure for work the other had already done. One statement makes the row's contents
+     * and its removal the same atomic fact, and exactly one caller can win it.
+     *
+     * `ON DELETE CASCADE` on `reminders.memo_id` takes the reminders with it, inside
+     * Postgres, where no response can observe it. That is stated in the constraint rather
+     * than performed here for the reason 003 gives about `ON DELETE SET NULL` on
+     * `collection_id`: it then holds for every deleter of this table and not only for this
+     * route.
+     *
+     * Null when there is no such memo, which the controller turns into a 404 -- the same
+     * reading moveToCollection gives an UPDATE that matched nothing.
+     *
+     * `audio_path` is appended to the projection rather than added to COLUMNS, because it is
+     * a storage key and COLUMNS is what every response is built from. DeletedMemo has the
+     * argument for keeping it off the wire.
+     */
+    public function delete(string $memoId): ?DeletedMemo
+    {
+        $rows = $this->db->connection()->selectFromWriteConnection(
+            'DELETE FROM memos WHERE id = ? RETURNING '.self::COLUMNS.', audio_path',
+            [$memoId],
+        );
+
+        $row = $rows[0] ?? null;
+
+        if (! $row instanceof stdClass) {
+            return null;
+        }
+
+        $path = $row->audio_path ?? null;
+
+        return new DeletedMemo(
+            memo: Memo::fromRow($row),
+            audioPath: is_string($path) && $path !== '' ? $path : null,
+        );
     }
 
     /**

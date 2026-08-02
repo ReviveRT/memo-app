@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Memos;
 
 use App\Contracts\AudioStorage;
+use App\Exceptions\StorageException;
 use App\Repositories\MemoRepository;
 use Illuminate\Support\Str;
 
@@ -140,5 +141,75 @@ final class MemoService
     public function moveToCollection(string $memoId, ?string $collectionId): ?Memo
     {
         return $this->repository->moveToCollection($memoId, $collectionId);
+    }
+
+    /**
+     * Rename a memo, or clear the name with null.
+     *
+     * The one field of a memo a client may write. `title` is generated -- the worker cuts a
+     * fallback from the transcript and the enrichment pass replaces it with something
+     * shorter -- so it is a guess, and a guess the owner disagrees with is what makes a memo
+     * unfindable in a strip of thirty. Everything else on the row is either a record of what
+     * was said or the queue's own bookkeeping, and neither is the client's.
+     *
+     * Trimmed, and an empty result becomes null rather than an empty string, so there is one
+     * spelling of "this memo has no title of its own" for every reader to test. Postgres
+     * would happily store `''`, and `coalesce(title, ...)` -- which is how the collection
+     * cards and the reminder labels pick a label -- does not treat it as absent, so a blank
+     * title would render as a blank card label rather than falling back to the transcript.
+     * UpdateMemoRequest normalises on its own side too; that is agreement rather than
+     * reliance, and this is the side the database is on.
+     */
+    public function rename(string $memoId, ?string $title): ?Memo
+    {
+        $trimmed = $title === null ? null : trim($title);
+
+        return $this->repository->rename($memoId, $trimmed === '' ? null : $trimmed);
+    }
+
+    /**
+     * Delete a memo and the recording behind it.
+     *
+     * **The row goes first and the blob second, which is the reverse of how one is created**
+     * -- and both orders are chosen against the same failure. createFromAudio writes the blob
+     * before the row, so a worker claiming the row always finds a file. Deleting has to
+     * unwind that: while the row exists, something may still be about to read the file, so
+     * removing the file first would produce a memo that transcribes as "the audio file for
+     * this memo is missing". Once the row is gone nothing can reach the blob at all, and what
+     * is left is at worst an orphan.
+     *
+     * **An orphan blob is the accepted failure here, deliberately.** If the unlink fails --
+     * a read-only volume, a permission the container lost -- the memo is still deleted and
+     * this still reports success, because the user asked for the memo to go and it has. The
+     * alternative is a 500 for a request that already succeeded, and a client that then
+     * shows the memo as still present when the database says otherwise. The bytes are
+     * reclaimable by a sweep at any later time; the wrong answer is not.
+     *
+     * StorageException is caught for that reason and not swallowed silently -- it is
+     * reported through the same channel every other server-side fault uses, so a volume that
+     * has stopped accepting deletes shows up in the log rather than only in `du`.
+     *
+     * Reminders go with the memo through `ON DELETE CASCADE`, inside Postgres. Nothing here
+     * has to know they existed.
+     *
+     * @return ?Memo The memo as it was, or null when there was no such memo.
+     */
+    public function delete(string $memoId): ?Memo
+    {
+        $deleted = $this->repository->delete($memoId);
+
+        if ($deleted === null) {
+            return null;
+        }
+
+        if ($deleted->audioPath !== null) {
+            try {
+                $this->audio->delete($deleted->audioPath);
+            } catch (StorageException $e) {
+                report($e);
+            }
+        }
+
+        return $deleted->memo;
     }
 }

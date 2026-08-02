@@ -41,18 +41,22 @@ import { CLOUD_ANCHOR_ID } from '../cloudAnchor'
 
     <div class="landing__hero">
       <!--
-        Not "Your Best Memo App". The brief offered that and invited something better, and
-        "best" is a claim about the app; this is a claim about what it does for you, which is
-        the thing somebody standing on a landing page is deciding about. It also says the two
-        words that matter -- speak, and find -- so the sentence doubles as the feature list.
-      -->
-      <h1 class="landing__title">Say it now.<br />Find it later.</h1>
+        Three words, one line under them, and a button.
 
-      <p class="landing__tagline">
-        Talk, and your memo is transcribed, titled and searchable. Keep the quick ones loose,
-        gather the rest into collections, and set a reminder so the important ones come back
-        to you.
-      </p>
+        The paragraph that used to sit here explained transcription, collections and reminders
+        before anyone had asked -- three features to read while deciding whether to press one
+        button, and they introduce themselves better on the next screen where they can be
+        pressed. The "No account. Runs on your own machine." note went with it: true, and the
+        unusual thing about this app, but it answers a question nobody has asked yet.
+
+        What replaced them is one line that says what the app *is* rather than what it does.
+        It earns its place where a feature list did not, because a title alone leaves "memo"
+        doing all the work of explaining the product -- and it is short enough to be read
+        without being a thing to read.
+      -->
+      <h1 class="landing__title">Save Your Memo</h1>
+
+      <p class="landing__subtitle">Your everyday memo app</p>
 
       <!--
         A RouterLink styled as a button rather than a <button> with a programmatic push. It
@@ -62,13 +66,6 @@ import { CLOUD_ANCHOR_ID } from '../cloudAnchor'
         link and should be announced as one.
       -->
       <RouterLink class="landing__cta" :to="{ name: 'memos' }">Get Started</RouterLink>
-
-      <!--
-        Said out loud because it is the unusual thing about this app and it is reassuring
-        rather than boastful: nothing here needs an account, and the recordings stay on the
-        machine the stack is running on.
-      -->
-      <p class="landing__note">No account. Runs on your own machine.</p>
     </div>
   </main>
 </template>
