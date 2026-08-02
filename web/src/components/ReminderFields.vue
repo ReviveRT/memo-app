@@ -185,11 +185,11 @@ function setAlarm() {
     -->
     <form class="remind__alarm" @submit.prevent="setAlarm">
       <label class="remind__field">
-        <span class="sr-only">Alarm date and time</span>
+        <span class="sr-only">Reminder date and time</span>
         <input v-model="alarmAt" type="datetime-local" :min="earliest()" :disabled="working" />
       </label>
 
-      <button type="submit" :disabled="working || alarmAt === ''">Set alarm</button>
+      <button type="submit" :disabled="working || alarmAt === ''">Set reminder</button>
     </form>
 
     <!--
