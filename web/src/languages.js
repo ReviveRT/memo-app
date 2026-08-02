@@ -21,9 +21,14 @@
  *
  * **A subset, not all 99.** The API accepts every code Whisper knows -- see
  * App\Http\Rules\SupportedLanguage -- and this list is only what the dropdown shows, because a
- * 99-item select is a worse control than a 30-item one for a choice most people make once. The
- * ordering is by number of speakers rather than alphabetical: the point of a picker is that the
- * language you want is near the top, and alphabetical puts Afrikaans there.
+ * 99-item select is a worse control than a 25-item one for a choice most people make once. What
+ * is shown is the languages spoken in Europe, plus Chinese; a memo in one of the codes that is
+ * not offered still transcribes, it just has to arrive through the API rather than the picker.
+ * Turkish stays because it is an official language of Cyprus and the first language of millions
+ * of speakers in Germany, not on the strength of where the Bosphorus runs.
+ *
+ * The ordering is by number of speakers rather than alphabetical: the point of a picker is that
+ * the language you want is near the top, and alphabetical puts Catalan there.
  *
  * Endonyms beside the English name -- "Русский", "中文" -- because somebody looking for their
  * own language scans for the word they call it, not for what English calls it.
@@ -38,24 +43,17 @@ export const AUTO_DETECT = ''
 export const LANGUAGES = Object.freeze([
   { code: 'en', name: 'English' },
   { code: 'zh', name: '中文 · Chinese' },
-  { code: 'hi', name: 'हिन्दी · Hindi' },
   { code: 'es', name: 'Español · Spanish' },
-  { code: 'ar', name: 'العربية · Arabic' },
   { code: 'fr', name: 'Français · French' },
   { code: 'pt', name: 'Português · Portuguese' },
   { code: 'ru', name: 'Русский · Russian' },
   { code: 'de', name: 'Deutsch · German' },
-  { code: 'ja', name: '日本語 · Japanese' },
-  { code: 'ko', name: '한국어 · Korean' },
   { code: 'it', name: 'Italiano · Italian' },
   { code: 'tr', name: 'Türkçe · Turkish' },
   { code: 'pl', name: 'Polski · Polish' },
   { code: 'uk', name: 'Українська · Ukrainian' },
   { code: 'ro', name: 'Română · Romanian' },
   { code: 'nl', name: 'Nederlands · Dutch' },
-  { code: 'vi', name: 'Tiếng Việt · Vietnamese' },
-  { code: 'id', name: 'Indonesia · Indonesian' },
-  { code: 'th', name: 'ไทย · Thai' },
   { code: 'el', name: 'Ελληνικά · Greek' },
   { code: 'cs', name: 'Čeština · Czech' },
   { code: 'hu', name: 'Magyar · Hungarian' },
@@ -63,8 +61,6 @@ export const LANGUAGES = Object.freeze([
   { code: 'da', name: 'Dansk · Danish' },
   { code: 'fi', name: 'Suomi · Finnish' },
   { code: 'no', name: 'Norsk · Norwegian' },
-  { code: 'he', name: 'עברית · Hebrew' },
-  { code: 'fa', name: 'فارسی · Persian' },
   { code: 'bg', name: 'Български · Bulgarian' },
   { code: 'sr', name: 'Српски · Serbian' },
   { code: 'hr', name: 'Hrvatski · Croatian' },
