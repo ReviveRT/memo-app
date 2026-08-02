@@ -769,8 +769,10 @@ Content-Type: video/webm
 
 That is not a refinement — Safari refuses to play audio from an endpoint that
 answers a ranged request with the whole file, and no browser can seek without it.
-A range past the end of the file is a `416` carrying the real size; `HEAD` answers
-the length and `Accept-Ranges` with no body, which is what a player asks first.
+A range past the end of the file is a `416` carrying the real size and no body.
+`HEAD` answers the length and `Accept-Ranges` with no body, for `curl -I` and
+anything sizing a file before fetching it; browsers do not use it — Chrome's media
+element opens with a ranged `GET` and issues no `HEAD` at all.
 
 Two 404s, with different sentences on purpose: a typed memo has no recording and
 never did, while a row naming a blob the volume does not have is a stack that has
@@ -786,9 +788,10 @@ A WebM from `MediaRecorder` carries no Duration element — the same fact that m
 the worker measure length with `ffprobe` after normalization instead of at the
 upload edge — so `audio.duration` is `Infinity` and a native scrubber has nothing
 to size itself from. Opening a memo seeks once past the end of the file, which is
-what makes the element discover the real length, and then resets to the start. It
-costs one range request, which is the other half of why this endpoint supports
-them.
+what makes the element discover the real length, and then resets to the start. On
+a memo small enough for the browser to have buffered whole that costs nothing; on a
+larger one it is a single range request for the tail rather than a second download
+of the whole file, which is the other half of why this endpoint supports ranges.
 
 Two response conventions worth knowing before writing a client:
 

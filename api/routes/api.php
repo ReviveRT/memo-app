@@ -48,9 +48,12 @@ Route::post('/memos', [MemoController::class, 'store'])->name('memos.store');
 // storage key is not a client's to hold, so the memo id it already has is what addresses
 // this.
 //
-// GET only, and Laravel registers the matching HEAD for free. That is not a spare verb here
-// -- a player asks HEAD first to learn the length and whether ranges are supported at all,
-// and Symfony answers it from this same method with the headers and no body.
+// GET only, and Laravel registers the matching HEAD for free. Symfony answers it from this
+// same method with the headers and no body, which is the correct thing for `curl -I` and for
+// anything sizing a file before fetching it. Not, as it turns out, what a browser does: the
+// Chrome media element opens with a ranged GET and issues no HEAD at all -- measured over
+// CDP, one request for one playback. HEAD is here because it is free and right, not because
+// the feature depends on it.
 //
 // whereUuid for the reason spelled out over the writes below -- there is no implicit route
 // binding in this project, so an id that is not a uuid would otherwise reach Postgres and

@@ -84,13 +84,23 @@ final class MemoAudioEndpointTest extends TestCase
 
     protected function tearDown(): void
     {
-        foreach ((array) glob("{$this->root}/*") as $file) {
-            @unlink((string) $file);
-        }
-
-        @rmdir($this->root);
+        // Depth-first, because one test writes a nested key and leaves three directories
+        // behind it. A flat unlink loop would leave the temp root undeletable and every run
+        // would add another.
+        $this->deleteTree($this->root);
 
         parent::tearDown();
+    }
+
+    private function deleteTree(string $directory): void
+    {
+        foreach ((array) glob($directory.'/*') as $entry) {
+            $path = (string) $entry;
+
+            is_dir($path) ? $this->deleteTree($path) : @unlink($path);
+        }
+
+        @rmdir($directory);
     }
 
     public function test_the_whole_recording_comes_back_under_the_type_it_was_stored_as(): void
@@ -171,12 +181,25 @@ final class MemoAudioEndpointTest extends TestCase
         // reading of an impossible range -- would hand a player megabytes it did not ask for.
         $response->assertStatus(416)
             ->assertHeader('Content-Range', 'bytes */'.self::AUDIO_BYTES);
+
+        // **The framing, which the status alone does not cover and which was wrong.** Symfony
+        // sets Content-Length to the whole file before it reads the Range header and only
+        // corrects it on the 206 path, so this went out promising 4096 bytes and sending
+        // none. Live, that is not a cosmetic disagreement: curl reports `transfer closed with
+        // 24775 bytes remaining to read` and the connection cannot be reused. App\Http\
+        // Responses\AudioFileResponse is what fixes it, and this is the assertion that would
+        // have caught it.
+        $response->assertHeader('Content-Length', '0');
+        $this->assertSame('', $this->body($response));
     }
 
     public function test_head_reports_the_length_and_range_support_without_a_body(): void
     {
-        // What a player asks first. The length is what it sizes its scrubber from, and
-        // Accept-Ranges is what tells it the scrubber will work.
+        // Not what a browser asks -- Chrome's media element opens with a ranged GET and sends
+        // no HEAD at all, measured over CDP. This is for `curl -I` and anything sizing a file
+        // before fetching it, and the Content-Length below is deliberately the *whole* file
+        // rather than the zero bytes sent: that is what HEAD means, and it is why
+        // AudioFileResponse corrects the 416 specifically rather than every bodyless response.
         $response = $this->head($this->url());
 
         $response->assertOk()
@@ -204,6 +227,30 @@ final class MemoAudioEndpointTest extends TestCase
             'inline;',
             (string) $response->headers->get('Content-Disposition'),
         );
+    }
+
+    public function test_a_nested_storage_key_is_served_rather_than_throwing_on_its_filename(): void
+    {
+        // Keys are flat today -- `{id}.{ext}` -- but LocalAudioStorage handles nested ones and
+        // SharedAudioVolumeTest pins the directory modes three levels down, because
+        // MemoService::createFromAudio holds date-sharding open for whenever this volume has
+        // enough files to want it. Symfony refuses a Content-Disposition filename containing a
+        // slash with an InvalidArgumentException, so taking that option without this would
+        // turn every playback into a 500 -- at the point furthest from the change that caused
+        // it, and with nothing in this suite covering it.
+        $nested = '2026/07/31/'.self::MEMO_ID.'.webm';
+
+        (new LocalAudioStorage($this->root))->put($nested, $this->contents);
+        $this->repository->audioPaths[self::MEMO_ID] = $nested;
+
+        $response = $this->get($this->url(), ['Range' => 'bytes=0-9']);
+
+        $response->assertStatus(206)
+            // The last segment only. A recording saved out of a browser still matches back to
+            // its row, which is the whole job this filename does.
+            ->assertHeader('Content-Disposition', 'inline; filename='.self::MEMO_ID.'.webm');
+
+        $this->assertSame(substr($this->contents, 0, 10), $this->body($response));
     }
 
     public function test_a_typed_memo_has_nothing_to_play(): void

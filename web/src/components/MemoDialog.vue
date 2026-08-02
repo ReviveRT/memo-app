@@ -142,18 +142,23 @@ const BEYOND_ANY_RECORDING = 1e101
  * is re-muxing every recording so the container declares what it already contains, which is
  * work in the worker and a second copy of every blob.
  *
- * **It only works because the endpoint honours Range.** The seek to the end is served as a
- * range request rather than a second download of the whole file, which is the same property
- * this task exists to add. On a 12 MiB memo the difference is the entire recording.
+ * **What it costs, measured rather than assumed.** On the memos on this stack -- tens of
+ * kilobytes -- it costs nothing at all: `preload="metadata"` already pulled the whole file in
+ * one 206, so the seek to the end is served out of the buffer and no second request is made.
+ * A recording large enough not to be buffered whole asks for the tail instead, which is one
+ * range request rather than a second download of the entire file. That upper bound is the
+ * endpoint's doing, and it is the same property this task exists to add.
  *
  * `duration_ms` is on the memo already and is deliberately not used here: it is the length of
  * the *normalised* audio the worker transcribed, and it arrives only once transcription has
  * finished. This runs on a memo that is still queued, and it has to agree with the file the
  * element is actually playing rather than with a number measured from a different one.
  *
- * Reset to the start afterwards, unconditionally. Somebody who pressed play inside the
- * millisecond or two this takes is put back at the beginning of the memo, which is where they
- * were trying to go.
+ * Reset to the start afterwards, unconditionally. The probe runs on `loadedmetadata`, before
+ * there has been time to reach for the controls, so in practice nobody is mid-listen when it
+ * happens — and somebody who was is put back at the beginning of the memo, which is where
+ * pressing play on a freshly opened card was asking to go. How long it takes is a range
+ * request for the tail of the file rather than a fixed cost, so no number is claimed here.
  */
 async function measureDuration(event) {
   const audio = event.target
@@ -608,17 +613,20 @@ async function removeReminder(reminderId) {
         ></audio>
 
         <!--
-          The sentence names the likely cause rather than only the symptom, because on this
-          stack there is one that accounts for nearly every occurrence and it is not obvious:
-          the memos and the recordings live on separate Docker volumes, so removing the volumes
-          takes the audio and leaves the database. Without saying so, a memo with a dead player
-          reads as data this app lost on its own. No command names in the copy — the reader is
-          in a browser, and the README has the detail.
+          The sentence offers the likely cause rather than asserting it, and the difference is
+          the point. `error` on a media element covers a missing file, a network failure and a
+          container the browser cannot decode, and the event does not carry the response — so
+          "the file is gone" would be a diagnosis this code cannot actually make, and on this
+          card it would be read as one. What it *can* say is which of those is overwhelmingly
+          the common one here: the memos and the recordings live on separate Docker volumes, so
+          removing the volumes takes the audio and leaves the database. Without that, a memo
+          with a dead player reads as data this app lost on its own. No command names in the
+          copy — the reader is in a browser, and the README has the detail.
         -->
         <p v-if="playbackFailed" class="sheet__hint sheet__hint--error">
-          This recording could not be played. The memo is still here, but its audio file is no
-          longer on the volume — most likely because the stack was brought down with its volumes
-          removed, which does not take the database with it.
+          This recording could not be played. The memo itself is fine — most often the audio
+          file is missing, which is what happens when the stack is brought down with its
+          volumes removed: that takes the recordings and leaves the database.
         </p>
       </section>
 

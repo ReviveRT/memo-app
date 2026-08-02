@@ -708,9 +708,12 @@ unreachable.
 
 ## Playback ranges are answered by PHP, not by Caddy — with the accelerated path one line away
 
-**Decision.** `GET /api/memos/{id}/audio` returns a Symfony `BinaryFileResponse`, which
-parses `Range`, answers `206` with `Content-Range`, `416` for a range past the end, and
-advertises `Accept-Ranges: bytes`. Nothing in this repo parses a range header. The
+**Decision.** `GET /api/memos/{id}/audio` returns a Symfony `BinaryFileResponse` — through a
+one-method subclass, see the end of this section — which parses `Range`, answers `206` with
+`Content-Range`, `416` for a range past the end, and advertises `Accept-Ranges: bytes`.
+Nothing in this repo parses a range header. Single ranges only, which is every range a media
+element sends; a multi-range header is answered with its first range rather than a
+`multipart/byteranges` body. The
 `X-Accel-Redirect` path that would hand the bytes to Caddy is not enabled, and the reasons
 are below because "let the web server do it" is the conventional advice and this goes the
 other way.
@@ -764,5 +767,26 @@ end of the file on `loadedmetadata`, which makes the element discover the real l
 (`4.08` for that memo), then resets to zero. Re-muxing every recording so the container
 declares what it already contains was the alternative: work in the worker, a second copy of
 every blob, and a normalization step that exists for the transcriber rather than for the
-player. The workaround costs one range request — which is the other half of why this
-endpoint supports them.
+player. What the workaround costs was measured rather than assumed: on the recordings on this
+stack, nothing at all — `preload="metadata"` has already pulled the whole file in one `206`,
+so the seek to the end is served from the buffer and no second request is made. A recording
+too large to buffer whole asks for the tail instead, which is one range request rather than a
+second download of the entire file. That upper bound is this endpoint's doing.
+
+**The framework's range handling had one thing wrong, and the suite is what found it.**
+Symfony sets `Content-Length` to the size of the whole file before it reads the `Range`
+header and overwrites it only on the `206` path. An unsatisfiable range takes the other
+branch: the status becomes `416`, `sendContent()` writes nothing because the response is no
+longer successful, and the header still promises the entire file. Against the running
+container on `symfony/http-foundation v7.4.15`, a `Range: bytes=999999-1000000` answered
+`416` with `Content-Length: 24775` and zero bytes of body — and curl reported `transfer
+closed with 24775 bytes remaining to read` rather than a clean refusal, with the connection
+unusable afterwards. Caddy does not correct it; the promise goes out as written.
+`App\Http\Responses\AudioFileResponse` overrides `prepare()` to set `Content-Length: 0` on
+that status alone — the controller cannot, because `prepare()` runs after the action returns
+and is the code that introduces the problem. `HEAD` is deliberately left alone: it also sends
+no body, and there the full length is exactly what the header should say.
+
+Worth recording because of how it hid. The first version of the 416 test asserted the status
+and the `Content-Range` and passed, which is the shape of assertion that reads as coverage
+and is not: nothing in it was about the bytes. The test now pins the framing as well.

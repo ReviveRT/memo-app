@@ -9,11 +9,11 @@ use App\Http\Requests\ListMemosRequest;
 use App\Http\Requests\RetranscribeMemoRequest;
 use App\Http\Requests\StoreMemoRequest;
 use App\Http\Requests\UpdateMemoRequest;
+use App\Http\Responses\AudioFileResponse;
 use App\Http\Rules\SniffedAudioType;
 use App\Services\Memos\Memo;
 use App\Services\Memos\MemoService;
 use Illuminate\Http\JsonResponse;
-use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpFoundation\ResponseHeaderBag;
 
@@ -326,9 +326,9 @@ final class MemoController extends Controller
      * the server from starting and where no test in this suite can reach the bytes. Symfony's
      * range handling is framework code rather than the hand-rolled parsing the task warns
      * against, the cap on a recording is 12 MiB (config/memo.php), and the api container runs
-     * a threaded server specifically so a client holding one of these does not stall the
-     * status polls behind it -- see api/Dockerfile, which chose FrankenPHP over `php -S` for
-     * this request and no other.
+     * a threaded server so a client holding one of these does not stall the status polls
+     * behind it -- see api/Dockerfile, which names a streaming audio response as the reason it
+     * chose FrankenPHP over `php -S`, before there was anything here to stream.
      *
      * That path is still one line away if it is ever wanted, and it needs no change here:
      * Symfony emits `X-Accel-Redirect` from this same response object once
@@ -350,7 +350,7 @@ final class MemoController extends Controller
      * 500, which is the distinction MemoController's class docblock draws: a caller can do
      * nothing about an unmounted volume, and that is not this.
      */
-    public function audio(string $memo): BinaryFileResponse
+    public function audio(string $memo): AudioFileResponse
     {
         $audio = $this->memos->audioFor($memo);
 
@@ -367,7 +367,9 @@ final class MemoController extends Controller
             );
         }
 
-        $response = new BinaryFileResponse($path);
+        // A BinaryFileResponse in all but one respect -- see AudioFileResponse for the
+        // Content-Length an unsatisfiable range would otherwise go out promising.
+        $response = new AudioFileResponse($path);
 
         // Explicit, so it wins over BinaryFileResponse's own fallback -- which would sniff
         // the file again with finfo on every single range request a scrub produces. It is
@@ -383,10 +385,21 @@ final class MemoController extends Controller
         $response->headers->set('X-Content-Type-Options', 'nosniff');
 
         // inline, so the browser plays it where it is asked to rather than offering to save
-        // it. The filename is the storage key -- `{memo id}.{ext}` -- which is not a name
-        // anybody chose but is the one that answers "which blob is this?" when a recording
-        // has been saved out of a browser and needs matching back to a row.
-        $response->setContentDisposition(ResponseHeaderBag::DISPOSITION_INLINE, $audio->key);
+        // it. The filename is the last segment of the storage key -- `{memo id}.{ext}` --
+        // which is not a name anybody chose but is the one that answers "which blob is this?"
+        // when a recording has been saved out of a browser and needs matching back to a row.
+        //
+        // **basename, and it is not defensive tidying.** Symfony refuses a disposition
+        // filename containing `/` with an InvalidArgumentException, which is a 500 rather
+        // than a bad header. Keys are flat today, but LocalAudioStorage handles nested ones
+        // and pins the directory modes three levels down, and MemoService::createFromAudio
+        // says date-sharding is available whenever this volume holds enough files to want it.
+        // Taking that option would otherwise turn every playback request into a 500, at the
+        // point furthest from the change that caused it.
+        $response->setContentDisposition(
+            ResponseHeaderBag::DISPOSITION_INLINE,
+            basename($audio->key),
+        );
 
         // The opposite of the list's `no-store`, and both are right. A memo's recording is
         // written once and never rewritten -- nothing in this app updates `audio_path`, and
