@@ -538,9 +538,10 @@ async function removeReminder(reminderId) {
 
             <!--
               What the enrichment pass filed this memo as. Hidden rather than shown empty
-              when it is absent, which today is always: nothing writes `memos.category`
-              until MEMO-21's enricher lands, and a permanent blank badge beside the two
-              that always say something would read as a bug in them.
+              when it is absent, which since MEMO-21 means a memo that pass has not
+              reached -- one recorded before it existed, one running with
+              ENRICH_PROVIDER=none, or one whose enrichment failed. A permanent blank
+              badge beside the two that always say something would read as a bug in them.
 
               Rendered as whatever arrived rather than mapped through a list of the three
               expected values. The column has no CHECK constraint and the vocabulary is

@@ -216,11 +216,12 @@ final class MemoTest extends TestCase
 
     public function test_the_category_reaches_the_response_as_it_is(): void
     {
-        // Nothing writes this column yet -- MEMO-21 owns the enricher -- so what is pinned
-        // here is only that the projection carries it through untouched. Deliberately not
-        // checked against a list of known categories: the vocabulary is the enricher's, the
-        // column has no CHECK constraint behind it, and a category invented by a worker
-        // newer than this API should reach the reader rather than become an error.
+        // What is pinned here is that the projection carries the column through untouched.
+        // Deliberately not checked against a list of known categories: the vocabulary is
+        // the enricher's -- three values as of MEMO-21, enforced there by the sampler's
+        // grammar rather than by this API -- the column has no CHECK constraint behind it,
+        // and a category invented by a worker newer than this API should reach the reader
+        // rather than become an error.
         $memo = Memo::fromRow($this->row(['category' => 'idea']));
 
         $this->assertSame('idea', $memo->category);
