@@ -170,6 +170,7 @@ final class MemoRetryEndpointTest extends TestCase
             title: null,
             summary: null,
             tags: [],
+            category: null,
             durationMs: 4200,
 
             // A failure the recording's owner cannot fix by retrying and the app does not

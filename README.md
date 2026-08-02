@@ -847,7 +847,7 @@ a memo small enough for the browser to have buffered whole that costs nothing; o
 larger one it is a single range request for the tail rather than a second download
 of the whole file, which is the other half of why this endpoint supports ranges.
 
-Two response conventions worth knowing before writing a client:
+A few response conventions worth knowing before writing a client:
 
 - **Every write about a reminder answers with the memo**, not the reminder —
   `{"memo": {...}}` — because the memo already carries its reminders and the
@@ -864,6 +864,14 @@ Two response conventions worth knowing before writing a client:
   is a test asserting so. Only a person may. `status`, `tags` and the rest stay out for
   a different reason — they belong to the queue and the worker, and a client setting
   `status` would be a client claiming a job.
+- **`category` is on every memo, and null on all of them today.** It is the enrichment
+  pass's answer to what kind of thing a memo is — `task`, `idea` or `note` — and
+  MEMO-21 owns the enricher that writes it, so nothing fills the column on the shipped
+  configuration. It is in the projection regardless, which is what makes landing that
+  enricher a worker change rather than a worker change and an API change. Nothing
+  constrains the value either: the column has no CHECK behind it and the vocabulary
+  belongs to the enricher, so render what arrives rather than switching on those three.
+  `summary` and `tags` are empty for the same reason, and fill in the same way.
 - **A 5xx body is never shown to the user, whatever it says.** With `APP_DEBUG=false`
   it is `{"message":"Server Error"}`, which tells nobody anything; with it on, it is
   the exception and its trace. The frontend replaces both with a sentence naming the

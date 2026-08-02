@@ -56,8 +56,9 @@ final class MemoTest extends TestCase
         $this->assertSame(
             [
                 'id', 'source', 'status', 'transcript', 'title',
-                'summary', 'tags', 'duration_ms', 'last_error', 'last_error_code',
-                'language', 'created_at', 'collection_id', 'reminders',
+                'summary', 'tags', 'category', 'duration_ms', 'last_error',
+                'last_error_code', 'language', 'created_at', 'collection_id',
+                'reminders',
             ],
             array_keys(Memo::fromRow($this->row())->toArray()),
         );
@@ -213,17 +214,40 @@ final class MemoTest extends TestCase
         Memo::fromRow($row);
     }
 
+    public function test_the_category_reaches_the_response_as_it_is(): void
+    {
+        // Nothing writes this column yet -- MEMO-21 owns the enricher -- so what is pinned
+        // here is only that the projection carries it through untouched. Deliberately not
+        // checked against a list of known categories: the vocabulary is the enricher's, the
+        // column has no CHECK constraint behind it, and a category invented by a worker
+        // newer than this API should reach the reader rather than become an error.
+        $memo = Memo::fromRow($this->row(['category' => 'idea']));
+
+        $this->assertSame('idea', $memo->category);
+        $this->assertSame('idea', $memo->toArray()['category']);
+    }
+
     public function test_the_nullable_enrichment_fields_pass_through_as_null(): void
     {
         $memo = Memo::fromRow($this->row([
             'title' => null,
             'summary' => null,
+            'category' => null,
             'last_error' => null,
             'last_error_code' => null,
         ]));
 
         $this->assertNull($memo->title);
         $this->assertNull($memo->summary);
+
+        // What every memo looks like today, and what a memo an enricher declined to
+        // classify looks like afterwards. Present and null rather than absent: MEMO-18
+        // merges each polled row field by field into the object it is already rendering,
+        // so a key that vanished when the value was null would leave the previous value
+        // in place instead of clearing it.
+        $this->assertNull($memo->category);
+        $this->assertArrayHasKey('category', $memo->toArray());
+
         $this->assertNull($memo->lastError);
 
         // Null together with the sentence, which is the only combination a memo that has
@@ -248,6 +272,13 @@ final class MemoTest extends TestCase
             'title' => 'Dentist',
             'summary' => 'A reminder to call the dentist.',
             'tags' => '["dentist"]',
+
+            // One of 'task', 'idea' or 'note' when an enricher has run. Non-null here
+            // rather than null, so the mapping is exercised by every test using this row
+            // -- on the shipped configuration the column is NULL on every memo, and a
+            // fixture that agreed would assert nothing about a value passing through.
+            'category' => 'task',
+
             'duration_ms' => null,
             'last_error' => null,
             'last_error_code' => null,

@@ -111,8 +111,9 @@ final class Memo
      */
     private const REQUIRED_COLUMNS = [
         'id', 'source', 'status', 'transcript', 'title',
-        'summary', 'tags', 'duration_ms', 'last_error', 'last_error_code',
-        'language', 'created_at_iso', 'collection_id', 'reminders',
+        'summary', 'tags', 'category', 'duration_ms', 'last_error',
+        'last_error_code', 'language', 'created_at_iso', 'collection_id',
+        'reminders',
     ];
 
     /**
@@ -137,6 +138,24 @@ final class Memo
         public readonly ?string $title,
         public readonly ?string $summary,
         public readonly array $tags,
+
+        /**
+         * What kind of thing this memo is -- 'task', 'idea' or 'note' -- or null for a
+         * memo no enrichment pass has classified.
+         *
+         * Null on every row today: MEMO-21 owns the enricher and nothing writes the
+         * column until it lands. It is on the wire regardless, for the same reason
+         * `summary` is -- both are enrichment output, and a client that renders one when
+         * it is present renders the other the same way.
+         *
+         * Not validated against those three values, and there is no CHECK constraint
+         * behind the column either -- unlike `source` and `status`, which have one each.
+         * The vocabulary is the enricher's, and a fourth category invented by a worker
+         * newer than this API should reach the reader as itself rather than as an error
+         * -- the same argument `lastErrorCode` makes below.
+         */
+        public readonly ?string $category,
+
         public readonly ?int $durationMs,
         public readonly ?string $lastError,
 
@@ -214,6 +233,7 @@ final class Memo
             title: self::nullableString($row->title),
             summary: self::nullableString($row->summary),
             tags: self::tags($row->tags),
+            category: self::nullableString($row->category),
 
             // pdo_pgsql has returned native ints for integer columns since PHP 8.1,
             // so this cast is normally a no-op -- but duration_ms is nullable and
@@ -241,6 +261,7 @@ final class Memo
             'title' => $this->title,
             'summary' => $this->summary,
             'tags' => $this->tags,
+            'category' => $this->category,
             'duration_ms' => $this->durationMs,
             'last_error' => $this->lastError,
             'last_error_code' => $this->lastErrorCode,
