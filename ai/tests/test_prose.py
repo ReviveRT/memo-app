@@ -14,6 +14,8 @@ written for something one of them actually did.
 
 import re
 
+import pytest
+
 from memo_ai import prose
 
 # A real 89-second memo as `large-v3-turbo` transcribed it before
@@ -390,6 +392,117 @@ def test_shaping_is_idempotent():
         once = prose.shape(source, "en")
 
         assert prose.shape(once, "en") == once
+
+
+# --------------------------------------------------------------------------
+# Scripts that do not end a sentence with a full stop
+#
+# TERMINATORS was ".!?…" and these rules run on every transcript, so a sentence
+# closed the way its own writing system closes one was not recognised as closed and
+# had a Latin full stop appended to it. Six of nine scripts checked came back
+# mangled; the app transcribes ~99 languages, so this was most of them.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("language", "text", "mark"),
+    [
+        ("zh", "别忘了明天三点给医生打电话。", "。"),
+        ("ja", "明日の3時に医者に電話することを忘れないで。", "。"),
+        ("hi", "कल तीन बजे डॉक्टर को फ़ोन करना याद रखें।", "।"),
+        ("ar", "لا تنس الاتصال بالطبيب غدا في الثالثة؟", "؟"),
+        ("ur", "ڈاکٹر کو کل فون کرنا نہ بھولیں۔", "۔"),
+    ],
+)
+def test_a_sentence_closed_in_its_own_script_is_not_closed_again(language, text, mark):
+    """The reported symptom, verbatim: `别忘了明天三点给医生打电话。.`"""
+    shaped = prose.shape(text, language)
+
+    assert shaped.endswith(mark)
+    assert not shaped.endswith(mark + ".")
+
+
+@pytest.mark.parametrize(
+    ("language", "text", "expected_mark"),
+    [
+        ("ja", "明日の3時に医者に電話することを忘れないで", "。"),
+        ("zh", "别忘了明天三点给医生打电话", "。"),
+        ("hi", "कल तीन बजे डॉक्टर को फ़ोन करना याद रखें", "।"),
+        ("ur", "ڈاکٹر کو کل فون کرنا نہ بھولیں", "۔"),
+        ("ru", "Не забудь позвонить врачу", "."),
+        ("ar", "لا تنس الاتصال بالطبيب غدا", "."),
+    ],
+)
+def test_an_open_sentence_is_closed_in_its_own_script(language, text, expected_mark):
+    """
+    Recognising a terminator and writing one are different problems. Adding 。 to
+    TERMINATORS stopped `…。` being closed twice, but a Japanese sentence the model
+    left *open* still got a Latin full stop -- the same error in the other direction.
+    Arabic is here as the case that legitimately takes the ASCII stop even though its
+    question mark is not ASCII.
+    """
+    assert prose.shape(text, language).endswith(expected_mark)
+
+
+def test_thai_gets_no_terminator_at_all():
+    """
+    Thai does not punctuate the end of a sentence -- it starts the next one. There is
+    no mark to add, so adding one is an error rather than a tidy-up, and no character
+    added to TERMINATORS could have fixed it.
+    """
+    text = "อย่าลืมโทรหาหมอพรุ่งนี้ตอนบ่ายสามโมง"
+
+    assert prose.shape(text, "th") == text
+
+
+def test_the_greek_question_mark_survives():
+    """
+    Greek asks a question with U+003B, the ASCII semicolon, which _DANGLING strips as
+    stranded punctuation before appending a full stop -- turning a question into a
+    statement. The one case in this area that loses meaning rather than just looking
+    wrong.
+    """
+    assert prose.shape("Να θυμηθώ να τηλεφωνήσω στον γιατρό;", "el").endswith(";")
+
+
+def test_a_latin_semicolon_is_still_stranded_punctuation_elsewhere():
+    """The Greek exception must not leak into every other language."""
+    assert prose.shape("remember to call the doctor;", "en").endswith(".")
+
+
+def test_sentences_split_on_a_non_latin_terminator():
+    """
+    Splitting reads the same set, so a three-sentence Japanese memo used to be one
+    sentence to _paragraphs and _capitalize. Pinned as a count rather than a string,
+    since the words are not this module's business.
+    """
+    shaped = prose.shape("これはテストです。よろしくお願いします。ありがとう。", "ja")
+
+    assert shaped.count("。") == 3
+    assert not shaped.endswith("。.")
+
+
+@pytest.mark.parametrize(
+    ("language", "text"),
+    [
+        ("zh", "别忘了明天三点给医生打电话。"),
+        ("ja", "これはテストです。よろしくお願いします。"),
+        ("hi", "कल तीन बजे डॉक्टर को फ़ोन करना याद रखें।"),
+        ("th", "อย่าลืมโทรหาหมอพรุ่งนี้ตอนบ่ายสามโมง"),
+        ("el", "Να θυμηθώ να τηλεφωνήσω στον γιατρό;"),
+        ("ru", "Не забудь позвонить врачу завтра в три часа."),
+    ],
+)
+def test_shaping_is_idempotent_in_every_script(language, text):
+    """
+    The same guarantee as test_shaping_is_idempotent, across the scripts the rules
+    were not written for. This is where a re-terminating bug shows up: MEMO-16's retry
+    re-shapes an already-shaped transcript, so a stop appended per pass would have
+    grown `。..` on the second attempt.
+    """
+    once = prose.shape(text, language)
+
+    assert prose.shape(once, language) == once
 
 
 # --------------------------------------------------------------------------

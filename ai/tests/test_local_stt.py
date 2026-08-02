@@ -183,6 +183,63 @@ def test_it_asks_for_wav_and_switches_the_voice_filter_on():
     )
 
 
+def test_the_english_primer_is_withheld_from_a_non_english_recording():
+    """
+    The primer is English prose and whisper reads `initial_prompt` as the transcript
+    preceding the audio, so sending it with Russian speech returns an English
+    translation rather than a punctuated Russian transcript. Measured on a real memo:
+    "Мне завтра встреча с Андреем..." came back as "Me tomorrow is a meeting with
+    Andrey...", with `info.language` still reporting `ru`.
+
+    The regression shipped because the only non-English fixture is somebody counting
+    to ten, which decodes to `1, 2, 3...` in either language -- so no assertion on
+    real audio could have caught it. This one is on the options instead.
+    """
+    model = StubModel()
+    provider(model, detector=StubDetector(language="ru", probability=0.98)).transcribe(AUDIO)
+
+    options = model.calls[0][1]
+
+    assert options["language"] == "ru"
+    assert "initial_prompt" not in options
+
+
+def test_an_unsure_detection_is_not_treated_as_english():
+    """
+    Below DETECT_MIN_CONFIDENCE the provider passes `language=None` and lets whisper
+    decide, which means nothing here knows what language it is -- and not knowing is
+    not English. Priming on a guess is how a Russian memo becomes an English one, and
+    the two errors do not cost the same: withholding the primer costs punctuation,
+    sending it wrongly costs the words.
+    """
+    model = StubModel()
+    provider(model, detector=StubDetector(language="en", probability=0.20)).transcribe(AUDIO)
+
+    options = model.calls[0][1]
+
+    assert options["language"] is None
+    assert "initial_prompt" not in options
+
+
+def test_a_configured_non_english_language_is_also_unprimed():
+    """STT_LANGUAGE=ru skips detection entirely; the primer still must not go."""
+    model = StubModel()
+    provider(model, language="ru").transcribe(AUDIO)
+
+    options = model.calls[0][1]
+
+    assert options["language"] == "ru"
+    assert "initial_prompt" not in options
+
+
+def test_english_still_gets_the_primer():
+    """The other side of the bound -- scoping it must not disable it where it was measured."""
+    model = StubModel()
+    provider(model, language="en").transcribe(AUDIO)
+
+    assert model.calls[0][1]["initial_prompt"] == PUNCTUATION_PRIMER
+
+
 def test_decoding_is_deterministic_and_discourages_repetition():
     # The two settings are a pair and neither works alone: a penalty under the
     # default temperature ladder swings between losing the transcript and not
