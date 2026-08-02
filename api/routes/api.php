@@ -72,14 +72,6 @@ Route::post('/memos/{memo}/retry', [MemoController::class, 'retry'])
     ->whereUuid('memo')
     ->name('memos.retry');
 
-// Beside retry rather than merged with it: same verb and shape, different question. Retry
-// asks "this failed, try again"; this one asks "the language was wrong, do it again in
-// Romanian" about a memo that usually succeeded. MemoController::retranscribe has why one
-// route could not safely answer both.
-Route::post('/memos/{memo}/retranscribe', [MemoController::class, 'retranscribe'])
-    ->whereUuid('memo')
-    ->name('memos.retranscribe');
-
 // Deleting a memo takes its recording and its reminders with it. The reminders go through
 // `ON DELETE CASCADE` inside Postgres; the audio blob is unlinked by MemoService, which has
 // the argument for why the row goes first and why a failed unlink is still a successful

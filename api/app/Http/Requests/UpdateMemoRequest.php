@@ -17,16 +17,32 @@ use Illuminate\Validation\Validator;
  *   * `collection_id` files a memo into a collection, or takes it back out.
  *   * `title` renames it.
  *
- * **Why `title` is writable and `transcript` is not.** The transcript is a record of what
- * was said. memo_ai/prose.py will not so much as respell a word of it -- there is an
- * invariant and a test asserting that the formatter touches only whitespace, punctuation and
- * case -- precisely so that the column can be trusted as evidence of the recording. A client
- * that could edit it would remove the one property that makes it worth keeping.
+ * **`transcript` is writable, and this block used to say the opposite.** The old argument was
+ * that a transcript is a record of what was said -- memo_ai/prose.py will not so much as
+ * respell a word of it, and there is an invariant and a test pinning the formatter to
+ * whitespace, punctuation and case -- so a client that could edit it would remove the one
+ * property that made the column worth keeping.
  *
- * A title is the opposite kind of thing. It is *generated*: cut from the transcript as a
- * fallback, then replaced by whatever the enrichment pass makes of it. That is a guess about
- * what a memo should be called, and a wrong guess on a strip of thirty cards is a memo the
- * owner cannot find again. So the guess is the default and the owner has the last word.
+ * That reasoning survived contact with a wrong transcript and did not hold up. Two things are
+ * wrong with it. The evidence is **the audio**, which is kept and served back (MEMO-23); the
+ * transcript is a lossy derivative of it produced by a model, and treating a guess as a record
+ * does not make it one. And the property being protected was never real: a memo transcribed in
+ * the wrong language is not evidence of anything, it is just wrong, and refusing to let the
+ * owner correct it protected nothing while leaving them nothing to do.
+ *
+ * The case that settled it: a Romanian memo came back transliterated into Cyrillic because
+ * language detection missed, and nine detection approaches across three model architectures
+ * all missed the same clip. Re-running the model was tried first and removed again -- it is
+ * slow, it discards a transcript that may be mostly right, and it is at the mercy of the same
+ * detection. Typing the correction is immediate and always works.
+ *
+ * The formatter's invariant is untouched by this: *it* still never rewrites a word. What
+ * changed is that a person may.
+ *
+ * A title is writable for its own, weaker reason. It is *generated* -- cut from the transcript
+ * as a fallback, then replaced by whatever the enrichment pass makes of it -- so it is a guess
+ * about what a memo should be called, and a wrong guess on a strip of thirty cards is a memo
+ * the owner cannot find again.
  *
  * `status`, `tags` and the rest stay out for the first reason rather than the second: they
  * are the queue's and the worker's, and a client setting `status` would be a client claiming
@@ -46,6 +62,17 @@ final class UpdateMemoRequest extends FormRequest
      * `title`, so this *is* the constraint.
      */
     public const MAX_TITLE_LENGTH = 200;
+
+    /**
+     * The cap on a corrected transcript.
+     *
+     * Deliberately the same number StoreMemoRequest gives a typed memo, rather than a larger
+     * one reasoned from the ten-minute audio cap. A person editing a transcript is fixing
+     * words a model got wrong, not composing -- and if the two limits disagreed, the shorter
+     * one would still be the effective limit on what anybody could type into this app, just
+     * discovered later and by a different error message.
+     */
+    public const MAX_TRANSCRIPT_LENGTH = 10_000;
 
     /**
      * **`sometimes` on both, with a rule below that at least one arrived.**
@@ -86,6 +113,20 @@ final class UpdateMemoRequest extends FormRequest
         return [
             'collection_id' => ['sometimes', 'nullable', 'uuid'],
             'title' => ['sometimes', 'nullable', 'string', new NoNullBytes, 'max:'.self::MAX_TITLE_LENGTH],
+
+            // `min:1` after the trim in transcript() below, and *not* `nullable`, which is the
+            // one place this field's rules differ from `title`'s. Clearing a title is a real
+            // operation -- the memo falls back to the first line of its transcript, which is
+            // still there. Clearing a transcript leaves a memo with no text at all: unfindable
+            // by search, rendered as an empty card, and indistinguishable from one whose
+            // recording produced nothing. Somebody who wants that wants Delete.
+            'transcript' => [
+                'sometimes',
+                'string',
+                'min:1',
+                new NoNullBytes,
+                'max:'.self::MAX_TRANSCRIPT_LENGTH,
+            ],
         ];
     }
 
@@ -101,10 +142,10 @@ final class UpdateMemoRequest extends FormRequest
     public function withValidator(Validator $validator): void
     {
         $validator->after(function (Validator $validator): void {
-            if (! $this->has('collection_id') && ! $this->has('title')) {
+            if (! $this->has('collection_id') && ! $this->has('title') && ! $this->has('transcript')) {
                 $validator->errors()->add(
                     'title',
-                    'Send a collection or a title — this request asks for no change.',
+                    'Send a collection, a title or a transcript — this request asks for no change.',
                 );
             }
         });
@@ -119,7 +160,7 @@ final class UpdateMemoRequest extends FormRequest
      */
     public function attributes(): array
     {
-        return ['collection_id' => 'collection', 'title' => 'title'];
+        return ['collection_id' => 'collection', 'title' => 'title', 'transcript' => 'transcript'];
     }
 
     /** Whether the body asked for the memo to be filed or unfiled. */
@@ -166,5 +207,23 @@ final class UpdateMemoRequest extends FormRequest
         $trimmed = trim($title);
 
         return $trimmed === '' ? null : $trimmed;
+    }
+
+    /** Whether the body asked for the transcript to be corrected. */
+    public function correctsTranscript(): bool
+    {
+        return $this->has('transcript');
+    }
+
+    /**
+     * The corrected transcript.
+     *
+     * Trimmed, and never null: the rules refuse a blank one, so `correctsTranscript()` being
+     * true means there is text here. The `?? ''` is for the type checker rather than for a
+     * reachable case -- a validated request that reached this method has the key.
+     */
+    public function transcript(): string
+    {
+        return trim((string) ($this->validated()['transcript'] ?? ''));
     }
 }

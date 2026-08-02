@@ -154,6 +154,31 @@ export async function renameMemo(id, title) {
 }
 
 /**
+ * PATCH /api/memos/{id} once more -- correct a memo's transcript.
+ *
+ * A third function on the same route, for the reason renameMemo gives about the second: each
+ * body names only the field it means, so an absent key is never mistaken for an intended null.
+ *
+ * Unlike a title, a transcript cannot be cleared -- the API refuses a blank one with a 422.
+ * A memo with no title falls back to the first line of its transcript; a memo with no
+ * transcript has no text at all, and somebody who wants that wants Delete.
+ *
+ * @param {string} id
+ * @param {string} transcript The corrected words. Trimmed server-side as well as here.
+ * @returns {Promise<object>} The memo in its new state, with `search_vector` already
+ *   recomputed by Postgres -- so the memo is findable by its new words on the next search.
+ */
+export async function correctTranscript(id, transcript) {
+  return storedMemo(
+    await request(`/api/memos/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transcript }),
+    }),
+  )
+}
+
+/**
  * DELETE /api/memos/{id} -- remove a memo, its recording and its reminders.
  *
  * Answers with the memo it removed rather than 204, so this returns one for the same reason
@@ -341,34 +366,6 @@ export async function createVoiceMemo(blob, filename, onProgress = null, languag
   }
 
   return storedMemo(await upload('/api/memos', form, onProgress))
-}
-
-/**
- * POST /api/memos/{id}/retranscribe -- decode a recording again, in a named language.
- *
- * Separate from retryMemo, and the difference is which memos it is for. Retry is for a memo
- * that failed; this is for one that *succeeded* and got the language wrong -- the reason it
- * exists is that a 2.76-second Romanian memo came back transliterated into Cyrillic, and nine
- * language-ID approaches across three model architectures all mis-identified the same clip.
- * Auto-detect stays the default; this is how a person overrules it.
- *
- * The 409 is the interesting failure and, as with retry, it is not a client error: it means
- * the memo is mid-flight, or was typed rather than recorded. request() throws it carrying the
- * API's own sentence, which names which of the two it was.
- *
- * @param {string} id
- * @param {?string} language A Whisper code, or null to put the memo back on auto-detect --
- *   the way out for somebody who pinned the wrong language.
- * @returns {Promise<object>} The memo, back in the queue with its old transcript cleared.
- */
-export async function retranscribeMemo(id, language) {
-  return storedMemo(
-    await request(`/api/memos/${encodeURIComponent(id)}/retranscribe`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ language: language ?? null }),
-    }),
-  )
 }
 
 /**

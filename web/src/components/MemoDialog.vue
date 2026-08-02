@@ -2,7 +2,6 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import ReminderFields from './ReminderFields.vue'
 import { canRetry, failureReason } from '../memoFailure'
-import { AUTO_DETECT, LANGUAGES, languageName } from '../languages'
 import { memoLabel } from '../memoLabel'
 import { useCollections } from '../composables/useCollections'
 import { ask } from '../composables/useConfirm'
@@ -39,29 +38,19 @@ const emit = defineEmits(['close', 'changed'])
  */
 const MAX_TITLE_LENGTH = 200
 
-const { moveMemo, rename, remove, retry, retranscribe, dropReminder, memoError, working } =
-  useMemos()
-
 /**
- * Send the memo back through transcription in the chosen language.
+ * Mirrors UpdateMemoRequest::MAX_TRANSCRIPT_LENGTH, which is itself the same number
+ * StoreMemoRequest gives a typed memo.
  *
- * Guarded against a no-op change, because a `change` event fires on any commit the browser
- * considers one -- including a keyboard user arrowing back to where they started. Re-decoding a
- * memo into the language it is already in would spend a worker to produce the same transcript
- * and blank the card while doing it.
- *
- * The empty option is Auto-detect, which becomes null: that is a real request rather than a
- * cancel, and it is the way back for somebody who pinned the wrong language.
+ * On the textarea as `maxlength`, like the title's and unlike the composer's. The composer
+ * leaves its cap off the element because truncating a *pasted* memo would silently throw away
+ * what somebody wrote; this field is pre-filled with a transcript that is already inside the
+ * limit, so the cap can only be reached by typing past it.
  */
-function onLanguageChange(memo, chosen) {
-  const language = chosen || null
+const MAX_TRANSCRIPT_LENGTH = 10_000
 
-  if (language === (memo.language ?? null)) {
-    return
-  }
+const { moveMemo, rename, correct, remove, retry, dropReminder, memoError, working } = useMemos()
 
-  return retranscribe(memo, language)
-}
 const { collections } = useCollections()
 
 const dialogEl = ref(null)
@@ -81,6 +70,17 @@ const renaming = ref(false)
 const draft = ref('')
 const titleEl = ref(null)
 
+/**
+ * The same three, for the transcript.
+ *
+ * Separate state rather than one shared "editing" flag, because the two fields are independent
+ * edits on one card and closing the title should not discard a half-typed correction. They are
+ * both reset when the dialog is pointed at a different memo, which is the case that matters.
+ */
+const correcting = ref(false)
+const transcriptDraft = ref('')
+const transcriptEl = ref(null)
+
 /** The collection chosen in the select, which is not applied until Move is pressed. */
 const chosenCollection = ref('')
 
@@ -98,10 +98,13 @@ const chosenCollection = ref('')
 watch(
   () => props.memo,
   (memo) => {
-    // Reset both controls whenever the dialog is pointed at a different memo. Without this,
+    // Reset every control whenever the dialog is pointed at a different memo. Without this,
     // clicking a second card while the first is being renamed leaves the previous memo's draft
-    // in the field, over the new memo's heading, one keystroke from being saved onto it.
+    // in the field, over the new memo's heading, one keystroke from being saved onto it. The
+    // transcript field is the same hazard with more to lose, since it would be a whole other
+    // memo's words about to be written over these ones.
     renaming.value = false
+    correcting.value = false
     chosenCollection.value = memo?.collection_id ?? ''
 
     const el = dialogEl.value
@@ -218,12 +221,13 @@ async function move() {
  * behaviour the component was built with: there is nothing else in here to lose.
  */
 function onCancelRequest(event) {
-  if (!renaming.value) {
+  if (!renaming.value && !correcting.value) {
     return
   }
 
   event.preventDefault()
   renaming.value = false
+  correcting.value = false
 }
 
 /** Start renaming, with whatever title is stored -- not the fallback the heading is showing. */
@@ -252,6 +256,39 @@ async function saveRename() {
   }
 
   // Left open on failure, with the message underneath, so the text is still there to retry.
+}
+
+/** Start correcting, from the stored transcript. */
+async function startCorrecting() {
+  transcriptDraft.value = props.memo?.transcript ?? ''
+  correcting.value = true
+
+  // Focus without selecting, unlike startRename. A title is short and usually replaced
+  // wholesale, so selecting it saves a step; a transcript is long and usually being corrected
+  // in one place, and selecting all of it puts the next keystroke one slip away from wiping it.
+  await nextTick()
+  transcriptEl.value?.focus()
+}
+
+/**
+ * Save the corrected transcript.
+ *
+ * No empty case, unlike saveRename: the button is disabled on a blank field and the API refuses
+ * one, because clearing a transcript is not an operation this control should offer. Somebody
+ * who wants a memo with no text wants Delete.
+ */
+async function saveTranscript() {
+  const next = transcriptDraft.value.trim()
+
+  if (next === '') {
+    return
+  }
+
+  if ((await correct(props.memo, next)) !== null) {
+    correcting.value = false
+  }
+
+  // Left open on failure, with the message underneath, so the typing is still there to retry.
 }
 
 /**
@@ -405,19 +442,69 @@ async function removeReminder(reminderId) {
         <h3 class="sheet__label">Transcription</h3>
 
         <!--
-          white-space: pre-wrap in the stylesheet, so the newlines somebody typed into the
-          textarea survive. Interpolation escapes the text, so a memo containing markup is
-          shown, not run.
+          Editing, when asked for. The same explicit mode the title uses rather than a
+          permanently live textarea, and for a stronger reason here: this is the memo itself,
+          and a card whose main content is a form field reads as something half-written rather
+          than as something recorded.
         -->
-        <p v-if="memo.transcript" class="sheet__transcript">{{ memo.transcript }}</p>
+        <template v-if="correcting">
+          <textarea
+            ref="transcriptEl"
+            v-model="transcriptDraft"
+            class="sheet__transcript-input"
+            rows="6"
+            :maxlength="MAX_TRANSCRIPT_LENGTH"
+            aria-label="Transcription"
+            @keydown.enter.meta.prevent="saveTranscript"
+            @keydown.enter.ctrl.prevent="saveTranscript"
+          ></textarea>
 
-        <p v-else-if="failureReason(memo)" class="sheet__transcript sheet__transcript--failed">
-          {{ failureReason(memo) }}
-        </p>
+          <div class="sheet__transcript-actions">
+            <!--
+              Disabled on empty, matching the API rather than discovering it: a blank
+              transcript is a 422, because a memo with no text is unfindable by search and
+              indistinguishable from one whose recording produced nothing. Clearing a *title*
+              is allowed, which is why that button has no such guard.
+            -->
+            <button type="button" :disabled="working || transcriptDraft.trim() === ''" @click="saveTranscript">
+              Save transcription
+            </button>
 
-        <p v-else class="sheet__transcript sheet__transcript--empty">
-          Still being transcribed — this card will fill in on its own.
-        </p>
+            <button type="button" class="ghost" :disabled="working" @click="correcting = false">
+              Cancel
+            </button>
+          </div>
+        </template>
+
+        <template v-else>
+          <!--
+            white-space: pre-wrap in the stylesheet, so the newlines somebody typed into the
+            textarea survive. Interpolation escapes the text, so a memo containing markup is
+            shown, not run.
+          -->
+          <p v-if="memo.transcript" class="sheet__transcript">{{ memo.transcript }}</p>
+
+          <p v-else-if="failureReason(memo)" class="sheet__transcript sheet__transcript--failed">
+            {{ failureReason(memo) }}
+          </p>
+
+          <p v-else class="sheet__transcript sheet__transcript--empty">
+            Still being transcribed — this card will fill in on its own.
+          </p>
+
+          <!--
+            Offered only once there is something to correct. A memo still being transcribed has
+            no text to edit, and one that failed has no text at all -- Retry is that memo's
+            control, and an Edit button beside it would invite typing a transcript for a
+            recording nobody has heard.
+
+            A `.ghost` like Rename, because this is an edit to a memo that is fine. The filled
+            button on this card belongs to Retry, which is the offered fix for one that is not.
+          -->
+          <button v-if="memo.transcript" type="button" class="ghost" @click="startCorrecting">
+            Edit transcription
+          </button>
+        </template>
       </section>
 
       <!--
@@ -456,52 +543,6 @@ async function removeReminder(reminderId) {
           — this puts it back at the front of the queue.
         </p>
       </div>
-
-      <!--
-        Wrong language rather than no transcript.
-
-        Offered on a memo that *succeeded*, which is what makes it a separate control from Retry
-        above rather than an option on it. A Romanian memo transliterated into Cyrillic is a
-        `ready` row with a full transcript on it: nothing failed, and the only thing that knows
-        it is wrong is the person who spoke. web/src/languages.js has the measurements — nine
-        language-ID approaches across three model architectures, all wrong on the same clip.
-
-        Voice memos only, and that is the whole of the condition worth having here: a typed memo
-        has no recording to decode, and the API refuses one with a 409 saying so. Showing the
-        control and letting the server refuse would be a button that exists to fail.
-
-        A submit-on-change select rather than a picker plus an Apply button. There is one field
-        and choosing a value *is* the instruction, so a second click would only be a chance to
-        change your mind about a decode that takes a few seconds and can be redone. The current
-        language is what the select shows, so this doubles as the display of what the memo was
-        last decoded as -- which is why `language` is on the wire at all.
-      -->
-      <section v-if="memo.source === 'voice'" class="sheet__section sheet__language">
-        <h3 class="sheet__label">Spoken language</h3>
-
-        <label class="sheet__language-control">
-          <select
-            class="sheet__select"
-            :value="memo.language ?? AUTO_DETECT"
-            :disabled="working"
-            @change="onLanguageChange(memo, $event.target.value)"
-          >
-            <option :value="AUTO_DETECT">Auto-detect</option>
-
-            <option v-for="option in LANGUAGES" :key="option.code" :value="option.code">
-              {{ option.name }}
-            </option>
-          </select>
-
-          <span class="sheet__hint">
-            {{
-              memo.language
-                ? `Decoded as ${languageName(memo.language)}. Choose another to transcribe it again.`
-                : 'The language was detected automatically. Choose one to transcribe it again.'
-            }}
-          </span>
-        </label>
-      </section>
 
       <section v-if="memo.tags?.length" class="sheet__section">
         <h3 class="sheet__label">Tags</h3>

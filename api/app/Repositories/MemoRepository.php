@@ -462,6 +462,38 @@ class MemoRepository
      *                          transcript everywhere it is rendered, which is a better label
      *                          than an enrichment guess they disagreed with.
      */
+    /**
+     * Replace a memo's transcript with a corrected one.
+     *
+     * Its own statement rather than a second SET on `rename`, matching how `moveToCollection`
+     * and `rename` already sit beside each other: they touch different columns, answer the
+     * same shape, and the controller runs whichever the body asked for. A combined statement
+     * would need every caller to say which halves it meant.
+     *
+     * **`search_vector` needs no help here.** It is a STORED generated column over title,
+     * summary, transcript and tags (001_init.sql), so Postgres recomputes it as part of this
+     * UPDATE -- a corrected transcript is findable by its new words, and no longer findable by
+     * the wrong ones, without a line of code. That is the whole reason the column is generated
+     * rather than maintained by a trigger or by the application.
+     *
+     * The title is deliberately *not* touched. It may have been cut from the text being
+     * replaced, so it can now be stale -- but it may equally be one the owner typed, and this
+     * route has a `title` field of its own for changing it. Rewriting it as a side effect of a
+     * different edit is the kind of helpfulness that loses somebody's work; the UI puts the two
+     * fields next to each other so a stale title is visible while it is being corrected.
+     */
+    public function correctTranscript(string $memoId, string $transcript): ?Memo
+    {
+        $rows = $this->db->connection()->selectFromWriteConnection(
+            'UPDATE memos SET transcript = ? WHERE id = ? RETURNING '.self::COLUMNS,
+            [$transcript, $memoId],
+        );
+
+        $row = $rows[0] ?? null;
+
+        return $row instanceof stdClass ? Memo::fromRow($row) : null;
+    }
+
     public function rename(string $memoId, ?string $title): ?Memo
     {
         $rows = $this->db->connection()->selectFromWriteConnection(
@@ -519,88 +551,6 @@ class MemoRepository
      * transcription clears it (`_COMMIT_TRANSCRIPT`), which is the write that knows the
      * error is over.
      */
-    /**
-     * Send a voice memo back through transcription in a named language.
-     *
-     * Deliberately not folded into `requeue` above, which MEMO-17 wrote for a different
-     * question. That one asks "this failed, try again" and its `status = 'failed'` guard
-     * is the whole of its correctness -- requeueing a `ready` memo on a Retry click would
-     * throw away a transcript somebody is reading. This one asks "you got the language
-     * wrong, do it again in Romanian", and the memo it is asked about is usually `ready`:
-     * a transliterated transcript is a *successful* job by every measure the worker has.
-     * Widening `requeue`'s guard to cover both would leave one statement whose safety
-     * depends on which caller reached it.
-     *
-     * Three conditions, each refusing a different mistake:
-     *
-     *   * `source = 'voice'` -- a typed memo has no audio, so there is nothing to decode
-     *     and requeueing one would blank a transcript the user typed themselves.
-     *   * `audio_path IS NOT NULL` -- belt and braces on the same point, and it is the
-     *     column the worker actually reads.
-     *   * `status IN ('ready', 'failed')` -- the two terminal states. A memo in `queued`
-     *     or `processing` is already on its way and a worker may hold its fence token;
-     *     resetting it under that worker is what `locked_at` exists to prevent.
-     *
-     * `transcript = NULL` is not cosmetic. `owed_audio` in memo_ai/pipeline.py decides
-     * whether a claimed memo owes a transcript by asking whether it already has one, so
-     * a re-queued row that kept its old transcript would be published straight back
-     * unchanged -- the request would appear to succeed and change nothing.
-     *
-     * **Everything derived from the transcript is cleared with it, and the title is the
-     * one that had to be thought about.** `_FINISH_READY` in memo_ai/memos.py titles a
-     * memo with `COALESCE(enricher, title, heuristic, fallback)` -- the existing title
-     * ranks above both fallbacks on purpose, so that a re-run cannot downgrade a real
-     * title and so the column is safe for a person to edit. That ordering is right for a
-     * retry and wrong here: the title on this row was cut out of a transcript the user
-     * has just told us is in the wrong language, so keeping it leaves a Romanian memo
-     * called `Салют`. Measured, not hypothetical -- that is exactly what the first run of
-     * this endpoint produced.
-     *
-     * What it costs is a manual rename, which is discarded along with the generated ones.
-     * There is no `title_edited` flag to tell the two apart, and inventing one for this is
-     * not worth a column: re-transcribing says "the words are wrong, do them again", the
-     * title is a word derived from those words, and a rename is one click to redo. The
-     * alternative -- a stale title in a language the memo is no longer in, with no way to
-     * refresh it except editing by hand -- is the worse default.
-     *
-     * `summary`, `tags` and `category` go for the same reason and are free today: MEMO-21
-     * has not been built, so they are always null. Clearing them here means it cannot land
-     * with this bug already in it. `tags` is `NOT NULL DEFAULT '{}'`, so it resets to the
-     * empty array rather than to NULL.
-     */
-    public function retranscribe(string $memoId, ?string $language): ?Memo
-    {
-        $rows = $this->db->connection()->selectFromWriteConnection(
-            <<<'SQL'
-                UPDATE memos
-                   SET status = 'queued',
-                       language = ?,
-                       transcript = NULL,
-                       title = NULL,
-                       summary = NULL,
-                       tags = '{}',
-                       category = NULL,
-                       enriched_at = NULL,
-                       enrichment_error = NULL,
-                       attempts = 0,
-                       next_attempt_at = now(),
-                       locked_at = NULL,
-                       last_error = NULL,
-                       last_error_code = NULL
-                 WHERE id = ?
-                   AND source = 'voice'
-                   AND audio_path IS NOT NULL
-                   AND status IN ('ready', 'failed')
-                RETURNING
-                SQL.' '.self::COLUMNS,
-            [$language, $memoId],
-        );
-
-        $row = $rows[0] ?? null;
-
-        return $row instanceof stdClass ? Memo::fromRow($row) : null;
-    }
-
     public function requeue(string $memoId): ?Memo
     {
         $rows = $this->db->connection()->selectFromWriteConnection(
