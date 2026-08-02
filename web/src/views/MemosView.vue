@@ -2,11 +2,13 @@
 import { onMounted, ref } from 'vue'
 import CollectionDialog from '../components/CollectionDialog.vue'
 import CollectionGrid from '../components/CollectionGrid.vue'
+import ConfirmDialog from '../components/ConfirmDialog.vue'
 import ListFilters from '../components/ListFilters.vue'
 import MemoComposer from '../components/MemoComposer.vue'
 import MemoDialog from '../components/MemoDialog.vue'
 import MemoRecorder from '../components/MemoRecorder.vue'
 import MemoStrip from '../components/MemoStrip.vue'
+import MemoToasts from '../components/MemoToasts.vue'
 import ReminderBanner from '../components/ReminderBanner.vue'
 import { useCollections } from '../composables/useCollections'
 import { useMemos } from '../composables/useMemos'
@@ -98,29 +100,6 @@ function memoChanged() {
 }
 
 /**
- * Take the reader to the controls that add a fast memo, and put the cursor in the textarea.
- *
- * Focus is moved as well as scrolled, and the focus is the part that matters: scrolling alone
- * leaves a keyboard user exactly where they were, having pressed a button that appeared to do
- * nothing. Focusing the textarea also scrolls it into view on its own in every current
- * browser, so the explicit scroll is for the smooth behaviour rather than for the position.
- *
- * The textarea rather than the Record button, because typing is the one that needs a cursor
- * placed -- Record is a single keystroke away once focus is in that region, and putting focus
- * on it would mean a stray Space or Enter starts recording.
- *
- * Queried from the document rather than held as a template ref, because the element belongs to
- * MemoComposer. A ref would mean that component exposing its textarea purely so this button
- * could reach in, which is a worse coupling than one selector.
- */
-function addFastMemo() {
-  const composer = document.querySelector('.composer__text')
-
-  composer?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  composer?.focus({ preventScroll: true })
-}
-
-/**
  * A collection was deleted: its memos are fast memos again.
  *
  * `ON DELETE SET NULL` does that inside Postgres, where no response can observe it, so the
@@ -176,21 +155,19 @@ onMounted(() => {
       Still transcribing — a long recording can take a while.
     </p>
 
+    <!--
+      No "+ Add fast memo" button here any more.
+
+      It was the brief's affordance for adding a memo to this list, and it never added one:
+      the two controls that do are the Record button and the textarea, thirty pixels above,
+      both permanently on screen. All it did was scroll to them and focus the box. On a screen
+      where the thing it points at is already visible, a button that moves the cursor is a
+      control the reader has to work out the purpose of, and the answer is "nothing you could
+      not do by clicking the box".
+    -->
     <section class="section" aria-labelledby="fast-heading">
       <header class="section__head">
         <h2 id="fast-heading">Fast memos</h2>
-
-        <!--
-          The brief asks for an "add fast memo" button on this list, and the two controls that
-          actually add one are above it rather than in here. That is deliberate -- the recorder
-          has to stay at the top, because it is what the app is for and because the bloom is
-          anchored to it -- so this is the affordance rather than a third way to write a memo.
-          Every memo is created unfiled, so anything made up there lands in this strip; the
-          button just takes you to the controls and puts the cursor in the box.
-
-          A button and not a link: it moves focus within the page rather than navigating.
-        -->
-        <button type="button" class="ghost" @click="addFastMemo">+ Add fast memo</button>
       </header>
 
       <p class="section__hint">
@@ -236,10 +213,10 @@ onMounted(() => {
   </main>
 
   <!--
-    Both dialogs and the reminder banner sit outside <main>, which is deliberate for each. The
+    Everything below sits outside <main>, which is deliberate for each of them. The three
     dialogs render in the browser's top layer regardless of where they are declared, so putting
-    them inside the landmark would only misdescribe the page; the banner is a notification
-    surface rather than page content.
+    them inside the landmark would only misdescribe the page; the corner holds notification
+    surfaces rather than page content.
   -->
   <MemoDialog :memo="openMemo" @close="openMemo = null" @changed="memoChanged" />
 
@@ -250,5 +227,27 @@ onMounted(() => {
     @open-memo="showMemo"
   />
 
-  <ReminderBanner />
+  <!--
+    One fixed corner, two groups inside it. The container lives here rather than in either
+    component because there is one corner and two things that want it -- each owning its own
+    `position: fixed` put them on top of each other, which is what this replaced.
+
+    Memos above reminders, which is the order they are read in: a submission's card appears in
+    response to something that happened a second ago and is looked at immediately, while a
+    reminder can sit for a while. Below, it would be pushed around by every save.
+  -->
+  <!--
+    One host for every "are you sure?" on this screen -- the memo delete and the collection
+    delete both ask through useConfirm, and a dialog per caller would mean two <dialog>
+    elements competing for the top layer. Last in the template so it opens above the sheets,
+    which is also where the browser stacks it regardless: modal dialogs enter the top layer in
+    the order showModal() is called.
+  -->
+  <ConfirmDialog />
+
+  <div class="toasts">
+    <MemoToasts />
+
+    <ReminderBanner />
+  </div>
 </template>

@@ -212,6 +212,49 @@ const RATE_HZ = 0.14
 /** How far the breath swells, as a fraction of the field's size. */
 const BREATHE_DEPTH = 0.05
 
+/*
+ * Per-blob shape motion, which is what makes the idle field *reshape* rather than zoom.
+ *
+ * **The distinction is the whole reason these exist.** `breathe` above is one number applied
+ * to every blob at once, so the entire field grows and shrinks together -- and a picture whose
+ * parts all scale in step is a picture being zoomed. The positional drift below it moves the
+ * blobs relative to each other, which helps, but they stay circles, and six circles sliding
+ * around inside a heavy blur average out to something that barely changes silhouette.
+ *
+ * So each blob gets two motions of its own instead:
+ *
+ *   * a **size wobble**, on its own phase, so the blobs swell out of step with each other and
+ *     with the breath -- the core can be growing while the halo behind it is not;
+ *   * a **squash**, applied along an axis that itself rotates slowly, so a blob is an ellipse
+ *     whose long direction wanders. This is the one that reads: an off-round blob turning
+ *     inside a round one changes the outline of the sum, which no amount of scaling does.
+ *
+ * The squash is area-preserving -- `scale(s, 1/s)` -- so it never reads as a size change
+ * competing with the wobble. Both depths are small; at this blur, 7% and 12% are the
+ * difference between "alive" and "wobbling", and past about twice these the field starts
+ * looking like something inflating rather than breathing.
+ */
+const WOBBLE_DEPTH = 0.07
+const SQUASH_DEPTH = 0.12
+
+/*
+ * The three shape frequencies are derived from each blob's own drift rates rather than being
+ * three more columns in BLOBS, and the multipliers are deliberately not round.
+ *
+ * Derived, because eighteen more hand-written numbers is exactly the table the DARK/LIGHT
+ * merge above got rid of -- values that differ from their neighbours by roughly a constant and
+ * can drift apart for no reason. Tying them to `fx` and `fy` keeps a blob that was given slow
+ * motion slow in every respect, which is what makes the small ones feel quicker than the large
+ * ones without a second table saying so.
+ *
+ * Not round, because ratios like 0.5 or 2 re-sync: two oscillators at a rational ratio return
+ * to the same relative phase every few cycles, and the eye finds that period. These do not
+ * repeat on any timescale anybody is looking at the page for.
+ */
+const WOBBLE_RATIO = 0.61
+const SQUASH_RATIO = 0.43
+const AXIS_RATIO = 0.27
+
 /** How much faster the blobs wander per syllable per second. */
 const DRIFT_PER_RATE = 0.45
 
@@ -289,6 +332,18 @@ let drawnAnchor = null
 let breathe = 0
 const px = BLOBS.map(() => Math.random() * 2 * Math.PI)
 const py = BLOBS.map(() => Math.random() * 2 * Math.PI)
+
+/*
+ * The shape phases: size wobble, squash depth, and the angle the squash is applied along.
+ *
+ * Started at random like the drift phases, and for the same reason -- six oscillators all
+ * beginning at zero would be in step for the first cycle, which is the cycle somebody sees
+ * when the page loads.
+ */
+const pw = BLOBS.map(() => Math.random() * 2 * Math.PI)
+const pq = BLOBS.map(() => Math.random() * 2 * Math.PI)
+const pa = BLOBS.map(() => Math.random() * 2 * Math.PI)
+
 const pr = PETALS.map((petal) => petal.phase)
 
 let raf = 0
@@ -417,6 +472,14 @@ function advance(dt, rate) {
   for (let i = 0; i < px.length; i++) {
     px[i] += 2 * Math.PI * BLOBS[i].fx * driftMultiplier * dt
     py[i] += 2 * Math.PI * BLOBS[i].fy * driftMultiplier * dt
+
+    // Integrated alongside the drift and multiplied by the same `driftMultiplier`, so a blob
+    // that speeds up while somebody is talking reshapes faster too rather than sliding about
+    // while holding its outline -- which would read as the two motions belonging to different
+    // things.
+    pw[i] += 2 * Math.PI * BLOBS[i].fx * WOBBLE_RATIO * driftMultiplier * dt
+    pq[i] += 2 * Math.PI * BLOBS[i].fy * SQUASH_RATIO * driftMultiplier * dt
+    pa[i] += 2 * Math.PI * BLOBS[i].fx * AXIS_RATIO * driftMultiplier * dt
   }
 
   for (let i = 0; i < pr.length; i++) {
@@ -478,20 +541,38 @@ function draw(reading) {
 
   for (let i = 0; i < BLOBS.length; i++) {
     const blob = BLOBS[i]
-    const r = blob.r * spread * extent * (1 + (swell - 1) * blob.resp)
+
+    // The blob's own wobble multiplies the shared swell rather than replacing it: the breath
+    // is still the whole field moving together, and this is each part disagreeing with it a
+    // little. See WOBBLE_DEPTH.
+    const wobble = 1 + WOBBLE_DEPTH * Math.sin(pw[i])
+    const r = blob.r * spread * extent * (1 + (swell - 1) * blob.resp) * wobble
     const x = cx + Math.sin(px[i]) * blob.ax * extent
     const y = cy + Math.sin(py[i]) * blob.ay * extent
 
+    // Area-preserving, so the squash reshapes without also reading as a size change competing
+    // with the wobble above. The transform is the same technique the petals use, and it costs
+    // one save/restore per blob -- six a frame, against the 0.79 ms this whole draw takes.
+    const squash = 1 + SQUASH_DEPTH * Math.sin(pq[i])
+
+    offCtx.save()
+    offCtx.translate(x, y)
+    offCtx.rotate(pa[i])
+    offCtx.scale(squash, 1 / squash)
+
+    // Centred on the origin now, because the translate above put it there. The gradient has to
+    // move with it -- built in the same coordinates, or the fill and the shape disagree.
     offCtx.fillStyle = gradientFor(
-      offCtx.createRadialGradient(x, y, 0, x, y, r),
+      offCtx.createRadialGradient(0, 0, 0, 0, 0, r),
       ink[i].rgb,
       Math.min(1, ink[i].a * glow),
       blob.ring,
       blob.w + widen,
     )
     offCtx.beginPath()
-    offCtx.arc(x, y, r, 0, 2 * Math.PI)
+    offCtx.arc(0, 0, r, 0, 2 * Math.PI)
     offCtx.fill()
+    offCtx.restore()
   }
 
   // Reset before clearing: a filter set on the context applies to clearRect too on

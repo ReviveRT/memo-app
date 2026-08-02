@@ -1,7 +1,9 @@
 <script setup>
-import { computed, watch } from 'vue'
+import { computed, nextTick, watch } from 'vue'
 import ProgressBar from './ProgressBar.vue'
+import { failureReason } from '../memoFailure'
 import { memoLabel } from '../memoLabel'
+import { useNewMemoFlash } from '../composables/useNewMemoFlash'
 import { useProcessingProgress } from '../composables/useProcessingProgress'
 
 /*
@@ -73,6 +75,68 @@ const waitingIds = computed(() => new Set(props.memos.filter(working).map((memo)
  * before it disappears.
  */
 watch(waitingIds, (ids) => forget(ids), { immediate: true, flush: 'post' })
+
+/*
+ * Going to the memo that was just added.
+ *
+ * The composable holds which id is new; this half owns the elements, because it is the only
+ * thing that has them -- and there are two of these strips on the screen, so a composable that
+ * scrolled would have to be told which one meant it. Here the question answers itself: a strip
+ * that is not rendering that memo has no element for it and does nothing.
+ */
+const { flashedId } = useNewMemoFlash()
+
+/** id -> the <li> rendering it, maintained by the template's ref callback. */
+const items = new Map()
+
+/**
+ * A function ref rather than one array ref, because what is wanted is a lookup by id and an
+ * array would have to be indexed by position -- which changes on every prepend, which is
+ * exactly the operation this feature exists for.
+ *
+ * Vue calls this with null when the element goes away, which is what keeps the Map from holding
+ * detached nodes for every memo that has ever scrolled off.
+ */
+function keepItem(id, el) {
+  if (el === null) {
+    items.delete(id)
+  } else {
+    items.set(id, el)
+  }
+}
+
+/**
+ * Bring the new card into view, both ways at once.
+ *
+ * `scrollIntoView` walks every scrollable ancestor, which is the whole reason it is used
+ * instead of setting `scrollLeft`: the card is inside a strip that scrolls sideways, inside a
+ * page that scrolls down, and the requirement is that it is reached from wherever the reader
+ * happens to be -- including the bottom of the collections grid. One call does both axes.
+ *
+ * `block: 'nearest'` and not 'center', so a strip already on screen does not jump. The vertical
+ * scroll only happens when it is genuinely needed; the horizontal one always does, because
+ * `inline: 'start'` on the first card means "go back to the beginning of the strip".
+ *
+ * `flush: 'post'` plus a nextTick: the id is set in the same tick as the prepend, so the
+ * element does not exist yet when this fires. Post gets it after the patch; the nextTick covers
+ * the case where the row is rendered by a subsequent one -- a load() landing at the same moment.
+ */
+watch(flashedId, async (id) => {
+  if (id === null) {
+    return
+  }
+
+  await nextTick()
+
+  items.get(id)?.scrollIntoView({
+    // Honouring the setting here rather than in CSS, because `scroll-behavior: smooth` on the
+    // container would also apply to the browser's own scroll restoration and to anchor
+    // navigation. This is the one scroll the app performs on its own.
+    behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+    block: 'nearest',
+    inline: 'start',
+  })
+}, { flush: 'post' })
 
 /**
  * What the card says it is doing, from the status rather than from the bar.
@@ -165,13 +229,27 @@ function shortCreated(iso) {
     aria-label="Scrollable memo list"
   >
     <ul class="strip__track">
-      <li v-for="memo in memos" :key="memo.id" class="strip__item">
+      <li
+        v-for="memo in memos"
+        :key="memo.id"
+        :ref="(el) => keepItem(memo.id, el)"
+        class="strip__item"
+      >
         <!--
           The whole card is one button, not a div with a click handler. It is an action -- it
           opens the detail card -- so it has to be focusable, activate on Enter and Space, and
           be announced as a control. A div with @click does none of those.
+
+          `memo-card--new` is on the button rather than the <li> because it animates the
+          border, and the button is what has one. It comes off on its own after a couple of
+          seconds -- see useNewMemoFlash.
         -->
-        <button type="button" class="memo-card" @click="emit('open', memo)">
+        <button
+          type="button"
+          class="memo-card"
+          :class="{ 'memo-card--new': memo.id === flashedId }"
+          @click="emit('open', memo)"
+        >
           <span class="memo-card__top">
             <span class="badge" :class="`badge--${memo.status}`">{{ memo.status }}</span>
 
@@ -188,24 +266,40 @@ function shortCreated(iso) {
           <!--
             The brief label. memoLabel picks the best short thing the memo has -- its enriched
             title once there is one, and something honest about the wait before that.
+
+            The inner span is not decoration: the clamp only works on an element that is not a
+            flex item, and this card is a flex container. See `.clamp` in styles.css.
           -->
-          <span class="memo-card__title">{{ memoLabel(memo) }}</span>
+          <span class="memo-card__title"><span class="clamp clamp--2">{{ memoLabel(memo) }}</span></span>
 
           <!--
             The transcript preview is clamped to a few lines in CSS rather than truncated
             here, so the card shows as much as fits at whatever width the screen gives it.
           -->
-          <span v-if="memo.transcript" class="memo-card__preview">{{ memo.transcript }}</span>
+          <span v-if="memo.transcript" class="memo-card__preview"
+            ><span class="clamp clamp--3">{{ memo.transcript }}</span></span
+          >
 
           <!--
             A memo still being worked on gets the wait instead of "No transcript yet." — that
             sentence is a statement about a finished row, and under a running job it reads as a
-            result rather than as a wait. A failed one with no transcript still gets it,
-            because there it *is* the result.
+            result rather than as a wait.
           -->
           <span v-else-if="working(memo)" class="memo-card__preview memo-card__preview--empty">
             {{ waitLabel(memo.status) }}
           </span>
+
+          <!--
+            And a failed one gets the reason, which the row has been carrying all along. This
+            used to be "No transcript yet." as well, which is the third restatement of the
+            FAILED badge above it and tells somebody who recorded four seconds of silence
+            nothing they can act on. See memoFailure.js.
+          -->
+          <span
+            v-else-if="failureReason(memo)"
+            class="memo-card__preview memo-card__preview--failed"
+            ><span class="clamp clamp--3">{{ failureReason(memo) }}</span></span
+          >
 
           <span v-else class="memo-card__preview memo-card__preview--empty">
             No transcript yet.

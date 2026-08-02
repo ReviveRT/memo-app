@@ -6,7 +6,7 @@ import { useMemos } from '../composables/useMemos'
 import { useRecorder } from '../composables/useRecorder'
 
 /*
- * Record, stop, and how long it has been (MEMO-10).
+ * Record, submit, and how long it has been (MEMO-10).
  *
  * Above the textarea rather than below it, because this is what the app is for -- the
  * README's first line is "Record a voice memo or type one" -- and because the first
@@ -46,13 +46,21 @@ const elapsed = computed(() => formatElapsed(elapsedMs.value))
 const problem = computed(() => (recording.value ? null : (microphoneError.value ?? audioError.value)))
 
 /**
- * Stop, and send what came back.
+ * Stop the microphone, and send what came back.
+ *
+ * The button that calls this says **Submit**, not Stop, and the two words describe the
+ * same click from different ends of it. "Stop" names what happens to the microphone;
+ * "Submit" names what happens to the memo -- and the memo is the thing being decided
+ * about. Beside a Discard button, "Stop" also reads as the neutral of the pair, as
+ * though the recording then sits somewhere waiting to be sent, when in fact this posts
+ * it. There is no third state, and the label now says which of the two buttons keeps
+ * the memo.
  *
  * A null result is not an error to report here: useRecorder resolves null when it has
  * already put the reason in `microphoneError`, or when the recording came back empty --
  * and it is the only thing that knows which.
  */
-async function onStop() {
+async function onSubmit() {
   const recorded = await stop()
 
   if (recorded === null) {
@@ -120,14 +128,15 @@ function formatElapsed(ms) {
     </button>
 
     <template v-else>
-      <button :id="CLOUD_ANCHOR_ID" type="button" @click="onStop">Stop</button>
+      <button :id="CLOUD_ANCHOR_ID" type="button" @click="onSubmit">Submit</button>
 
       <!--
         Throwing the recording away is a separate button rather than a confirmation on
-        Stop, because Stop is the common case and should cost one click. This one keeps
-        a mis-started recording from having to be uploaded and then lived with -- there
-        is no delete yet (nothing owns it before MEMO-17), so before the POST is the
-        only moment a recording can be reconsidered.
+        Submit, because submitting is the common case and should cost one click. This one
+        keeps a mis-started recording from having to be uploaded and then dealt with
+        afterwards -- and it is still worth having now that a memo can be deleted, because
+        discarding never creates a row, never spends a worker on it, and never puts audio
+        on the volume.
       -->
       <button type="button" class="recorder__discard" @click="discard">Discard</button>
 
@@ -143,7 +152,7 @@ function formatElapsed(ms) {
     </template>
 
     <span v-if="!recording && !uploading" class="recorder__hint">
-      Speak a memo — it is transcribed after you stop.
+      Speak a memo — it is transcribed after you submit.
     </span>
   </section>
 

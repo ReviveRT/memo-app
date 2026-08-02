@@ -1,8 +1,10 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import ReminderFields from './ReminderFields.vue'
+import { failureReason } from '../memoFailure'
 import { memoLabel } from '../memoLabel'
 import { useCollections } from '../composables/useCollections'
+import { ask } from '../composables/useConfirm'
 import { useMemos } from '../composables/useMemos'
 import { refreshReminders } from '../composables/useReminders'
 
@@ -24,10 +26,40 @@ const props = defineProps({
 
 const emit = defineEmits(['close', 'changed'])
 
-const { moveMemo, dropReminder, memoError, working } = useMemos()
+/**
+ * Mirrors UpdateMemoRequest::MAX_TITLE_LENGTH in the API, the way MemoComposer mirrors the
+ * text cap: two runtimes cannot share a constant, so the number is repeated with a note
+ * saying where the other copy is. The server stays authoritative -- if these disagree, its
+ * 422 lands in the same error slot as everything else this card can fail with.
+ *
+ * Unlike the composer's cap this one *is* on the input as `maxlength`, and the difference is
+ * what the field holds. Truncating a pasted memo would silently throw away what somebody
+ * wrote; a title is a label being typed, and 200 characters is far past where anyone stops.
+ */
+const MAX_TITLE_LENGTH = 200
+
+const { moveMemo, rename, remove, dropReminder, memoError, working } = useMemos()
 const { collections } = useCollections()
 
 const dialogEl = ref(null)
+
+/**
+ * Whether the title is being edited, and the text of it.
+ *
+ * An explicit edit mode rather than a permanently editable field, because the title is also
+ * the dialog's heading -- an input sitting where an <h2> belongs makes the card read as a form
+ * about a memo instead of as the memo. It also matters that the *displayed* label and the
+ * *stored* title are different things: memoLabel falls back to the transcript's first line
+ * when there is no title, so a field pre-filled with what the heading shows would silently
+ * promote that fallback into a real stored title the first time anybody pressed Save.
+ * `draft` is seeded from `memo.title` alone for that reason.
+ */
+const renaming = ref(false)
+const draft = ref('')
+const titleEl = ref(null)
+
+/** The collection chosen in the select, which is not applied until Move is pressed. */
+const chosenCollection = ref('')
 
 /**
  * Open and close the real dialog when the prop changes.
@@ -43,6 +75,12 @@ const dialogEl = ref(null)
 watch(
   () => props.memo,
   (memo) => {
+    // Reset both controls whenever the dialog is pointed at a different memo. Without this,
+    // clicking a second card while the first is being renamed leaves the previous memo's draft
+    // in the field, over the new memo's heading, one keystroke from being saved onto it.
+    renaming.value = false
+    chosenCollection.value = memo?.collection_id ?? ''
+
     const el = dialogEl.value
 
     if (!el) {
@@ -91,14 +129,46 @@ function longDate(iso) {
 }
 
 /**
- * File this memo somewhere, or unfile it.
+ * Whether the select is pointing somewhere other than where the memo already is.
+ *
+ * What the Move button is enabled by, and the reason the select alone was not enough of a
+ * control. It used to apply on `@change`, which made it a switch that quietly rewrote the memo
+ * as a side effect of looking through the list -- keyboard users move through a `<select>`'s
+ * options with the arrow keys, so *every option passed over* was a write. There was also
+ * nothing on the screen that said what it did or that it had done it.
+ */
+const canMove = computed(
+  () => props.memo !== null && chosenCollection.value !== (props.memo.collection_id ?? ''),
+)
+
+/** What the Move button will do, said out loud, so the button is not a mystery. */
+const moveLabel = computed(() => {
+  if (!canMove.value) {
+    return filedIn.value === null ? 'Not in a collection' : `In ${filedIn.value.name}`
+  }
+
+  if (chosenCollection.value === '') {
+    return 'Take out of the collection'
+  }
+
+  const target = collections.value.find((one) => one.id === chosenCollection.value)
+
+  return target ? `Move to ${target.name}` : 'Move'
+})
+
+/**
+ * File this memo somewhere, or unfile it -- on an explicit press.
  *
  * The select's empty value is the fast strip, which is why the value is normalised to null
  * rather than passed through: `<option value="">` yields '' and the API wants an explicit
  * null to mean "take it out of its collection".
  */
-async function move(value) {
-  const updated = await moveMemo(props.memo, value === '' ? null : value)
+async function move() {
+  if (!canMove.value) {
+    return
+  }
+
+  const updated = await moveMemo(props.memo, chosenCollection.value === '' ? null : chosenCollection.value)
 
   if (updated !== null) {
     // The grid's counts and the strip's membership both changed. The parent owns both, so it
@@ -107,7 +177,111 @@ async function move(value) {
   }
 }
 
-async function remove(reminderId) {
+/**
+ * Escape: cancel the rename if one is open, otherwise close the card.
+ *
+ * **One keypress was doing both.** The rename field had `@keydown.esc="renaming = false"`,
+ * which cancelled the edit -- and then the keypress went on to be the browser's close request
+ * for the <dialog>, so the whole memo card shut as well. Reproduced in a browser: one Escape,
+ * field gone *and* dialog gone, when the only thing being escaped from was the field.
+ *
+ * Handled on the dialog's own `cancel` event rather than as a keydown on the input, and that
+ * is the difference between fixing it here and fixing it in one place where it can be pressed.
+ * `cancel` is what the close request fires, it is cancelable, and it arrives no matter which
+ * control inside the dialog has focus -- so Escape from the Save button does the same thing as
+ * Escape from the field. A keydown handler on the input would have covered one of the three.
+ *
+ * When nothing is being renamed this does nothing and the dialog closes, which is the
+ * behaviour the component was built with: there is nothing else in here to lose.
+ */
+function onCancelRequest(event) {
+  if (!renaming.value) {
+    return
+  }
+
+  event.preventDefault()
+  renaming.value = false
+}
+
+/** Start renaming, with whatever title is stored -- not the fallback the heading is showing. */
+async function startRename() {
+  draft.value = props.memo?.title ?? ''
+  renaming.value = true
+
+  // After the field exists. `autofocus` only applies on page load and does nothing for an
+  // element revealed by a click.
+  await nextTick()
+  titleEl.value?.select()
+}
+
+/**
+ * Save the new title. An empty field clears it rather than being refused.
+ *
+ * Clearing is a real operation: the title is generated, and an owner who disagrees with the
+ * guess may want the memo to fall back to its own first line rather than to a different guess.
+ * The API takes null for exactly that, and this is where '' becomes null.
+ */
+async function saveRename() {
+  const next = draft.value.trim()
+
+  if ((await rename(props.memo, next === '' ? null : next)) !== null) {
+    renaming.value = false
+  }
+
+  // Left open on failure, with the message underneath, so the text is still there to retry.
+}
+
+/**
+ * Delete, after asking.
+ *
+ * **The wording names what else goes, which is the reason this is not a bare "Are you sure?".**
+ * A memo is not only its transcript -- deleting one takes the recording off the volume and
+ * cascades its reminders -- and none of that is visible from the card. Left to guess, a careful
+ * person assumes the worst of the possibilities and does not press it.
+ *
+ * The question and the consequence are two arguments rather than one sentence, so the dialog
+ * can set them as a heading and a line under it. That is one of the things `window.confirm`
+ * could not do, and it is why this now goes through useConfirm.
+ */
+async function confirmDelete() {
+  const alarms = upcoming.value.length + past.value.length
+  const extra = [
+    props.memo?.source === 'voice' ? 'the recording' : null,
+    alarms === 1 ? '1 reminder' : alarms > 1 ? `${alarms} reminders` : null,
+  ].filter(Boolean)
+
+  const agreed = await ask({
+    title: `Delete “${memoLabel(props.memo)}”?`,
+    body: [
+      extra.length ? `This also removes ${extra.join(' and ')}.` : null,
+      'It cannot be undone.',
+    ]
+      .filter(Boolean)
+      .join(' '),
+    confirmLabel: 'Delete memo',
+    danger: true,
+  })
+
+  if (!agreed) {
+    return
+  }
+
+  if ((await remove(props.memo)) !== null) {
+    // Closed first: the dialog is rendering a memo that no longer exists, and `changed` makes
+    // the parent reload the collections grid, whose counts have just dropped by one.
+    emit('close')
+    emit('changed')
+  }
+}
+
+/**
+ * Drop one reminder.
+ *
+ * Named for what it removes rather than just `remove`, which is now taken by the memo delete
+ * imported above -- and which would be a confusing pair of names on one component even if the
+ * compiler allowed it.
+ */
+async function removeReminder(reminderId) {
   if ((await dropReminder(props.memo, reminderId)) !== null) {
     // So the delivery loop stops counting on a reminder that no longer exists, rather than
     // finding out up to a minute later.
@@ -124,19 +298,69 @@ async function remove(reminderId) {
     than only to the button is what keeps the parent's state in step when the dialog is
     dismissed by a route the parent did not initiate.
 
-    @cancel.prevent is deliberately *not* used: Escape should close this. There is nothing
-    here that would be lost -- the reminder form is the only input, and re-opening the memo
-    gets back to it in one click.
+    @cancel is handled rather than left alone, but only conditionally -- Escape still closes
+    this card, except while the title is being renamed, where it belongs to the edit that is
+    open. See onCancelRequest for the bug that came of not doing it here. Nothing else in the
+    dialog would be lost to a close: the reminder form is the only other input, and re-opening
+    the memo gets back to it in one click.
 
     The backdrop click is handled by comparing the event target to the dialog itself, which is
     the standard trick: clicks on ::backdrop report the <dialog> as their target, while clicks
     on anything inside report that child.
   -->
-  <dialog ref="dialogEl" class="sheet" @close="emit('close')" @click="$event.target === dialogEl && emit('close')">
+  <dialog
+    ref="dialogEl"
+    class="sheet"
+    @cancel="onCancelRequest"
+    @close="emit('close')"
+    @click="$event.target === dialogEl && emit('close')"
+  >
     <article v-if="memo" class="sheet__body">
       <header class="sheet__head">
-        <div>
-          <h2 class="sheet__title">{{ memoLabel(memo) }}</h2>
+        <div class="sheet__heading">
+          <!--
+            The title is the heading, and the heading is editable — but only once asked. See
+            `renaming` for why the field is not simply always there, and why its initial value
+            is `memo.title` rather than the heading's own text.
+          -->
+          <form v-if="renaming" class="sheet__rename" @submit.prevent="saveRename">
+            <label class="sheet__rename-field">
+              <span class="sr-only">Memo title</span>
+              <input
+                ref="titleEl"
+                v-model="draft"
+                type="text"
+                :maxlength="MAX_TITLE_LENGTH"
+                placeholder="Give this memo a name…"
+                :disabled="working"
+              />
+            </label>
+
+            <button type="submit" :disabled="working">Save</button>
+            <button type="button" class="ghost" :disabled="working" @click="renaming = false">
+              Cancel
+            </button>
+          </form>
+
+          <template v-else>
+            <h2 class="sheet__title">{{ memoLabel(memo) }}</h2>
+
+            <!--
+              Beside the title rather than in a menu, because a generated title is wrong often
+              enough that renaming is an ordinary thing to do rather than an advanced one.
+              aria-label carries the memo's name so a screen reader hears which memo this
+              renames when it is reached out of context.
+            -->
+            <button
+              type="button"
+              class="ghost sheet__rename-open"
+              :disabled="working"
+              :aria-label="`Rename ${memoLabel(memo)}`"
+              @click="startRename"
+            >
+              Rename
+            </button>
+          </template>
 
           <p class="sheet__meta">
             <span class="badge" :class="`badge--${memo.status}`">{{ memo.status }}</span>
@@ -164,14 +388,28 @@ async function remove(reminderId) {
         -->
         <p v-if="memo.transcript" class="sheet__transcript">{{ memo.transcript }}</p>
 
+        <p v-else-if="failureReason(memo)" class="sheet__transcript sheet__transcript--failed">
+          {{ failureReason(memo) }}
+        </p>
+
         <p v-else class="sheet__transcript sheet__transcript--empty">
-          {{
-            memo.status === 'failed'
-              ? 'This recording could not be transcribed.'
-              : 'Still being transcribed — this card will fill in on its own.'
-          }}
+          Still being transcribed — this card will fill in on its own.
         </p>
       </section>
+
+      <!--
+        A memo that failed *after* producing text -- a retry that got a transcript and then hit
+        something else, which MEMO-16's retry path makes reachable. The reason goes under the
+        transcript rather than replacing it, because both are true and the transcript is the
+        part worth keeping.
+      -->
+      <p
+        v-if="memo.transcript && failureReason(memo)"
+        class="notice notice--error"
+        role="status"
+      >
+        {{ failureReason(memo) }}
+      </p>
 
       <section v-if="memo.tags?.length" class="sheet__section">
         <h3 class="sheet__label">Tags</h3>
@@ -191,26 +429,41 @@ async function remove(reminderId) {
         <h3 class="sheet__label">Collection</h3>
 
         <!--
-          A <select> rather than a list of buttons, because this is a single choice among a
-          set that grows, and it is the control that already handles a long list on every
-          platform including a phone.
+          A select *and* a button, where there used to be a select that applied on change.
+
+          The old control was the whole of "move this memo" and did not look like anything: no
+          verb, no confirmation, and no way to look through the list without committing to each
+          option on the way past — arrow-keying through a <select> fires `change` on every one,
+          so a keyboard user filed the memo into four collections in a row to reach the fifth.
+          It read as decorative because nothing about it said it was a control that did
+          something, and then it did something without being asked.
+
+          Now choosing is inert and the button is the action, with the destination in its label
+          so it says what will happen before it happens. Disabled when the choice is where the
+          memo already is, where it would be a no-op — and it then shows where that is, so the
+          disabled state answers a question rather than just refusing.
+
+          Still a <select> rather than a list of buttons: it is a single choice from a set that
+          grows, and it is the control that already handles a long list on every platform
+          including a phone.
         -->
-        <label class="sheet__field">
-          <span class="sr-only">Move this memo to a collection</span>
+        <div class="sheet__move">
+          <label class="sheet__field">
+            <span class="sr-only">Choose a collection for this memo</span>
 
-          <select
-            class="sheet__select"
-            :value="memo.collection_id ?? ''"
-            :disabled="working"
-            @change="move($event.target.value)"
-          >
-            <option value="">Fast memos (no collection)</option>
+            <select v-model="chosenCollection" class="sheet__select" :disabled="working">
+              <option value="">Fast memos (no collection)</option>
 
-            <option v-for="one in collections" :key="one.id" :value="one.id">
-              {{ one.name }}
-            </option>
-          </select>
-        </label>
+              <option v-for="one in collections" :key="one.id" :value="one.id">
+                {{ one.name }}
+              </option>
+            </select>
+          </label>
+
+          <button type="button" :disabled="working || !canMove" @click="move">
+            {{ moveLabel }}
+          </button>
+        </div>
 
         <p v-if="memo.collection_id && !filedIn" class="sheet__hint">
           Filed in a collection this page has not loaded.
@@ -234,7 +487,7 @@ async function remove(reminderId) {
               type="button"
               class="reminders__drop"
               :disabled="working"
-              @click="remove(reminder.id)"
+              @click="removeReminder(reminder.id)"
             >
               Remove
             </button>
@@ -272,7 +525,7 @@ async function remove(reminderId) {
                 type="button"
                 class="reminders__drop"
                 :disabled="working"
-                @click="remove(reminder.id)"
+                @click="removeReminder(reminder.id)"
               >
                 Remove
               </button>
@@ -280,6 +533,26 @@ async function remove(reminderId) {
           </ul>
         </details>
       </section>
+
+      <!--
+        Last, and on its own row, because it is the one thing on this card that cannot be
+        undone. Everything above it is a change; this ends the memo. Putting it beside Rename
+        in the header would make the two look like a pair of equally ordinary edits, and it is
+        two pixels from the control somebody reaches for most.
+
+        A ghost button rather than a filled red one: it should be findable and not inviting.
+        The confirmation names what else goes with it — see confirmDelete.
+      -->
+      <footer class="sheet__foot">
+        <button
+          type="button"
+          class="ghost ghost--danger"
+          :disabled="working"
+          @click="confirmDelete"
+        >
+          Delete memo
+        </button>
+      </footer>
 
       <!--
         One error slot for every write this card can make. useMemos has the argument for why

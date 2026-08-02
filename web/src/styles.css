@@ -19,6 +19,19 @@
   --error: #b3261e;
   --error-bg: #fdecea;
 
+  /*
+   * The legibility halo every piece of text sitting directly on the bloom gets.
+   *
+   * A custom property rather than a repeated declaration, because two places need it and one
+   * of them needs it *plus* something else -- text-shadow does not compose across rules, so
+   * the landing title would otherwise have to restate these two layers to add a third, and
+   * the copies would drift. `var(--bg)` inside it resolves where it is used, so the dark
+   * scheme's override below is picked up without a second definition here.
+   */
+  --text-halo:
+    0 1px 2px color-mix(in srgb, var(--bg) 82%, transparent),
+    0 2px 14px color-mix(in srgb, var(--bg) 70%, transparent);
+
   color-scheme: light dark;
 }
 
@@ -112,10 +125,7 @@ button {
   cursor: pointer;
 }
 
-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
+/* Disabled buttons are styled at the very bottom of this file, and the note there says why. */
 
 .app__header button {
   background: transparent;
@@ -244,11 +254,11 @@ button:disabled {
  * `.notice--error` is excluded because it brings its own background.
  *
  * The two button selectors are here for a reason that is easy to miss: they are the
- * *ghost* buttons -- Refresh, Discard, Clear -- and `background: transparent` means
- * the cloud shows straight through them. Discard is the worst case on the page,
- * because it only exists while recording and sits immediately beside the core; at
- * peak loudness its label washes out completely. A filled button like Record brings
- * its own background and is excluded by these selectors naturally.
+ * *ghost* buttons -- Refresh and Discard -- and `background: transparent` means the
+ * cloud shows straight through them. Discard is the worst case on the page, because
+ * it only exists while recording and sits immediately beside the core; at peak
+ * loudness its label washes out completely. A filled button like Record brings its
+ * own background and is excluded by these selectors naturally.
  *
  * In the page's own background colour rather than black, so it reads as the page
  * showing through in the light scheme instead of as a drop shadow.
@@ -257,29 +267,23 @@ h1,
 .recorder__hint,
 .recorder__elapsed,
 .composer__hint,
-.search__status,
 .notice:not(.notice--error),
 .app__header button,
 .recorder__discard,
-.search__clear,
 
 /*
- * The landing page's own four, added when it arrived. It is the worst case on the site for
- * exactly the reason it is the best-looking screen: the bloom is centred behind the middle of
- * the viewport, and the title is centred in the middle of the viewport, so the largest text in
- * the app sits directly on the hot core rather than beside it. The scrim helps and does not
- * finish the job -- see its own note on why it is deliberately too weak to.
+ * The landing page's two lines are deliberately *not* in this list, even though they need the
+ * halo more than anything here does -- the bloom is centred behind the middle of the viewport
+ * and so are they, so the largest text in the app sits on the hot core rather than beside it.
+ * They declare `var(--text-halo)` themselves, in the landing section, because they add a drop
+ * shadow to it and `text-shadow` does not compose across rules. Listing them here as well
+ * would be a declaration that is always overridden: dead, and misleading to the next reader.
  */
-.landing__title,
-.landing__tagline,
-.landing__note,
 
-/* And the section furniture on the memos screen, which sits on the background like the rest. */
+/* The section furniture on the memos screen, which sits on the background like the rest. */
 .section__head h2,
 .section__hint {
-  text-shadow:
-    0 1px 2px color-mix(in srgb, var(--bg) 82%, transparent),
-    0 2px 14px color-mix(in srgb, var(--bg) 70%, transparent);
+  text-shadow: var(--text-halo);
 }
 
 /* --- recorder -------------------------------------------------------------- */
@@ -363,60 +367,17 @@ h1,
   font-size: 0.8rem;
 }
 
-/* --- search ---------------------------------------------------------------- */
-
-.search {
-  display: flex;
-  gap: 0.5rem;
-  margin: 1.25rem 0 0.5rem;
-}
-
-.search__input {
-  flex: 1;
-  min-width: 0;
-  padding: 0.55rem 0.75rem;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  color: inherit;
-  font: inherit;
-}
+/* --- notices --------------------------------------------------------------- */
 
 /*
- * WebKit's own clear affordance for type="search", hidden because the Clear button next to
- * it does the same job on every browser and two clear controls side by side read as one of
- * them being broken.
+ * The quoted query in an empty state. Not bold -- <strong> is here because the emphasis is
+ * semantic, and at this size a weight change on somebody's search term is louder than the
+ * sentence around it.
  */
-.search__input::-webkit-search-cancel-button {
-  appearance: none;
-}
-
-.search__clear {
-  flex: none;
-  background: transparent;
-  border-color: var(--border);
-  color: var(--text);
-  font-weight: 400;
-}
-
-.search__status {
-  margin: 0 0 0.75rem;
-  color: var(--muted);
-  font-size: 0.85rem;
-}
-
-/*
- * The quoted query, in both the status line and the empty state. Not bold -- <strong> is
- * here for the emphasis being semantic, and at this size a weight change on somebody's
- * search term is louder than the sentence around it.
- */
-.search__status strong,
 .notice strong {
   font-weight: 400;
   color: var(--text);
 }
-
-/* --- notices --------------------------------------------------------------- */
 
 .notice {
   margin: 0.75rem 0;
@@ -430,55 +391,12 @@ h1,
   color: var(--error);
 }
 
-/* --- memo list ------------------------------------------------------------- */
+/* --- badges and tags -------------------------------------------------------- */
 
-.memos,
 .tags {
   margin: 0;
   padding: 0;
   list-style: none;
-}
-
-.memos {
-  display: grid;
-  gap: 0.75rem;
-}
-
-.memo {
-  padding: 0.9rem 1rem;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-}
-
-.memo__meta {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  color: var(--muted);
-  font-size: 0.8rem;
-}
-
-.memo__title {
-  margin: 0.5rem 0 0;
-  font-size: 1.05rem;
-}
-
-.memo__summary {
-  margin: 0.4rem 0 0;
-  color: var(--muted);
-}
-
-.memo__transcript {
-  margin: 0.5rem 0 0;
-  /* The newlines somebody typed into the textarea are part of the memo. */
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.memo__transcript--empty {
-  color: var(--muted);
-  font-style: italic;
 }
 
 .badge {
@@ -613,18 +531,6 @@ h1,
   margin-top: 0.75rem;
 }
 
-.memo__working {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  margin: 0.5rem 0 0;
-}
-
-.memo__working-label {
-  color: var(--muted);
-  font-size: 0.9rem;
-}
-
 /* --- landing ---------------------------------------------------------------- */
 
 /*
@@ -667,6 +573,27 @@ h1,
  * continuously: 2.5rem on a phone, 4.5rem on a desktop, and everything between without a step
  * at some arbitrary breakpoint.
  */
+/*
+ * The drop shadow both lines take on top of the halo defined with the palette.
+ *
+ * Two different jobs, which is why it is two declarations and not one. The halo is the *page
+ * colour*, spread wide and soft: it holds the letterforms apart from whatever the bloom is
+ * doing behind them, and it works precisely because it matches the background. A drop shadow
+ * is dark and offset downward, and what it buys is depth -- the text reads as sitting in
+ * front of the light rather than being painted onto it.
+ *
+ * Black in both schemes, at an alpha low enough that the light one reads as a soft grounding
+ * rather than as a second, blurry copy of the words. Two layers: a tight one that defines the
+ * edge and a wide one that carries the weight.
+ */
+.landing__title,
+.landing__subtitle {
+  text-shadow:
+    var(--text-halo),
+    0 2px 4px rgba(0, 0, 0, 0.28),
+    0 10px 30px rgba(0, 0, 0, 0.4);
+}
+
 .landing__title {
   margin: 0;
   font-size: clamp(2.5rem, 8vw, 4.5rem);
@@ -674,11 +601,21 @@ h1,
   letter-spacing: -0.02em;
 }
 
-.landing__tagline {
-  margin: 1.25rem auto 0;
-  max-width: 30rem;
-  color: var(--muted);
-  font-size: 1.05rem;
+/*
+ * One line, under the title, saying what the app is.
+ *
+ * Sized off the title with `clamp` for the same reason it is: there is one value and it should
+ * scale continuously rather than step at a breakpoint. Kept well below the title so the two
+ * read as a heading and its line rather than as two headings, and in the full text colour
+ * rather than `--muted` -- muted grey over a magenta bloom is the one combination on this
+ * screen with nothing to hold it up.
+ */
+.landing__subtitle {
+  margin: 0.85rem 0 0;
+  font-size: clamp(1rem, 2.2vw, 1.25rem);
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  opacity: 0.92;
 }
 
 /*
@@ -697,17 +634,64 @@ h1,
   font-size: 1.05rem;
   font-weight: 600;
   text-decoration: none;
+
+  /*
+   * Three layers, and each is doing something the others cannot.
+   *
+   * The accent glow is what makes the button belong to the light behind it rather than being
+   * a shape stuck on top of it -- it is the bloom's own colour, spilling out of the control
+   * the bloom is anchored to. The dark shadow underneath it is what lifts the button off the
+   * page; a coloured glow alone reads as emission, not as height. And the inset highlight
+   * along the top edge is the last percent: a flat fill with a shadow under it still looks
+   * flat, and one hairline of lighter colour at the top is what makes it a surface.
+   *
+   * Transitioned with the transform below, so the hover lift is one movement rather than a
+   * colour change and a jump.
+   */
+  box-shadow:
+    0 12px 32px color-mix(in srgb, var(--accent) 42%, transparent),
+    0 4px 12px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 color-mix(in srgb, #fff 28%, transparent);
+  transition:
+    box-shadow 160ms ease-out,
+    transform 160ms ease-out,
+    background 160ms ease-out;
 }
 
 .landing__cta:hover {
   /* Toward the text colour in both schemes, so one rule serves light and dark. */
   background: color-mix(in srgb, var(--accent) 88%, var(--text));
+
+  /* A pixel of lift, and the shadow grows to match it. Two pixels reads as a bounce. */
+  transform: translateY(-1px);
+  box-shadow:
+    0 16px 40px color-mix(in srgb, var(--accent) 52%, transparent),
+    0 6px 16px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 color-mix(in srgb, #fff 34%, transparent);
 }
 
-.landing__note {
-  margin: 1.5rem 0 0;
-  color: var(--muted);
-  font-size: 0.85rem;
+.landing__cta:active {
+  /* Back down, and the shadow with it, so the press has somewhere to go. */
+  transform: translateY(0);
+  box-shadow:
+    0 6px 18px color-mix(in srgb, var(--accent) 38%, transparent),
+    0 2px 6px rgba(0, 0, 0, 0.3);
+}
+
+/*
+ * The lift is motion, so it goes when motion is declined. The shadows stay: they are depth
+ * rather than movement, and removing them would answer a request about animation by changing
+ * the design -- the same line MemoBackdrop draws for the bloom.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .landing__cta {
+    transition: none;
+  }
+
+  .landing__cta:hover,
+  .landing__cta:active {
+    transform: none;
+  }
 }
 
 /* --- sections --------------------------------------------------------------- */
@@ -919,6 +903,51 @@ h1,
   border-color: var(--accent);
 }
 
+/*
+ * The card that was just added, pulsing so it is found rather than searched for.
+ *
+ * Six half-beats of 400ms with `alternate` -- three pulses out and back, 2400ms in all, which
+ * has to equal FLASH_MS in useNewMemoFlash. That module removes the class, so a longer
+ * animation would be cut off mid-fade and a shorter one would leave a static accent border
+ * sitting there afterwards. There is nowhere a stylesheet and a module can share one number, so
+ * each names the other.
+ *
+ * An even iteration count is what makes it end where it started: with `alternate`, the last
+ * half-beat runs backwards and the card is left exactly like the un-pulsed ones beside it. An
+ * odd count would finish on the bright frame and then snap.
+ *
+ * Border *and* a glow rather than a background flash. A background change fights the card's own
+ * contrast and makes the text jump; the ring reads at a glance from across the page, which is
+ * the point -- the strip may have just been scrolled to it from the bottom of the grid.
+ */
+@keyframes memo-card-pulse {
+  from {
+    border-color: var(--border);
+    box-shadow: 0 0 0 0 transparent;
+  }
+  to {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+}
+
+.memo-card--new {
+  animation: memo-card-pulse 400ms ease-in-out 6 alternate;
+}
+
+/*
+ * Reduced motion keeps the marking and drops the movement. `animation: none` alone would leave
+ * the card indistinguishable from its neighbours, which loses the whole feature for the people
+ * most likely to have trouble spotting a change -- so it gets the ring, held still.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .memo-card--new {
+    animation: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+}
+
 .memo-card__top {
   display: flex;
   align-items: center;
@@ -935,16 +964,51 @@ h1,
   white-space: nowrap;
 }
 
+/*
+ * Cut text off after N lines, with an ellipsis.
+ *
+ * **A class of its own, on an element of its own, and that is the fix for a bug rather than a
+ * preference.** The clamp used to be declared directly on `.memo-card__title` and
+ * `.memo-card__preview`, and on neither of them did it do anything: both are children of
+ * `.memo-card`, which is `display: flex`, and **`-webkit-line-clamp` is ignored on a flex
+ * item**. Measured on the failure text, which is the longest thing either box ever holds: as a
+ * flex item, `-webkit-line-clamp: 3` left the element 76px tall -- four and a bit lines, the
+ * height `flex: 1` gave it -- and the same declaration on a plain in-flow child makes it 55px,
+ * which is three lines exactly. (The computed `display` is `flow-root` either way in current
+ * Chrome, so it is not the thing to look at; the height is.)
+ *
+ * So all that was ever cutting those boxes off was the `overflow: hidden` beside the clamp,
+ * which clips *mid-line*, with no ellipsis and nothing to say there was more.
+ *
+ * It went unnoticed because both places had something else that hid it: memoLabel() truncates
+ * a title to 60 characters in JavaScript and adds its own "…", and a transcript preview is
+ * usually short enough that three lines is all of it. A failed memo showing the worker's
+ * two-sentence explanation is neither, and it clipped visibly in the middle of a word.
+ *
+ * The prefixed property is the only one to use here. The unprefixed `line-clamp` that once sat
+ * beside it is a *shorthand* which also sets `continue: discard` -- a different mechanism with
+ * different layout effects -- and declaring both asks two engines to disagree.
+ */
+.clamp {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.clamp--2 {
+  -webkit-line-clamp: 2;
+}
+
+.clamp--3 {
+  -webkit-line-clamp: 3;
+}
+
 .memo-card__title {
   font-size: 0.98rem;
   font-weight: 600;
   line-height: 1.3;
 
-  /* Two lines, then an ellipsis. A title is a label; a third line makes it a paragraph. */
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  -webkit-box-orient: vertical;
+  /* A title is a label; a third line makes it a paragraph. The clamp is on the child. */
   overflow: hidden;
 }
 
@@ -956,18 +1020,25 @@ h1,
 
   /*
    * Clamped rather than truncated in JavaScript, so the card shows as much as fits at whatever
-   * width the screen gave it -- and so the full transcript is still in the DOM for find-in-page.
+   * width the screen gave it -- and so the full text is still in the DOM for find-in-page.
    */
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  line-clamp: 3;
-  -webkit-box-orient: vertical;
   overflow: hidden;
   overflow-wrap: anywhere;
 }
 
 .memo-card__preview--empty {
   font-style: italic;
+}
+
+/*
+ * The reason a memo failed, on the card.
+ *
+ * In the error colour rather than the muted one, because it is not a placeholder for a
+ * transcript -- it is the result. Upright rather than italic for the same reason: the italic
+ * on the line above means "there is nothing here yet", and this is something.
+ */
+.memo-card__preview--failed {
+  color: var(--error);
 }
 
 .memo-card__when {
@@ -1018,6 +1089,19 @@ h1,
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--surface);
+
+  /* The containing block for the name's stretched hit area below. */
+  position: relative;
+}
+
+/*
+ * The whole card responds, so it is clear the whole card is the target.
+ *
+ * Only the name is the control -- see below -- but a card that lights up as a unit and then
+ * only opens from one line of text in it is a card that has lied about where to click.
+ */
+.collection:hover {
+  border-color: var(--accent);
 }
 
 .collection__head {
@@ -1036,8 +1120,32 @@ h1,
   font-size: 1rem;
   font-weight: 600;
   text-align: left;
+
+  /* So the ::after below is positioned against the card rather than against the text. */
+  position: static;
 }
 
+/*
+ * The stretched hit area: the name button's own box, spread over the whole card.
+ *
+ * This is what makes clicking anywhere on the card open it while the *control* stays one real
+ * button. `position: static` above is the trick -- an absolutely positioned pseudo-element
+ * resolves against its nearest positioned ancestor, which is `.collection`, not the button.
+ *
+ * **No z-index, and it works because of paint order rather than in spite of it.** Positioned
+ * elements paint after non-positioned ones, in document order, so this pseudo-element would
+ * otherwise sit over the footer buttons and swallow Rename and Delete. Giving the footer
+ * `position: relative` puts it in the same layer, later in the document, so it paints on top —
+ * which keeps styles.css's "no rule needs a z-index" rule intact.
+ */
+.collection__name::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+
+.collection:hover .collection__name,
 .collection__name:hover {
   color: var(--accent);
   text-decoration: underline;
@@ -1074,7 +1182,12 @@ h1,
   font-style: italic;
 }
 
+/*
+ * `position: relative` with no offset and no z-index, purely to raise these above the name's
+ * stretched hit area. See `.collection__name::after` for why that is enough.
+ */
 .collection__actions {
+  position: relative;
   display: flex;
   gap: 0.4rem;
 }
@@ -1121,10 +1234,37 @@ h1,
 }
 
 .creator {
+  margin-bottom: 1rem;
+}
+
+/*
+ * A real <fieldset>, so the browser's own reset has to be undone: it ships with a border, a
+ * margin and asymmetric padding that no other box on this page has.
+ *
+ * It is a fieldset rather than a div because of the <legend>. The field inside used to carry
+ * an sr-only label and a placeholder, and it sits directly below a search input of the same
+ * width -- so the only thing distinguishing the two was text that vanishes as soon as either
+ * is typed into. A legend stays.
+ */
+.creator__group {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
-  margin-bottom: 1rem;
+  align-items: center;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.creator__legend {
+  /* `float: left` with a full-width sibling wrap is the one way to get a legend onto its own
+     line inside a flex fieldset -- a legend is not a flex item, so it does not take part in
+     the layout above and would otherwise sit inline with the input. */
+  float: left;
+  width: 100%;
+  padding: 0 0 0.35rem;
+  color: var(--muted);
+  font-size: 0.82rem;
 }
 
 .creator__field {
@@ -1192,9 +1332,71 @@ h1,
   gap: 1rem;
 }
 
+/*
+ * The heading block: the title, the Rename button beside it, and the badges under both.
+ *
+ * `min-width: 0` because it is a flex item holding text that can be long -- without it the
+ * heading refuses to shrink below its content and pushes the close button off the card.
+ */
+.sheet__heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
 .sheet__title {
   margin: 0;
   font-size: 1.2rem;
+
+  /* Wraps rather than overflowing: a title is up to 200 characters and this is a heading. */
+  overflow-wrap: anywhere;
+}
+
+/*
+ * Always visible, and that is a reversal worth recording.
+ *
+ * It was first written to appear on `:hover` and `:focus-within`, so the heading would read as
+ * a heading rather than as a heading with a button stuck to it. That is the usual instinct for
+ * a secondary action and it is the wrong one here: this control exists *because* nobody could
+ * find how to change a memo's title, and an affordance you have to hover over to discover is
+ * the same problem in a tidier costume. A little visual noise beside the heading is the price
+ * of the button being the answer to "can I rename this?" rather than another place to look.
+ *
+ * Quiet rather than hidden: `.ghost` already makes it unfilled and muted, so it sits below the
+ * title in the reading order without disappearing from it.
+ */
+.sheet__rename-open {
+  flex: none;
+}
+
+.sheet__rename {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  width: 100%;
+}
+
+.sheet__rename-field {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+.sheet__rename-field input {
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+  font-size: 1.1rem;
+}
+
+.sheet__rename button {
+  padding: 0.35rem 0.7rem;
+  font-size: 0.85rem;
 }
 
 .sheet__meta {
@@ -1205,6 +1407,10 @@ h1,
   margin: 0.4rem 0 0;
   color: var(--muted);
   font-size: 0.8rem;
+
+  /* A full-width flex item, so the badges always land on their own line under the title
+     rather than trailing after the Rename button when the title happens to be short. */
+  flex: 0 0 100%;
 }
 
 .sheet__close {
@@ -1246,6 +1452,35 @@ h1,
   font-style: italic;
 }
 
+/* The reason, standing where the transcript would have been. See .memo-card__preview--failed. */
+.sheet__transcript--failed {
+  color: var(--error);
+}
+
+/*
+ * The picker and the button that applies it, on one row.
+ *
+ * The button is `flex: none` so its label -- which carries the destination's name, and so is as
+ * long as the collection is called -- takes the width it needs and the select gives up the
+ * rest. The other way round, a collection called "Everything from the Tuesday planning
+ * meeting" would wrap the button to two lines beside a select with room to spare.
+ */
+.sheet__move {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.sheet__move .sheet__field {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.sheet__move button {
+  flex: none;
+}
+
 .sheet__select {
   width: 100%;
   padding: 0.5rem 0.6rem;
@@ -1270,6 +1505,117 @@ h1,
 
 .sheet__past summary {
   cursor: pointer;
+}
+
+/*
+ * The destructive action, alone at the bottom behind a rule.
+ *
+ * Right-aligned and separated rather than sitting flush with the reminders above it, because
+ * the separation is the whole point: it is the one control on this card that cannot be undone,
+ * and it should not read as the next item in a list of edits.
+ */
+.sheet__foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+/* --- the confirm dialog ------------------------------------------------------ */
+
+/*
+ * Narrower than a sheet, and centred the same way. It holds one question and two buttons, and
+ * a box the width of the memo card would make that look like a page with something missing.
+ *
+ * Its own class rather than `.sheet` with a modifier: the sheets are scrollable panels of
+ * content with a close button in the corner, and this is a prompt. Sharing the class would
+ * mean overriding the padding, the max-height, the overflow and the header layout to get here.
+ */
+.confirm {
+  width: min(24rem, calc(100vw - 2rem));
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--text);
+
+  /* It sits over an already-dimmed sheet, so it needs more lift than one to read as above it. */
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+
+  /*
+   * Bounded and scrollable, like the sheets. The question quotes the memo's title, and a
+   * title may be 200 characters -- eight lines in a 24rem box, plus the consequence and
+   * the buttons. On a short viewport that overflows, and a <dialog> that overflows puts
+   * its buttons off the bottom of the screen with no way to reach them.
+   */
+  max-height: min(80svh, 30rem);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+/*
+ * Dimmer than the sheets' backdrop and blurred a little harder, because this one is often
+ * layered *over* a sheet: two identical scrims stack into a wash where neither layer reads as
+ * being in front. Backdrops do not compose, so this is the second one and has to do more.
+ */
+.confirm::backdrop {
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  backdrop-filter: blur(4px);
+}
+
+.confirm__body {
+  padding: 1.25rem;
+}
+
+.confirm__title {
+  margin: 0;
+  font-size: 1.05rem;
+  line-height: 1.35;
+}
+
+.confirm__note {
+  margin: 0.5rem 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+/*
+ * `row-reverse`, so Cancel is first in the DOM and last on the screen.
+ *
+ * The DOM order is the accessibility order -- Tab and a screen reader both reach the safe
+ * option first -- and the visual order is the platform convention, primary action on the
+ * right. They disagree here on purpose; ConfirmDialog says the same thing from its side.
+ */
+.confirm__actions {
+  display: flex;
+  flex-direction: row-reverse;
+  gap: 0.5rem;
+  margin-top: 1.25rem;
+}
+
+/*
+ * The confirming button is filled, and red when what it confirms cannot be undone.
+ *
+ * This is the thing `window.confirm` could not do: its two buttons are the browser's, in the
+ * browser's colours, and nothing about them says which one destroys something.
+ */
+.confirm__go {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.confirm__go--danger {
+  background: var(--error);
+
+  /* The error colour is a light red in the dark scheme and a dark one in the light scheme, so
+     the label has to follow it rather than being a fixed white. */
+  color: var(--bg);
+}
+
+.confirm__go--danger:hover {
+  background: color-mix(in srgb, var(--error) 85%, var(--text));
 }
 
 /* --- reminders -------------------------------------------------------------- */
@@ -1385,6 +1731,22 @@ h1,
   pointer-events: none;
 }
 
+/*
+ * One group per source of toasts: memos being written, and reminders that have fired.
+ *
+ * Two groups rather than one list, because each is its own live region -- an upload's progress
+ * and a 7am alarm should not be announced as though they were the same kind of event, and a
+ * shared region would do exactly that. Memos come first in MemosView's markup so a submission
+ * appears immediately above the corner, which is where the eye already is after pressing a
+ * button, and reminders stack below where they are not displaced by every save.
+ */
+.toasts__group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  pointer-events: none;
+}
+
 .toast,
 .toast__all {
   pointer-events: auto;
@@ -1404,10 +1766,36 @@ h1,
   box-shadow: 0 6px 24px color-mix(in srgb, var(--text) 18%, transparent);
 }
 
+/*
+ * The border is what carries the outcome, because it is the one part of the card that is not
+ * text: accent while something is happening, the error colour when it did not work, and the
+ * plain border once it has and there is nothing left to do about it.
+ *
+ * Only the border and not the background, so the three states stay legible in both schemes
+ * without three background values to keep in step -- and so a failure is not a red panel in
+ * the corner of the screen for something as ordinary as a recording with no speech in it.
+ */
+.toast--error {
+  border-color: var(--error);
+}
+
+.toast--done {
+  border-color: var(--border);
+}
+
+.toast__body {
+  min-width: 0;
+}
+
 .toast__title {
   margin: 0;
   font-weight: 600;
   font-size: 0.9rem;
+}
+
+/* Under the two lines of text rather than beside them, so the card keeps one column. */
+.toast__progress {
+  margin-top: 0.5rem;
 }
 
 .toast__note {
@@ -1460,4 +1848,44 @@ h1,
     /* Cards nearly the width of the screen, so one is clearly "current" and the next peeks. */
     grid-auto-columns: minmax(13rem, 80vw);
   }
+}
+
+/* --- disabled controls ------------------------------------------------------ */
+
+/*
+ * Last in the file, and that is the rule rather than an accident of where it was typed.
+ *
+ * Four places give a button its own background -- the base rule, `.app__header button`,
+ * `.ghost`, `.landing__cta` -- and a disabled state that is a bare `button:disabled` loses
+ * to whichever of them is written later. Putting this at the end means it wins on source
+ * order without a specificity contest, and it keeps winning when the next component adds a
+ * button style of its own. Anything added below this line has to think about it; nothing
+ * above does.
+ *
+ * **The appearance is the fix for a reported bug, not a preference.** This used to be
+ * `opacity: 0.5` alone. On the dark scheme a half-opacity accent fill is still a solid blue
+ * button, so `Create collection` -- disabled until its field had text -- looked live, was
+ * pressed, and did nothing. The complaint was that the button was untouchable, and it was
+ * exactly right.
+ *
+ * So the fill is removed rather than faded. Every live button on this page is accent-filled,
+ * which makes "not filled" the one difference that reads at a glance and does not depend on
+ * a colour comparison the eye has nothing to make it against. Opacity is left at 1, because
+ * fading it as well takes the muted label below the contrast it needs to be read at all --
+ * and a disabled control still has to say what it is.
+ */
+button:disabled,
+button:disabled:hover,
+.ghost:disabled,
+.ghost:disabled:hover,
+.ghost--danger:disabled:hover,
+.app__header button:disabled,
+.app__header button:disabled:hover {
+  border-color: var(--border);
+  background: color-mix(in srgb, var(--border) 40%, transparent);
+  color: var(--muted);
+  opacity: 1;
+
+  /* The pointer is the other half of it, and the half that answers before the click. */
+  cursor: not-allowed;
 }

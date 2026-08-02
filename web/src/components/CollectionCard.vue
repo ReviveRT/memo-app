@@ -1,5 +1,6 @@
 <script setup>
 import { nextTick, ref } from 'vue'
+import { ask } from '../composables/useConfirm'
 
 /*
  * One collection, as a card in the grid: its name, how full it is, and a glimpse of what is
@@ -77,24 +78,20 @@ function cancelRename() {
  * `memos.collection_id` returns them to the fast strip -- and a bare "Are you sure?" leaves
  * the reader to assume the worse of the two possibilities and not press it.
  *
- * window.confirm rather than a bespoke dialog: the question is one line, and this card is
- * already reachable from inside a screen that has two modals. A third would be one too many
- * for a yes/no.
- *
- * In the script rather than inline in the template, because `window` is not one of the globals
- * Vue exposes to template expressions -- the allowlist is Math, Date, JSON and friends -- so
- * the inline version would fail to resolve rather than merely being hard to read.
+ * `danger: false`, unlike a memo's delete, and the difference is exactly the sentence above:
+ * nothing is lost here. A red button would contradict the reassurance next to it.
  */
-function confirmDelete() {
+async function confirmDelete() {
   const memos =
     props.collection.memo_count === 1 ? 'Its 1 memo stays' : `Its ${props.collection.memo_count} memos stay`
 
-  const question =
-    props.collection.memo_count === 0
-      ? `Delete “${props.collection.name}”?`
-      : `Delete “${props.collection.name}”? ${memos} — they go back to fast memos.`
+  const agreed = await ask({
+    title: `Delete “${props.collection.name}”?`,
+    body: props.collection.memo_count === 0 ? null : `${memos} — they go back to fast memos.`,
+    confirmLabel: 'Delete collection',
+  })
 
-  if (window.confirm(question)) {
+  if (agreed) {
     emit('delete', props.collection.id)
   }
 }
@@ -107,6 +104,14 @@ function confirmDelete() {
       it -- rename, delete -- and a button cannot contain other buttons: the HTML is invalid
       and browsers recover from it by hoisting the inner buttons out, which breaks the layout
       in ways that differ per engine. So the *name* is the button that opens it.
+
+      **But the whole card opens it,** which is what people try first and what the card's shape
+      promises. That is done in CSS rather than with a click handler on the <article>: the name
+      button grows a pseudo-element covering the card, so the click target is the whole surface
+      while the *control* is still a real, focusable, single button. A div with @click would
+      have needed a tabindex, a role and two key handlers to get back to what this already is,
+      and would have put a second activation path on the same card. See `.collection__name` in
+      styles.css for how the footer buttons stay on top of it.
     -->
     <header class="collection__head">
       <form v-if="renaming" class="collection__rename" @submit.prevent="submitRename">

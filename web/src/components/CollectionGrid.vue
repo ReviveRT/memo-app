@@ -37,15 +37,51 @@ const {
 } = useCollections()
 
 const newName = ref('')
+const nameEl = ref(null)
+
+/**
+ * Why the last press of Create did nothing, or null.
+ *
+ * **This exists because the button used to be disabled on an empty name, and that was
+ * reported as the button being broken.** It is worth spelling out, because the fix is not
+ * the obvious one. `button:disabled` was `opacity: 0.5` and nothing else, and on the dark
+ * scheme a half-opacity accent fill is still a solid blue button -- indistinguishable from
+ * a live one at a glance. So the control looked pressable, was pressed, and did nothing,
+ * with no disabled cursor to contradict it and no message to explain it. Worse, the field
+ * it wants filled sits directly under a search box of the same width and shape, so the
+ * commonest way to arrive at that state is to type the name into the wrong one of two
+ * identical inputs and never learn that you did.
+ *
+ * Two changes rather than one, because either alone leaves half of it standing. Disabled
+ * buttons now look disabled (see styles.css), *and* this button is no longer disabled for
+ * an empty name -- it is always pressable, and pressing it says what it wants. A control
+ * that answers is better than one that cannot be pressed, and it is the only one of the two
+ * that helps somebody who has typed their collection name into the search box.
+ *
+ * @type {import('vue').Ref<?string>}
+ */
+const nameProblem = ref(null)
 
 async function submitNew() {
   const name = newName.value.trim()
 
-  // Guarded here as well as by the disabled attribute, because Enter reaches this without
-  // going through the button.
-  if (name === '' || saving.value) {
+  // `saving` still guards, because that one is a genuine "not yet" rather than a "you have
+  // not said what to call it": the request in flight is about to reload the grid underneath.
+  if (saving.value) {
     return
   }
+
+  if (name === '') {
+    // Focus as well as the message. Somebody who typed the name into the search box above is
+    // looking at their own words on the screen while being told the field is empty, and the
+    // cursor landing in the right box is the part of that which explains it.
+    nameProblem.value = 'Type a name for the collection first.'
+    nameEl.value?.focus()
+
+    return
+  }
+
+  nameProblem.value = null
 
   if (await create(name)) {
     newName.value = ''
@@ -53,6 +89,13 @@ async function submitNew() {
 
   // Not cleared on failure: a name refused as a duplicate is still the name the user typed,
   // and blanking it would make them retype it to find out what else is wrong with it.
+}
+
+/** Typing is the answer to the hint, so it clears it rather than waiting for another press. */
+function onNameInput() {
+  if (nameProblem.value !== null && newName.value.trim() !== '') {
+    nameProblem.value = null
+  }
 }
 
 async function onRename(id, name) {
@@ -95,21 +138,53 @@ async function onDelete(id) {
       @apply="applyDateRange"
     />
 
-    <form class="creator" @submit.prevent="submitNew">
-      <label class="creator__field">
-        <span class="sr-only">New collection name</span>
-        <input
-          v-model="newName"
-          type="text"
-          maxlength="120"
-          placeholder="New collection name…"
-          :disabled="saving"
-        />
-      </label>
+    <!--
+      A visible legend, where there used to be an sr-only label and a placeholder.
+      <fieldset> rather than a heading, because that is the element for "these controls
+      belong together" and its <legend> is announced with each of them -- so the field is
+      named even once the placeholder has been typed over, which is exactly when somebody
+      would otherwise lose track of which of the two boxes on this screen they are in.
 
-      <button type="submit" :disabled="saving || newName.trim() === ''">
-        {{ saving ? 'Saving…' : 'Create collection' }}
-      </button>
+      The pair above it is a search box of the same width and the same shape. That is the
+      whole reason this is labelled out loud now: two identical inputs, one under the other,
+      with only their placeholder text to tell them apart, and the placeholder disappears the
+      moment either is used.
+    -->
+    <form class="creator" @submit.prevent="submitNew">
+      <fieldset class="creator__group">
+        <legend class="creator__legend">New collection</legend>
+
+        <label class="creator__field">
+          <span class="sr-only">Collection name</span>
+          <input
+            ref="nameEl"
+            v-model="newName"
+            type="text"
+            maxlength="120"
+            placeholder="Groceries, Work, Ideas…"
+            :disabled="saving"
+            :aria-describedby="nameProblem ? 'creator-problem' : undefined"
+            @input="onNameInput"
+          />
+        </label>
+
+        <!--
+          Disabled only while a write is in flight. Not on an empty name: see nameProblem for
+          why an inert button was the reported bug rather than the guard against it.
+        -->
+        <button type="submit" :disabled="saving">
+          {{ saving ? 'Saving…' : 'Create collection' }}
+        </button>
+      </fieldset>
+
+      <!--
+        role="alert" rather than a plain paragraph, because it appears in response to a press
+        and the press is the only thing that would have moved a screen reader's attention
+        anywhere near it.
+      -->
+      <p v-if="nameProblem" id="creator-problem" class="notice notice--error" role="alert">
+        {{ nameProblem }}
+      </p>
     </form>
 
     <!--

@@ -1,13 +1,16 @@
 import { ref } from 'vue'
 import {
-  acknowledgeReminder,
   createMemo,
   createVoiceMemo,
+  deleteMemo,
   deleteReminder,
   createReminder,
   patchMemo,
+  renameMemo,
 } from '../api/memos'
-import { applyMemoEverywhere, createMemoList } from './useMemoList'
+import { applyMemoEverywhere, createMemoList, removeMemoEverywhere } from './useMemoList'
+import { forgetMemo, startMemoToast, watchMemosIn } from './useMemoToasts'
+import { flashMemo } from './useNewMemoFlash'
 
 /*
  * The fast strip, and every write that changes a memo.
@@ -43,6 +46,18 @@ import { applyMemoEverywhere, createMemoList } from './useMemoList'
  * @see createMemoList for everything about how it loads, filters and reconciles.
  */
 const fastMemos = createMemoList({ collection: 'none' })
+
+/*
+ * Where the corner toasts read a memo's status from.
+ *
+ * Handed over rather than imported, because useMemoToasts is imported *by* this file and a
+ * second edge back the other way would be a cycle. That file's watchMemosIn has the argument.
+ *
+ * The fast strip is the right list to give it: every memo is created unfiled, so a submission
+ * being followed by a toast is always a member of this one -- and it is polled, which is what
+ * makes the status change the toast is waiting for actually arrive.
+ */
+watchMemosIn(() => fastMemos.memos.value)
 
 const saving = ref(false)
 
@@ -142,7 +157,7 @@ function submit(text) {
   // cap is the string the API is asked to store. StoreMemoRequest trims again -- that
   // is agreement, not reliance -- and the composer's own guard is what refuses a
   // whitespace-only memo before it ever reaches here.
-  return store(() => createMemo(text.trim()), saving, saveError, 'Could not save the memo')
+  return store(() => createMemo(text.trim()), saving, saveError, 'Could not save the memo', 'text')
 }
 
 /**
@@ -167,10 +182,19 @@ function submitAudio(blob, filename) {
   uploadProgress.value = null
 
   return store(
-    () => createVoiceMemo(blob, filename, (fraction) => (uploadProgress.value = fraction)),
+    (toast) =>
+      createVoiceMemo(blob, filename, (fraction) => {
+        uploadProgress.value = fraction
+
+        // The same number to two places, and they are not redundant: this one is the bar
+        // under the Record button, which is where somebody who has just pressed Submit is
+        // looking, and the toast is what carries the wait once that bar has gone.
+        toast.uploading(fraction)
+      }),
     uploading,
     audioError,
     'Could not upload the recording',
+    'voice',
   )
 }
 
@@ -181,31 +205,52 @@ function submitAudio(blob, filename) {
  * refuses itself. `uploading` above has the whole argument for why that separation is
  * load-bearing rather than tidy.
  *
- * @param {() => Promise<object>} create Performs the request and returns the stored row.
+ * @param {(toast: object) => Promise<object>} create Performs the request and returns the
+ *   stored row. Handed this write's toast, because the upload path has a progress number to
+ *   report to it that only exists inside the request.
  * @param {import('vue').Ref<boolean>} guard This action's re-entry flag.
  * @param {import('vue').Ref<?string>} target Where this action's failures are reported.
  * @param {string} failure Prefix, so a stopped api container -- which fails every one of
  *   these with the same sentence -- still says which action it broke.
+ * @param {'voice'|'text'} kind Which control this came from. Only the toast reads it.
  * @returns {Promise<boolean>} Whether the memo was stored.
  */
-async function store(create, guard, target, failure) {
+async function store(create, guard, target, failure, kind) {
   if (guard.value) {
     return false
   }
 
   guard.value = true
 
+  // After the guard, deliberately: a refused re-entry writes no row and must not put a card in
+  // the corner describing a memo that was never submitted.
+  const toast = startMemoToast(kind)
+
   try {
     // Not optimistic -- nothing appears until the database has the row -- so there is no
     // rollback path to get wrong. Prepending rather than re-running load(): the API answers
     // 201 with the stored memo precisely so the client needs no second round trip.
-    fastMemos.prepend(await create())
+    const memo = await create(toast)
+
+    fastMemos.prepend(memo)
+
+    // After the prepend, so the toast's watcher finds the memo in the list on its very first
+    // read rather than on the next poll. Nothing breaks if it does not -- the watcher tolerates
+    // a missing row -- but the toast would sit on the stage the API reported for two seconds.
+    toast.stored(memo)
+
+    // The one place the strip is told to make a fuss about a row. See useNewMemoFlash: the
+    // toast says a memo was written, and this says *which card* it became.
+    flashMemo(memo.id)
 
     target.value = null
 
     return true
   } catch (error) {
-    target.value = `${failure} — ${error.message}`
+    const message = `${failure} — ${error.message}`
+
+    target.value = message
+    toast.rejected(message)
 
     return false
   } finally {
@@ -234,10 +279,14 @@ const working = ref(false)
  *
  * @param {() => Promise<object>} write
  * @param {string} failure
+ * @param {(memo: object) => void} [apply] What to do with the memo the API answered with.
+ *   Defaults to writing it into every live list. Delete overrides it: there is no memo left to
+ *   apply, and writing a deleted row's fields back into a list before dropping it would be a
+ *   render of something that no longer exists.
  * @returns {Promise<?object>} The updated memo, or null if the write failed. Callers use the
  *   null to decide whether to close a dialog.
  */
-async function writeMemo(write, failure) {
+async function writeMemo(write, failure, apply = applyMemoEverywhere) {
   if (working.value) {
     return null
   }
@@ -247,7 +296,7 @@ async function writeMemo(write, failure) {
   try {
     const updated = await write()
 
-    applyMemoEverywhere(updated)
+    apply(updated)
     memoError.value = null
 
     return updated
@@ -290,6 +339,53 @@ async function moveMemo(memo, collectionId) {
   }
 
   return updated
+}
+
+/**
+ * Rename a memo, or clear the title with null.
+ *
+ * Goes through writeMemo like every other single-memo edit, which is what makes the new title
+ * appear on the card behind the dialog, on the same memo inside an opened collection, and in
+ * the detail card itself, without any of them being told about the others.
+ *
+ * @param {object} memo The memo being renamed, as the caller is rendering it.
+ * @param {?string} title Null clears it, and the memo falls back to the first line of its own
+ *   transcript. That is a real operation rather than a cleared field -- see api/memos.js.
+ * @returns {Promise<?object>}
+ */
+function rename(memo, title) {
+  return writeMemo(() => renameMemo(memo.id, title), 'Could not rename the memo')
+}
+
+/**
+ * Delete a memo, its recording and its reminders.
+ *
+ * `removeMemoEverywhere` rather than `applyMemoEverywhere`, because there is no memo left to
+ * apply -- and rather than a reload, because a list of nothing but finished memos is not
+ * polling and a reload of the *other* list is not something this function knows how to ask
+ * for. The registry is what makes "take it out of wherever it is" a single call.
+ *
+ * The row is dropped only after the API has confirmed, which is the same rule the create path
+ * follows: nothing on screen changes until the database agrees. Optimistically removing it
+ * would need a rollback that put the memo back *in its original position*, and the position is
+ * the one thing a removed row does not carry.
+ *
+ * @param {object} memo The memo to delete, as the caller is rendering it.
+ * @returns {Promise<?object>} The memo as it was, or null if the delete failed.
+ */
+function remove(memo) {
+  return writeMemo(
+    () => deleteMemo(memo.id),
+    'Could not delete the memo',
+    (deleted) => {
+      removeMemoEverywhere(deleted.id)
+
+      // And any toast still following it. A memo can be deleted mid-transcription, and the
+      // toast would otherwise wait for a status change that is never coming. See forgetMemo:
+      // this is the only place that can tell "deleted" from "no longer on this page".
+      forgetMemo(deleted.id)
+    },
+  )
 }
 
 /**
@@ -338,6 +434,8 @@ export function useMemos() {
     submit,
     submitAudio,
     moveMemo,
+    rename,
+    remove,
     addReminder,
     dropReminder,
   }
