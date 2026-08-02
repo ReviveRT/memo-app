@@ -271,11 +271,66 @@ export function useRecorder() {
     }
 
     try {
-      // `{ audio: true }` and no constraints. Sample rate, channel count and echo
-      // cancellation are all things ffmpeg fixes for free in MEMO-13, and asking for
-      // any of them here risks an OverconstrainedError on a device that would
-      // otherwise have recorded perfectly well.
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      // One constraint, and it is the only one in this file that changes what the
+      // microphone hears rather than what the encoder does with it.
+      //
+      // Sample rate and channel count are still deliberately not asked for. MEMO-13's
+      // ffmpeg pass resamples to 16 kHz mono whatever arrives, so constraining them
+      // here would buy nothing and could fail a device that would have recorded
+      // perfectly well. This one is different because ffmpeg cannot undo it: a word
+      // the suppressor removed is not in the bytes it is handed.
+      //
+      // `{ audio: true }` is not neutral. Chrome reads it as a request for the
+      // WebRTC voice-call chain and turns on all three processors -- checked rather
+      // than assumed, by reading `track.getSettings()` back off a real stream:
+      // `{ec: true, ns: true, agc: true}`. Two of those are harmless here. The noise
+      // suppressor is not: it is tuned to make speech intelligible to a person on a
+      // phone call, and what it does to a *transcript* is delete the quietest words
+      // outright, because a word trailing off at the end of a phrase looks like noise
+      // to it.
+      //
+      // Measured, on the recording that started this. A real memo ended "and it's
+      // further off than you would expect" and transcribed as "farther over" -- and
+      // the word was not recoverable, because it was not in the file: where "off"
+      // should be there are 0.52 s at -50 to -62 dB, against -15 to -25 dB for the
+      // words either side and a -61 dB noise floor. No decoder setting reaches it.
+      // Every option in ai/memo_ai/stt/local.py was tried against that file --
+      // beam size, the temperature ladder, the repetition penalty, VAD padding, the
+      // primer, conditioning -- and the ones that changed the answer changed it by
+      // collapsing into the repetition loop those settings exist to prevent. Nor is
+      // it a model size: full `large-v3`, three times the weights of the shipped
+      // turbo, makes the identical error.
+      //
+      // So the loss is here, before the file exists. Isolated by capturing one
+      // synthetic sentence -- a word ducked 40 dB, over room tone -- through each
+      // setting in turn, three times each, deterministic every time:
+      //
+      //   Chrome's default (all three on)     lost the word 3/3
+      //   autoGainControl: false only         lost the word 3/3
+      //   echoCancellation: false only        lost the word 3/3
+      //   noiseSuppression: false only        kept the word 3/3
+      //   all three off                       kept the word 3/3
+      //
+      // The suppressor is the whole of it, which is why it is the only one turned
+      // off. Leaving `autoGainControl` alone matters in the same direction: it lifts
+      // a quiet speaker, and this change is about not losing quiet speech.
+      //
+      // `ideal` rather than a bare `false`, which is the note this comment replaced
+      // being right about the risk and wrong about the remedy. A bare value goes in
+      // the basic constraint set and a device that cannot satisfy it fails the whole
+      // call with OverconstrainedError; `ideal` is advisory and cannot. It was worth
+      // checking that advisory is still enough to take effect, and it is -- Chrome
+      // reports `ns: false` and keeps the word 2/2, exactly as the required form does.
+      //
+      // What this does not do is fix a memo already recorded; the words those files
+      // lost are gone. And it deliberately hands whisper more background noise than
+      // before, which is a thing whisper is known to invent words over -- so that was
+      // measured too, and ten seconds of room tone still transcribes to nothing with
+      // the suppressor off. The VAD filter in ai/memo_ai/stt/local.py is what holds
+      // there, and it is on.
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { noiseSuppression: { ideal: false } },
+      })
     } catch (cause) {
       error.value = failureMessage(cause?.name)
 
