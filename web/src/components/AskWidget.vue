@@ -45,6 +45,25 @@ const props = defineProps({
   memos: { type: Array, required: true },
 })
 
+/**
+ * Mirrors AskRequest::MIN_QUESTION_LENGTH and MAX_QUESTION_LENGTH in the API, the way
+ * MemoDialog mirrors its own caps: two runtimes cannot share a constant, so the numbers are
+ * repeated with a note saying where the other copy is. The server stays authoritative -- if
+ * these disagree, its 422 lands in the error slot below.
+ *
+ * **The minimum is the one that was missing, and its absence was a bug rather than a
+ * looseness.** The button was disabled on an *empty* box only, so a one-character question was
+ * offered, sent, and refused: `to_tsvector('english', 'a')` produces no lexeme, which is why
+ * the API asks for two. What the reader got for typing "a" and pressing Ask was a round trip
+ * and a validation error about a field they could see. Reproduced against the running API, and
+ * the console entry it left is what it was reported from.
+ *
+ * The maximum was already honoured, as `maxlength` on the input -- bound from here now rather
+ * than written out again, so the pair sit together.
+ */
+const MIN_QUESTION_LENGTH = 2
+const MAX_QUESTION_LENGTH = 500
+
 /** Whether the panel is showing. The orb is always there. */
 const open = ref(false)
 
@@ -101,6 +120,16 @@ const orbEl = useTemplateRef('orbEl')
 const resultEl = useTemplateRef('resultEl')
 
 const busy = computed(() => running.value !== null)
+
+/**
+ * Whether what is in the box is something the API will accept.
+ *
+ * One computed rather than the same expression in the button's `disabled` and in `ask()`,
+ * because those two disagreeing is exactly the bug above: the guard said "not empty" and the
+ * server said "at least two characters", and the gap between them was a request that could
+ * only fail.
+ */
+const askable = computed(() => question.value.trim().length >= MIN_QUESTION_LENGTH)
 
 /** Whether there is anything on screen worth keeping while a new question is asked. */
 const answered = computed(() => sources.value.length > 0 || answer.value !== '')
@@ -245,7 +274,7 @@ async function openSource(source) {
 async function ask() {
   const question_ = question.value.trim()
 
-  if (question_ === '' || busy.value) {
+  if (!askable.value || busy.value) {
     return
   }
 
@@ -455,7 +484,7 @@ onScopeDispose(() => running.value?.abort())
           placeholder="What did I say about the landing page?"
           aria-label="Ask a question about your memos"
           autocomplete="off"
-          maxlength="500"
+          :maxlength="MAX_QUESTION_LENGTH"
         />
 
         <!--
@@ -463,7 +492,7 @@ onScopeDispose(() => running.value?.abort())
           flips between Ask and Stop is one somebody presses expecting the other, and the two
           do opposite things.
         -->
-        <button v-if="!busy" type="submit" :disabled="question.trim() === ''">Ask</button>
+        <button v-if="!busy" type="submit" :disabled="!askable">Ask</button>
 
         <button v-else type="button" class="filters__clear" @click="stop">Stop</button>
       </form>

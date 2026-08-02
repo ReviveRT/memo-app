@@ -43,11 +43,11 @@
    * so whichever is written later wins, and stated down there the desktop size would beat the
    * phone's.
    *
-   * 8rem on a desktop and less than half of that on a phone, which is a bigger gap than the
-   * usual bit of responsive trimming. It is the same object answering two different questions:
-   * with a window to spare, the sphere is the thing that says the feature exists and is worth
-   * being able to see moving from across the room; on a phone it is a thumb target over a list
-   * somebody is reading, and 8rem of it would be a tenth of the screen covered.
+   * 8rem on a desktop and 6.5 on a phone. The gap is smaller than it looks: 8rem is about a
+   * sixteenth of the width of a laptop window and 6.5rem is more than a quarter of a 375px
+   * screen, so the phone's sphere is by far the more prominent of the two. That is deliberate
+   * -- it is the one screen where the sphere is competing with nothing else for attention,
+   * and where a control has to be findable by thumb rather than by hover.
    */
   --ask-orb: 8rem;
 
@@ -2117,17 +2117,22 @@ h1,
   }
 
   :root {
-    /* A thumb's worth rather than the desktop size, which would take a tenth of the screen. */
-    --ask-orb: 3.25rem;
+    /*
+     * Not far off the desktop size, which is the point rather than an oversight: against a
+     * 375px screen this is over a quarter of the width, where 8rem on a laptop is a
+     * sixteenth. The panel's own height is measured from this (see `.askw__panel`), so the
+     * two stay out of each other's way without a second number to keep in step.
+     */
+    --ask-orb: 6.5rem;
   }
 
   /*
    * No label beside the sphere here, and the wording is only half the reason -- "Click" is
-   * pointer language on a device that has none. The other half is the room: the bubble is
-   * about 8rem wide and the orb is 3.25, so together they reach a third of the way across a
-   * 375px screen, permanently, over a list somebody is reading. The sphere is also
-   * proportionally much bigger against a phone screen than a desktop one, which is exactly
-   * the case where it needs the least explaining.
+   * pointer language on a device that has none. The other half is the room, and there is less
+   * of it than there was: the bubble is about 8rem wide and the orb is now 6.5, so together
+   * they would reach most of the way across a 375px screen, permanently, over a list somebody
+   * is reading. The sphere is also proportionally far bigger against a phone screen than a
+   * desktop one, which is exactly the case where it needs the least explaining.
    */
   .askw__nudge {
     display: none;
