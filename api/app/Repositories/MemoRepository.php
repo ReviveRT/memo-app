@@ -6,6 +6,7 @@ namespace App\Repositories;
 
 use App\Services\Memos\DeletedMemo;
 use App\Services\Memos\Memo;
+use App\Services\Memos\MemoAudio;
 use App\Services\Memos\MemoQuery;
 use Illuminate\Database\DatabaseManager;
 use Illuminate\Database\QueryException;
@@ -392,6 +393,59 @@ class MemoRepository
         $row = $rows[0] ?? null;
 
         return $row instanceof stdClass ? Memo::fromRow($row) : null;
+    }
+
+    /**
+     * Where one memo's recording is kept and what it is, or null when it has none (MEMO-23).
+     *
+     * **Two columns rather than COLUMNS, which is the whole reason this is not `find()` plus a
+     * getter.** The playback route needs a storage key and a media type; the projection every
+     * other route answers with carries the transcript, the summary, the tags and a correlated
+     * subquery over the reminders table. A browser seeking through a recording issues one
+     * request per drag, and each of those would otherwise read a memo's entire text to find out
+     * which file to open. The reminders subquery alone is a join paid for nothing here.
+     *
+     * It is also the projection that keeps `audio_path` off the wire. COLUMNS is what responses
+     * are built from and this is not in it -- see DeletedMemo and MemoAudio for the argument
+     * that a storage key is not a client's to hold, and AudioStorage for what a caller holding
+     * one may do with it.
+     *
+     * Null covers three cases the caller answers identically: no such memo, a typed memo, and
+     * -- reachable only through hand-written SQL -- a row with `audio_mime` set and no path.
+     * They are not told apart on purpose. The first is a 404 by any reading; the second is the
+     * ordinary state of every text memo and not an error anywhere below HTTP; and all three
+     * leave the caller with nothing to serve, which is one answer and not three.
+     *
+     * An empty-string path is folded into null rather than passed on. The column is nullable
+     * and nothing writes `''`, so this is defending against a hand-written row -- but the cost
+     * of not doing it is a key that AudioStorage refuses with a StorageException, which is a
+     * 500 for a memo that simply has no recording.
+     */
+    public function audioFor(string $id): ?MemoAudio
+    {
+        $rows = $this->db->connection()->select(
+            'SELECT audio_path, audio_mime FROM memos WHERE id = ?',
+            [$id],
+        );
+
+        $row = $rows[0] ?? null;
+
+        if (! $row instanceof stdClass) {
+            return null;
+        }
+
+        $key = $row->audio_path ?? null;
+
+        if (! is_string($key) || $key === '') {
+            return null;
+        }
+
+        $mimeType = $row->audio_mime ?? null;
+
+        return new MemoAudio(
+            key: $key,
+            mimeType: is_string($mimeType) && $mimeType !== '' ? $mimeType : null,
+        );
     }
 
     /**

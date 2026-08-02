@@ -128,6 +128,29 @@ final class MemoService
     }
 
     /**
+     * Which blob a memo's recording is, for the route that plays it back (MEMO-23).
+     *
+     * A pass-through, like `list()` above and for the same reason: the seam is worth keeping
+     * even where there is nothing to do at it, because the controller's dependency is "what a
+     * memo is" and not "which table holds it". What is worth saying is what this method
+     * deliberately does *not* do, which is open the file.
+     *
+     * **Resolving the key to a path is the controller's, and that is the one place in this
+     * namespace where the storage is not.** Every other blob operation goes through
+     * `$this->audio` here -- createFromAudio writes, delete unlinks -- because both are
+     * decisions about what a memo *is*: a recording exists before the row that promises it,
+     * and outlives it by at most a sweep. Serving one is not that. It is a question about
+     * bytes and byte ranges and cache headers, which is HTTP, and the answer is a response
+     * object this layer has no business constructing. So MemoController holds AudioStorage
+     * for that one call, and this returns the key rather than a path -- which is also what
+     * keeps `localPath()`'s traversal check on the only route into the volume.
+     */
+    public function audioFor(string $memoId): ?MemoAudio
+    {
+        return $this->repository->audioFor($memoId);
+    }
+
+    /**
      * File a memo into a collection, or return it to the fast strip with null.
      *
      * Null is a first-class argument rather than an absent one, because "take this out of

@@ -781,6 +781,7 @@ server so the browser sees one origin. No authentication — see Assumptions.
 | `POST` | `/memos` | Create one: JSON `{text}`, or `multipart/form-data` with `audio` |
 | `PATCH` | `/memos/{memo}` | `{collection_id}` — file it, or `null` to unfile. `{title}` — rename it, or `null` to clear. Either field, or both |
 | `POST` | `/memos/{memo}/retry` | Send a failed memo back to the queue. No body. 409 if it is not `failed` |
+| `GET` | `/memos/{memo}/audio` | The original recording, with byte ranges. 404 for a typed memo |
 | `DELETE` | `/memos/{memo}` | 200 with the memo it removed. Takes the recording and any reminders with it |
 | `GET` | `/collections` | The grid, with each collection's memo count and newest labels |
 | `POST` | `/collections` | `{name}` |
@@ -802,6 +803,49 @@ server so the browser sees one origin. No authentication — see Assumptions.
 
 `GET /collections` takes `q`, `from`, `to` and `limit` (max 100), spelled the same
 way and meaning the same things.
+
+### Playing a recording back
+
+`GET /api/memos/{id}/audio` answers with the file as it was uploaded, under the
+media type it was sniffed as, and it honours `Range`:
+
+```bash
+curl -s -D- -o /dev/null -H 'Range: bytes=0-1023' http://localhost:8080/api/memos/<id>/audio
+```
+
+```
+HTTP/1.1 206 Partial Content
+Accept-Ranges: bytes
+Content-Length: 1024
+Content-Range: bytes 0-1023/24775
+Content-Type: video/webm
+```
+
+That is not a refinement — Safari refuses to play audio from an endpoint that
+answers a ranged request with the whole file, and no browser can seek without it.
+A range past the end of the file is a `416` carrying the real size and no body.
+`HEAD` answers the length and `Accept-Ranges` with no body, for `curl -I` and
+anything sizing a file before fetching it; browsers do not use it — Chrome's media
+element opens with a ranged `GET` and issues no `HEAD` at all.
+
+Two 404s, with different sentences on purpose: a typed memo has no recording and
+never did, while a row naming a blob the volume does not have is a stack that has
+lost data — `docker compose down -v` does exactly that, since the database and the
+recordings are on separate volumes.
+
+The recordings are cached hard (`private, max-age=31536000, immutable`). Nothing
+rewrites `audio_path`, so the bytes under a memo id cannot change; the URL either
+answers with the same file or stops existing with the memo.
+
+**Chrome and Edge recordings declare no duration, and the player works around it.**
+A WebM from `MediaRecorder` carries no Duration element — the same fact that makes
+the worker measure length with `ffprobe` after normalization instead of at the
+upload edge — so `audio.duration` is `Infinity` and a native scrubber has nothing
+to size itself from. Opening a memo seeks once past the end of the file, which is
+what makes the element discover the real length, and then resets to the start. On
+a memo small enough for the browser to have buffered whole that costs nothing; on a
+larger one it is a single range request for the tail rather than a second download
+of the whole file, which is the other half of why this endpoint supports ranges.
 
 A few response conventions worth knowing before writing a client:
 
