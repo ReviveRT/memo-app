@@ -1322,3 +1322,65 @@ the API says `"English"` where `prose` keys on `"en"`.
 
 `tests/test_groq_live.py` is the regression net: skipped without `GROQ_API_KEY`, so
 a clean checkout and CI never run it, and the offline default stays the tested path.
+
+## The transcript's worst errors are made before the file exists
+
+**Decision.** The recorder asks Chrome to turn its noise suppressor off, and leaves
+echo cancellation and automatic gain alone. `{ audio: true }` — what this file used
+to pass — is not a neutral request: Chrome reads it as a request for the WebRTC
+voice-call chain and enables all three.
+
+**The symptom that found it.** A real memo ended _"and it's further off than you
+would expect"_ and transcribed as _"farther over"_. Read as a transcription error it
+points at `STT_MODEL`, and that is the wrong direction, expensively so.
+
+**Nothing downstream could have fixed it, and that was established before anything
+was changed.** Against that exact recording:
+
+  * every decode option in `ai/memo_ai/stt/local.py` — beam size 1 and 10, the
+    temperature ladder, the repetition penalty, VAD padding at 400 ms, no VAD, no
+    conditioning, the punctuation primer removed. None produced "off". The four that
+    changed the answer at all did it by collapsing into the repetition loop
+    `REPETITION_PENALTY` and the VAD settings exist to prevent — one came back with
+    "No localhost 5173 is not serving main." nineteen times.
+  * full `large-v3` — 2.9 GB against turbo's 1.6, and about twice the wall time.
+    Identical error, and *worse* on the one proper noun in the memo:
+    turbo's `memoapp-lab1` became `MMOAppLab1`.
+  * the shipped 1.5B enrichment model, asked to repair misheard words. It left the
+    text untouched, three runs out of three — safe, and no use.
+
+**Because the word is not in the file.** Where "off" should be there are 0.52 s at
+−50 to −62 dB, against −15 to −25 dB for the words either side and a −61 dB floor.
+Whisper's own word timings show it: it stretches "over" across 0.90 s to cover the
+gap, and its confidence there — 0.64 and 0.76 — is the lowest in the sentence.
+
+**Which processor did it was isolated rather than guessed.** One synthetic sentence
+with a word ducked 40 dB over room tone, captured through Chrome by fake device,
+three times per setting, deterministic every time:
+
+| `getUserMedia` audio constraints | kept the quiet word |
+| --- | --- |
+| `true` — the default, all three on | 0/3 |
+| `autoGainControl: false` only | 0/3 |
+| `echoCancellation: false` only | 0/3 |
+| **`noiseSuppression: false` only** | **3/3** |
+| all three off | 3/3 |
+
+So the suppressor is the whole of it, and it is the only one turned off. Automatic
+gain is left on deliberately — it lifts a quiet speaker, which is the same direction
+this change is going.
+
+**`ideal` rather than a bare `false`.** A bare value joins the basic constraint set,
+which `getUserMedia` treats as required, so a device that cannot satisfy it fails the
+whole call with `OverconstrainedError` — the risk the comment this replaced was right
+to name. `ideal` is advisory and cannot. That it is still *enough* was checked rather
+than assumed: Chrome reports `noiseSuppression: false` either way, and keeps the word.
+
+**The cost, measured rather than waved at.** More background noise now reaches
+whisper, which is a thing whisper invents words over — four seconds of silence
+transcribes as "Thank you." with the VAD filter off. Ten seconds of room tone
+captured with the suppressor disabled still transcribes to nothing. The VAD filter is
+what holds there, and it is on.
+
+**What it does not do.** It cannot repair a memo already recorded. Every voice memo
+in the database predates it, and the words theirs lost are not in those files either.

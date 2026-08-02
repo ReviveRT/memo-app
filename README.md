@@ -584,6 +584,30 @@ records. The empty `STT_MODEL_REVISION` clears the pinned commit, which belongs 
 turbo's repository and does not exist in `base`'s — leave it set and the build
 fails on a 404 rather than silently fetching something else.
 
+### When a bigger model is not the answer
+
+The table above is the lever for a word the model got *wrong*. It does nothing for
+a word that is not in the recording, and the two look identical in the transcript.
+
+A real memo here ended _"and it's further off than you would expect"_ and came back
+as _"farther over"_. Nothing downstream could have recovered it: where "off" should
+be there are 0.52 s at −50 to −62 dB, against −15 to −25 dB for the words on either
+side. Every decode option in `ai/memo_ai/stt/local.py` was tried on that file and
+the ones that changed the answer changed it by collapsing into the repetition loop
+those settings exist to prevent — and full `large-v3`, three times the weights of
+the shipped turbo and about twice as slow, makes the identical error.
+
+The word was deleted at capture, by the noise suppressor Chrome turns on when a
+page asks for `{ audio: true }`. It is tuned for phone calls, where the quietest
+sounds are worth removing; on a memo it removes the ends of phrases. The recorder
+now asks for it to be off — see `web/src/composables/useRecorder.js`, which has the
+isolation measurement — and that is the only one of the three processors changed,
+because it was the only one that lost the word.
+
+So: if transcripts are dropping or mangling quiet trailing words, this is the
+cause, and a larger `STT_MODEL` will cost you disk and latency without fixing it.
+Memos already recorded cannot be repaired — the audio never had the word.
+
 ### Speed
 
 A memo of a few seconds transcribes in a few seconds. Anything over two minutes of
