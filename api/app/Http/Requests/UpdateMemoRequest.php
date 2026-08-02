@@ -11,11 +11,12 @@ use Illuminate\Validation\Validator;
 /**
  * Validation for PATCH /api/memos/{memo}.
  *
- * Two fields, either of them on its own, and that is as far as this route goes. It is
+ * Three fields, any of them on its own, and that is as far as this route goes. It is
  * deliberately not a general-purpose memo editor:
  *
  *   * `collection_id` files a memo into a collection, or takes it back out.
  *   * `title` renames it.
+ *   * `transcript` corrects the words.
  *
  * **`transcript` is writable, and this block used to say the opposite.** The old argument was
  * that a transcript is a record of what was said -- memo_ai/prose.py will not so much as

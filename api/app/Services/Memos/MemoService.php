@@ -151,11 +151,14 @@ final class MemoService
     /**
      * Rename a memo, or clear the name with null.
      *
-     * The one field of a memo a client may write. `title` is generated -- the worker cuts a
-     * fallback from the transcript and the enrichment pass replaces it with something
-     * shorter -- so it is a guess, and a guess the owner disagrees with is what makes a memo
-     * unfindable in a strip of thirty. Everything else on the row is either a record of what
-     * was said or the queue's own bookkeeping, and neither is the client's.
+     * `title` is generated -- the worker cuts a fallback from the transcript and the
+     * enrichment pass replaces it with something shorter -- so it is a guess, and a guess the
+     * owner disagrees with is what makes a memo unfindable in a strip of thirty.
+     *
+     * One of two writable content fields rather than the only one, which is what this note used
+     * to say: correctTranscript above is the other. What is still not the client's is the
+     * queue's own bookkeeping -- `status`, `attempts`, `locked_at` -- because a client setting
+     * those would be a client claiming a job.
      *
      * Trimmed, and an empty result becomes null rather than an empty string, so there is one
      * spelling of "this memo has no title of its own" for every reader to test. Postgres

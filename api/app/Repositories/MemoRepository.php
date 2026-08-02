@@ -443,12 +443,14 @@ class MemoRepository
     /**
      * Rename a memo.
      *
-     * The one column on this table a client may write, and the argument for letting it is
-     * that nothing else can. `title` is filled by the enrichment pass from the transcript,
-     * so it is a *guess* about what a memo is called -- a good one, often, and wrong often
-     * enough that a memo the owner cannot rename is a memo they cannot find later. That is
-     * the opposite of the transcript, which is a record of what was said and is nobody's to
-     * edit; UpdateMemoRequest states the same line from the validation side.
+     * One of the two columns of a memo's *content* a client may write -- `transcript` is the
+     * other, see correctTranscript above. `title` is filled by the enrichment pass from the
+     * transcript, so it is a *guess* about what a memo is called: a good one, often, and wrong
+     * often enough that a memo the owner cannot rename is a memo they cannot find later.
+     *
+     * This block used to add "that is the opposite of the transcript, which is a record of what
+     * was said and is nobody's to edit". That is no longer true and the argument did not
+     * survive a wrong transcript -- UpdateMemoRequest has why, from the validation side.
      *
      * The same shape as moveToCollection -- one UPDATE, RETURNING the whole row -- and for
      * the same reason: the trigger from 002 moves `updated_at`, so a caller that wanted the
