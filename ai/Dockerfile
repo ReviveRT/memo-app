@@ -59,9 +59,15 @@ ENV PYTHONUNBUFFERED=1 \
 # what it costs instead is trading a signed distro package for opaque binaries
 # from Docker Hub. For a project whose grading criteria are "one command
 # converges" and "a stranger can follow the README", the distro package is the
-# defensible default. MEMO-15 is the task with a real reason to weigh the two,
-# since it bakes model weights into this same image and will be counting
-# megabytes for real.
+# defensible default.
+#
+# MEMO-15 was named here as the task that would weigh the two for real, and it
+# did -- and the answer went the other way from what this comment expected.
+# Baking the weights added 2.8 GB below, which makes the 120 MB of unused GPU
+# stack about four percent of the image rather than a sixth of it. Trading a
+# signed Debian package for third-party binaries to save four percent is not a
+# trade worth making, so the distro package stays and the question is settled
+# rather than deferred again.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
@@ -72,6 +78,117 @@ WORKDIR /app
 # re-resolve and re-download the driver.
 COPY requirements.txt ./
 RUN pip install -r requirements.txt
+
+# --- Model weights, fetched at build and never at runtime (MEMO-15) ----------
+#
+# The expensive layer in this image, and the one the whole zero-config promise
+# rests on. There is no paid API anywhere in this project, so the local models
+# *are* the product -- and a product that downloads 2.8 GB the first time somebody
+# presses Record is not the same product. On a slow link the reviewer's first memo
+# waits out MODEL_LOAD_TIMEOUT_SECONDS and fails; offline it fails immediately.
+# Neither is what "works with no account and no key" is supposed to mean.
+#
+# Placed here, after the pip install and before `COPY . .`, so editing the claim
+# loop does not refetch 2.8 GB. Docker caches the layer on the ARG values below,
+# which is also the answer to "a rebuild does not refetch either model": the fetch
+# re-runs only when one of these lines changes.
+#
+# Three models, and the third one is the one that gets forgotten:
+#
+#   * ${STT_MODEL}, the shipped default. 1,622 MB. Repeated from
+#     memo_ai/config.py's DEFAULT_STT_MODEL rather than derived from it, like
+#     every other default this image has to be right about under a bare
+#     `docker run`. Changing one means changing both -- and building with
+#     `--build-arg STT_MODEL=base` without changing the config gives an image
+#     that still downloads turbo on first use, which is the failure this whole
+#     layer exists to prevent.
+#
+#   * ${DETECT_MODEL}, 78 MB, and it is load-bearing rather than an optimization.
+#     STT_LANGUAGE ships empty, meaning detect per recording, and
+#     memo_ai/stt/local.py runs that pass on `tiny` -- so the shipped
+#     configuration loads *two* models on the first voice memo. Baking only the
+#     big one leaves an image that reaches the network anyway, for 78 MB, and the
+#     acceptance criterion fails on a detail nobody would look for.
+#
+#   * ${ENRICH_MODEL_FILE}, 1,117 MB. Enrichment is MEMO-21 and does not exist
+#     yet -- memo_ai/enrich.py is a contract and a null implementation. The
+#     weights are baked now anyway, because this is the task that owns "no
+#     surprise runtime download" and doing it later would mean a second 1.1 GB
+#     layer landing on whoever is already holding a built image. MEMO-21 finds it
+#     at ${ENRICH_MODEL_PATH} and writes the loader.
+#
+# `download_model` rather than a hand-written repo id, because the mapping from
+# `large-v3-turbo` to a HuggingFace repository lives in faster-whisper and has
+# already moved once: 1.2.1 asks for `mobiuslabsgmbh/faster-whisper-large-v3-turbo`
+# and HuggingFace answers 307 to `dropbox-dash/faster-whisper-large-v3-turbo`.
+# Calling the library's own resolver means the build and the runtime cannot
+# disagree about which weights `STT_MODEL` names.
+#
+# Licences, since this is the only download in the project: whisper weights are
+# MIT (checked on both repos, not assumed from the Systran one), and
+# Qwen2.5-1.5B-Instruct is Apache 2.0. Both are public repos -- no account, no
+# token, nothing for a reviewer to sign up for.
+ARG MODEL_DIR=/opt/models
+ARG STT_MODEL=large-v3-turbo
+ARG DETECT_MODEL=tiny
+ARG ENRICH_MODEL_REPO=Qwen/Qwen2.5-1.5B-Instruct-GGUF
+ARG ENRICH_MODEL_FILE=qwen2.5-1.5b-instruct-q4_k_m.gguf
+
+# Build args reach a RUN as environment variables, which is why this script reads
+# os.environ instead of being interpolated by the shell -- a quoted heredoc keeps
+# a model name containing a shell metacharacter from becoming a build-time
+# surprise.
+RUN python <<'PY'
+import os
+import shutil
+from pathlib import Path
+
+from faster_whisper.utils import download_model
+from huggingface_hub import hf_hub_download
+
+root = Path(os.environ["MODEL_DIR"])
+
+# dict.fromkeys rather than a set, to keep the order stable in the build log and
+# to collapse the STT_MODEL == DETECT_MODEL case -- `--build-arg STT_MODEL=tiny`
+# is a legitimate way to build a small image, and it should not fetch twice into
+# the same directory.
+for size in dict.fromkeys((os.environ["STT_MODEL"], os.environ["DETECT_MODEL"])):
+    target = root / "whisper" / size
+    print(f"baking whisper {size} -> {target}", flush=True)
+    download_model(size, output_dir=str(target))
+
+target = root / "llm"
+target.mkdir(parents=True, exist_ok=True)
+print(f"baking {os.environ['ENRICH_MODEL_FILE']} -> {target}", flush=True)
+hf_hub_download(
+    repo_id=os.environ["ENRICH_MODEL_REPO"],
+    filename=os.environ["ENRICH_MODEL_FILE"],
+    local_dir=str(target),
+)
+
+# Both helpers write a `.cache/huggingface` sidecar under the destination --
+# resume metadata and an etag per file, not a second copy of the weights. It is
+# kilobytes rather than gigabytes, and it is removed anyway: it records where the
+# bytes came from at build time, and leaving it invites a later reader to believe
+# this directory is a cache that something maintains.
+for junk in root.rglob(".cache"):
+    shutil.rmtree(junk, ignore_errors=True)
+PY
+
+# Readable by everyone, writable by nobody. The worker runs as `memo` (below) and
+# only ever opens these; keeping them root-owned is what makes "the weights cannot
+# drift at runtime" a property of the filesystem rather than of the code.
+#
+# a+rX, with the capital X, so directories become traversable and the weights do
+# not become executable.
+RUN chmod -R a+rX ${MODEL_DIR}
+
+# Read by nothing today. It is set here so MEMO-21's enricher has one documented
+# place to look and does not have to reconstruct this filename from two build
+# args, and so `docker inspect` answers "which model did this image bake" without
+# a shell in the container.
+ENV MODEL_DIR=${MODEL_DIR} \
+    ENRICH_MODEL_PATH=${MODEL_DIR}/llm/${ENRICH_MODEL_FILE}
 
 COPY . .
 
@@ -94,16 +211,23 @@ COPY . .
 ARG APP_UID=10001
 ARG APP_GID=10001
 
-# Where the model weights cache lands. Compose mounts the `whisper-cache` volume
-# here and points HF_HOME at /cache/huggingface.
+# Where a model this image did *not* bake lands. Compose mounts the `model-cache`
+# volume here and points HF_HOME at /cache/huggingface.
+#
+# Deliberately not ${MODEL_DIR}. Mounting a volume over the baked weights would
+# shadow them: Docker seeds an empty named volume from its mount point, so the
+# first `up` would copy 2.8 GB out of the image and every later one would serve
+# whatever that volume happens to hold -- an image rebuilt with a different
+# STT_MODEL would be silently ignored until somebody ran `down -v`. Two
+# directories, one immutable and one writable, is what keeps a rebuild meaningful.
 ARG CACHE_DIR=/cache
 
 # Two directories, and the reason for each is a different failure:
 #
 #  1. ${CACHE_DIR} has to exist *in the image* and be owned by `memo`, because
 #     Docker seeds an empty named volume from its mount point -- uid, gid and mode
-#     copied out of the image. Without this line `whisper-cache` comes up
-#     root:root and the non-root worker cannot write a model into it.
+#     copied out of the image. Without this line `model-cache` comes up root:root
+#     and the non-root worker cannot write a model into it.
 #
 #     Load-bearing as of MEMO-14 rather than in advance of MEMO-15, which is what
 #     this comment used to say: the local provider fetches its weights on the
@@ -111,6 +235,12 @@ ARG CACHE_DIR=/cache
 #     recording of every clean build. Confirmed working from the other side --
 #     a fresh volume came up `drwxr-xr-x memo memo` and both replicas wrote one
 #     shared 142 MB copy of `Systran/faster-whisper-base` into it.
+#
+#     Still here after MEMO-15, and worth saying why rather than leaving it as a
+#     line nobody dares delete: the shipped models are baked and never touch this
+#     directory, so the only thing that lands here now is a model somebody opted
+#     into with STT_MODEL. That is a rarer path than it used to be and exactly as
+#     broken by a root-owned /cache as before.
 #
 #     Only /cache, not /cache/huggingface. Docker copies the mount point's
 #     *contents* into an empty volume too, and there is no reason to pre-populate

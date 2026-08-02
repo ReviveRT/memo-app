@@ -246,7 +246,7 @@ services:
     #     the running container: `uid=10001(memo) gid=10001(memo)`.
     #   * /cache pre-created and owned by that user (HF_HOME below lives under it).
     #     An empty named volume inherits its mount point's owner from the image, so
-    #     without it `whisper-cache` comes up root-owned and the non-root worker
+    #     without it `model-cache` comes up root-owned and the non-root worker
     #     cannot write a model. It comes up drwxr-xr-x memo memo.
     #   * no AUDIO_DIR. An image without that path leaves an already-seeded volume
     #     alone, which is why the api image alone can own the mode -- one that
@@ -334,15 +334,21 @@ services:
       # would use it, rather than being silently dropped one layer earlier.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # Where faster-whisper caches its weights, and as of MEMO-14 the only copy
-      # of them: the first voice memo after a clean build downloads ~145 MB here
-      # and every later one, and every restart, reads it back with no network.
-      # MEMO-15 bakes them into the image as well, at which point this volume
-      # stops being load-bearing and becomes a place for anything not baked.
+      # Where faster-whisper caches a model this image did not bake. MEMO-15 baked
+      # the shipped ones -- `large-v3-turbo` and the `tiny` detector, at
+      # /opt/models/whisper in the image -- so on the default configuration
+      # nothing is ever written here and the worker never opens a socket to
+      # HuggingFace. It fills up only if somebody sets STT_MODEL to something
+      # else, which is the case this volume now exists for.
+      #
+      # This is what that comment predicted, recorded from the other side: the
+      # volume has stopped being load-bearing. `docker volume rm
+      # memo-app_model-cache` costs a reconfigured stack one re-download and costs
+      # the shipped stack nothing at all.
       HF_HOME: /cache/huggingface
     volumes:
       - "audio:${AUDIO_DIR:-/data/audio}"
-      - whisper-cache:/cache
+      - model-cache:/cache
     deploy:
       replicas: 2
     # Set rather than inherited, because the inherited value is not the documented
@@ -396,4 +402,15 @@ volumes:
   # root:root 0755 and every upload fails. `docker compose down -v` is the reset.
   # NOTES.md has the four cases.
   audio:
-  whisper-cache:
+
+  # Renamed from `whisper-cache` in MEMO-15, because it no longer holds whisper's
+  # weights and mostly holds nothing at all: the shipped models are baked into the
+  # ai image at /opt/models and this is where a model somebody opted into with
+  # STT_MODEL lands instead.
+  #
+  # Renaming orphans the old volume rather than migrating it. That is the right
+  # outcome -- its contents are the 1.6 GB the image now carries anyway -- but it
+  # does not reclaim itself: `docker volume rm memo-app_whisper-cache` after the
+  # first `up` on this revision, or `docker volume prune`. The README says so next
+  # to the disk numbers.
+  model-cache:
