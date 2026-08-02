@@ -70,6 +70,7 @@ def answer(
     model: Model,
     question: str,
     *,
+    owner_id: str,
     top_k: int,
     memo_chars: int,
 ) -> Iterator[Event]:
@@ -83,7 +84,9 @@ def answer(
     question tends to answer it. Two fixed sentences are both faster and more
     reliable than a generated apology.
     """
-    found = retrieval.retrieve(connection, question, top_k=top_k, memo_chars=memo_chars)
+    found = retrieval.retrieve(
+        connection, question, owner_id=owner_id, top_k=top_k, memo_chars=memo_chars
+    )
 
     yield Event("sources", {"sources": [_source(source) for source in found.sources]})
 

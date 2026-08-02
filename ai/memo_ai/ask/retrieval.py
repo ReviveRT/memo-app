@@ -119,7 +119,15 @@ _SEARCH = f"""
                m.created_at,
                ts_rank(m.search_vector, q.query) AS rank
           FROM memos m, q
-         WHERE m.transcript IS NOT NULL
+         -- The owner leads, and it is the only predicate here that is not about
+         -- relevance. Without it this query retrieves across every memo in the
+         -- database and the model answers one person's question out of another
+         -- person's transcripts -- quoted verbatim in an excerpt, which is the
+         -- worst shape that leak could take. It is first in the WHERE so that a
+         -- reader checking whether Ask is scoped finds the answer immediately,
+         -- and so the planner leads with the equality.
+         WHERE m.owner_id = %(owner_id)s
+           AND m.transcript IS NOT NULL
            AND btrim(m.transcript) <> ''
            AND m.search_vector @@ q.query
          ORDER BY rank DESC, m.created_at DESC
@@ -193,10 +201,20 @@ def retrieve(
     connection: psycopg.Connection,
     question: str,
     *,
+    owner_id: str,
     top_k: int,
     memo_chars: int,
 ) -> Retrieval:
-    """Find the memos this question is about, best match first."""
+    """
+    Find the memos this question is about, best match first.
+
+    ``owner_id`` is keyword-only and has no default, deliberately. It is the one
+    argument here that is not a tuning knob: a default would make an unscoped
+    retrieval expressible, and the failure mode of an unscoped retrieval is that
+    somebody's private transcript is quoted into somebody else's answer. Making it
+    required means a caller who has not thought about whose memos these are cannot
+    call this function at all.
+    """
     terms = _terms(connection, question)
 
     if not terms:
@@ -206,6 +224,7 @@ def retrieve(
         cursor.execute(
             _SEARCH,
             {
+                "owner_id": owner_id,
                 "lexemes": list(terms),
                 "limit": top_k,
                 "headline": HEADLINE_OPTIONS,

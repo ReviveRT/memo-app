@@ -10,10 +10,12 @@ import MemoDialog from '../components/MemoDialog.vue'
 import MemoRecorder from '../components/MemoRecorder.vue'
 import MemoStrip from '../components/MemoStrip.vue'
 import MemoToasts from '../components/MemoToasts.vue'
+import OwnerPanel from '../components/OwnerPanel.vue'
 import ReminderBanner from '../components/ReminderBanner.vue'
 import { useCollections } from '../composables/useCollections'
 import { onMemoRemoved } from '../composables/useMemoList'
 import { useMemos } from '../composables/useMemos'
+import { ensureOwner } from '../composables/useOwner'
 import { usePolling } from '../composables/usePolling'
 import { startReminders } from '../composables/useReminders'
 
@@ -146,7 +148,19 @@ function collectionsChanged() {
   load()
 }
 
-onMounted(() => {
+onMounted(async () => {
+  // **Awaited, and everything below depends on it having finished.** `GET /api/owner` is the
+  // only safe read the API will create an identity for, so this is what guarantees the three
+  // calls after it arrive with a cookie. Started in parallel instead, all four would arrive
+  // without one: the API answers reads from an empty transient owner, so the screen would come
+  // up blank, and the identity this call then mints is a different one from the one the next
+  // reload would present. See composables/useOwner.js.
+  //
+  // It costs one round trip before the first list request on a cold load, and nothing on any
+  // load after that -- the cookie is already there, so the API resolves it rather than
+  // minting.
+  await ensureOwner()
+
   load()
   collections.load()
 
@@ -173,6 +187,14 @@ onMounted(() => {
         {{ loading ? 'Refreshing…' : 'Refresh' }}
       </button>
     </header>
+
+    <!--
+      Directly under the header and above everything that writes a memo, because what it has
+      to say is a precondition for all of them: these memos belong to this browser. Collapsed
+      by default -- it is reference rather than news -- but it is also where the notice after
+      following a claim link appears, and that one has to be seen without being looked for.
+    -->
+    <OwnerPanel />
 
     <!--
       The recorder first, because it is what the app is for and because the bloom behind the

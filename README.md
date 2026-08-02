@@ -454,6 +454,54 @@ threads at once, so a second question asked while one is running is refused with
 sentence rather than queued or run alongside. On this hardware that is honest —
 two answers at once would be slower than two answers in a row.
 
+## Whose memos are whose
+
+Two people opening this app see different memos, and there is no login involved.
+
+On its first visit a browser is given a long-lived `HttpOnly` cookie holding a random
+128-bit token. That token *is* the identity: every query the API runs — the list, search,
+collections, reminders, playback, and the retrieval behind Ask — is scoped by it. There is
+no account, no password, no email and no JWT anywhere in the project.
+
+**Moving memos to another device.** Under the header, "These memos are saved to this
+browser" expands to a link. Open that link anywhere and those memos are there too — that
+is what claiming is. The link keeps working, so it moves memos rather than transferring
+them.
+
+Two things follow, and they are the honest cost of having no accounts:
+
+- **Anyone with the link has the memos.** It is a credential with no second factor and no
+  way to revoke it. Treat it the way you would treat a password.
+- **Clearing cookies loses them** unless the link was saved somewhere. There is nothing to
+  recover through, because there is no email to recover to.
+
+### Why a cookie rather than localStorage
+
+localStorage is the obvious place to keep an id, and it does not work here. The recording
+on a memo card is an `<audio src="/api/memos/{id}/audio">`: the *browser* issues that
+request, so there is no fetch wrapper to attach a header or a stored id to. An identity
+that JavaScript has to send would have left every recording readable by memo id alone —
+silently, because every JSON route would still have looked correctly scoped. A cookie is
+attached by the browser to requests the application never sees, which is exactly the case
+that needed covering.
+
+It also means `SameSite=Lax` is this project's only CSRF defence, since there is no `web`
+middleware group and therefore no CSRF token. Anything that loosens it has to bring one.
+
+### Retention
+
+Anonymous identities cost nothing to create, so the table grows with traffic rather than
+with users. Two things keep it bounded: a cookie-less `GET` is answered from an empty
+transient owner and writes no row at all (so crawlers and uptime pingers leave nothing
+behind), and inactive owners are deleted by
+
+```bash
+docker compose exec api php artisan memo:prune-owners --dry-run
+```
+
+`db/migrations/007_owners.sql` has the schema and the full argument; `deploy/README.md`
+has how this behaves on a hosted deployment.
+
 ## Configuration
 
 Everything has a working default. `.env` is optional — copy `.env.example` to
@@ -1156,7 +1204,14 @@ db/migrations/   numbered SQL migrations, applied in filename order
 api/             PHP API (Laravel on FrankenPHP)
 ai/              Python — the worker (transcription, enrichment) and ai-api (Ask)
 web/             frontend
+deploy/          the production image: one container, SPA and API on one origin
 ```
+
+`deploy/` is a second build rather than a replacement for the four above. Compose runs
+Vite's dev server in front of the API so the frontend has hot reload; the production image
+bakes the SPA into `public/` and lets FrankenPHP serve both, which is what keeps the owner
+cookie on one origin and fits a free tier's single web service. `deploy/README.md` has the
+rest, including what that image deliberately leaves out.
 
 `ai/` builds **one image behind two services**: `ai-worker` runs `python -m
 memo_ai.worker` and `ai-api` runs `python -m memo_ai.ask`. One build context, one
@@ -1172,7 +1227,12 @@ intentionally unset — nothing here encrypts.
 ## HTTP API
 
 Everything is under `/api`, served by the `api` container and proxied by the dev
-server so the browser sees one origin. No authentication — see Assumptions.
+server so the browser sees one origin.
+
+No authentication, and every route below answers only for the browser that asked —
+see [Whose memos are whose](#whose-memos-are-whose). A memo belonging to somebody else
+is a **404**, not a 403: the ownership filter and the not-found path are the same
+predicate, so nothing distinguishes an id that is taken from one that is free.
 
 | Method | Path | What it does |
 | --- | --- | --- |
@@ -1192,6 +1252,9 @@ server so the browser sees one origin. No authentication — see Assumptions.
 | `POST` | `/memos/{memo}/reminders` | `{remind_at, note?}` |
 | `PATCH` | `/reminders/{reminder}` | Mark it shown. No body; idempotent |
 | `DELETE` | `/reminders/{reminder}` | Remove it |
+| `GET` | `/owner` | The frontend's bootstrap: establishes this browser's identity and answers `{owner:{id}}`. The one safe read that creates an owner |
+| `POST` | `/owner/claim-link` | The shareable link for these memos. A POST because the response contains the bearer token — see below |
+| `GET` | `/claim/{token}` | Adopt an identity in this browser, then redirect to `/memos?claim=…`. Opened by a person, so it redirects rather than answering JSON |
 
 `GET /memos` takes four independent filters, and any combination is valid:
 
@@ -1321,9 +1384,13 @@ NOTES.md (MEMO-27)._
 
 ## Assumptions
 
-- Single user. No authentication, no multi-tenancy.
-- Local-only. Not hardened for a public deployment.
-- Audio is kept on a Docker volume, not object storage.
+- **No authentication.** Memos are scoped per browser by a cookie, not by an account —
+  see [Whose memos are whose](#whose-memos-are-whose). There is no login, no password
+  and no JWT, and the ownership check is a bearer token rather than a security boundary.
+- Not hardened for a public deployment holding anything sensitive.
+- Audio lives on a Docker volume by default, and in an S3-compatible bucket when one is
+  configured (`AUDIO_BUCKET`). The second is what a hosted deployment wants: a free
+  tier's filesystem is rebuilt on every deploy.
 
 ## Development
 

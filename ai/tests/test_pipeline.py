@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from memo_ai import audio, failures, pipeline
-from memo_ai.config import DEFAULT_MAX_AUDIO_SECONDS, DEFAULT_REAP_AFTER_SECONDS
+from memo_ai.config import DEFAULT_MAX_AUDIO_SECONDS, DEFAULT_REAP_AFTER_SECONDS, Settings
 from memo_ai.enrich import NO_ENRICHMENT, Enrichment, EnrichmentError
 from memo_ai.stt.base import SttError, SttUnavailable
 from tests.support import (
@@ -26,6 +26,11 @@ from tests.support import (
 )
 
 MAX_SECONDS = 600.0
+
+# A settings object with no bucket configured, which is what every test in this module
+# wants: recordings come off `audio_dir`, the fixture directory the tests build by hand.
+# pipeline.available consults this for AUDIO_BUCKET and for nothing else.
+SETTINGS = Settings.from_env({"DATABASE_URL": "postgresql://memo:memo@db:5432/memo"})
 
 
 @pytest.fixture
@@ -47,7 +52,7 @@ def normalizer(monkeypatch):
 
 
 def run(queue, memo, provider, audio_dir, max_seconds=MAX_SECONDS, enricher=NO_ENRICHMENT):
-    pipeline.run_job(queue, memo, provider, audio_dir, max_seconds, enricher)
+    pipeline.run_job(queue, memo, provider, audio_dir, max_seconds, SETTINGS, enricher)
 
 
 def test_a_text_memo_is_not_normalized_or_transcribed_and_goes_straight_to_ready(

@@ -98,7 +98,33 @@ for path in "$migrations_dir"/*.sql; do
     # instead of silently merging into this statement. Plain INSERT rather than
     # ON CONFLICT DO NOTHING is deliberate — a duplicate key here would mean the
     # check above is broken, and failing loudly beats recording it quietly.
+    # pg_advisory_xact_lock first, and it is inside the same --single-transaction as the
+    # migration, so it is held until that transaction commits and released by it.
+    #
+    # It is here because deploy/entrypoint.sh runs this script at container boot rather than
+    # as compose's gated one-shot service. Two containers starting together would otherwise
+    # both find a migration unapplied and both run it, and the loser would fail on whatever
+    # its DDL had already done -- `relation "owners" already exists` -- rather than on the
+    # ledger's primary key, which is a much less legible error.
+    #
+    # **What this does and does not guarantee, since a half-promise is worse than none.** It
+    # serialises the writes, so the database is never touched by two migrators at once and
+    # cannot end up half-applied. It does *not* make the loser exit 0: that container read the
+    # ledger before blocking on this lock, so it still tries to apply a file the winner has
+    # since recorded, and it still exits non-zero. What it converts is the failure's shape --
+    # from corrupt-or-arbitrary to a clean "already exists" on a container the platform will
+    # restart, whose next boot reads the updated ledger and starts normally.
+    #
+    # The key is an arbitrary constant, shared by every instance of this application and by
+    # nothing else. Advisory locks live in one cluster-wide namespace, so the number matters
+    # only in that two unrelated applications picking the same one would block each other.
+    # Wrapped in a DO block rather than issued as a bare SELECT, and that is about output
+    # rather than semantics: --quiet does not suppress a result set, so `SELECT
+    # pg_advisory_xact_lock(...)` prints a header, a blank value and "(1 row)" before every
+    # migration -- three lines of noise per file in what this script works hard to keep a
+    # clean `docker compose up`. PERFORM inside DO returns nothing.
     psql_run --single-transaction \
+        -c 'DO $$ BEGIN PERFORM pg_advisory_xact_lock(4021979); END $$;' \
         -f "$path" \
         -c "INSERT INTO schema_migrations (filename) VALUES ('$escaped');"
 

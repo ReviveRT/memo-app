@@ -103,4 +103,17 @@ final class RecordingAudioStorage implements AudioStorage
     {
         return null;
     }
+
+    /**
+     * What to answer from temporaryUrl, or null to behave like a local driver.
+     *
+     * Set it to make a test take MemoController::audio's bucket branch -- the redirect --
+     * without configuring a bucket or reaching the network.
+     */
+    public ?string $signedUrl = null;
+
+    public function temporaryUrl(string $key, int $seconds): ?string
+    {
+        return $this->signedUrl;
+    }
 }

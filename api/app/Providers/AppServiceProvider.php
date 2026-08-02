@@ -8,7 +8,10 @@ use App\Contracts\AskBackend;
 use App\Contracts\AudioStorage;
 use App\Services\Ask\HttpAskBackend;
 use App\Services\Health\HealthService;
+use App\Services\Owners\OwnerContext;
 use App\Storage\LocalAudioStorage;
+use App\Storage\S3AudioStorage;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
@@ -20,11 +23,38 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        // The swap point named in MEMO-05: an S3 driver replaces this one line.
-        $this->app->singleton(
-            AudioStorage::class,
-            fn (): AudioStorage => new LocalAudioStorage((string) config('memo.audio_dir')),
-        );
+        // One instance per request, shared by the middleware that fills it and every
+        // repository that reads it. `singleton` and not `scoped`, and the difference is
+        // worth stating because it looks like the wrong choice: `scoped` exists for
+        // long-running workers that serve many requests from one container, and this
+        // application does not run one -- api/Dockerfile starts FrankenPHP without a worker
+        // script, so the container is rebuilt per request and the two are identical here.
+        // If a worker mode is ever enabled, this line must become `scoped` or the first
+        // request's owner would be handed to every request after it. That is the single
+        // most dangerous line in this file for that reason.
+        $this->app->singleton(OwnerContext::class);
+
+        // The swap point named in MEMO-05, now with something to swap to.
+        //
+        // Chosen by whether a bucket is configured rather than by a driver name, because the
+        // two are not independent: `AUDIO_DRIVER=s3` with no bucket is a deployment that
+        // boots happily and fails on the first upload, and every name that could be set is
+        // one more way to spell a mistake. A bucket name is the thing that has to be true.
+        //
+        // The consequence is that local compose needs no new variable at all -- no
+        // AUDIO_BUCKET, local driver, exactly as before -- and a hosted deployment turns this
+        // on by configuring the storage it was always going to have to configure.
+        $this->app->singleton(AudioStorage::class, function (): AudioStorage {
+            if ((string) config('filesystems.disks.audio.bucket') === '') {
+                return new LocalAudioStorage((string) config('memo.audio_dir'));
+            }
+
+            // The disk rather than the whole Storage manager, so S3AudioStorage depends on
+            // the one thing it uses. `audio` and not `s3`: the default s3 disk is the
+            // framework's and carries Laravel's own defaults, while this one is configured
+            // for a recording -- private visibility, throwing on failure.
+            return new S3AudioStorage(Storage::disk('audio'));
+        });
 
         // The second swap point (MEMO-24): a hosted model, or an in-process one,
         // replaces this line and nothing else. `bind` rather than `singleton`

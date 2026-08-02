@@ -38,7 +38,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
-from memo_ai import audio, failures, rss
+from memo_ai import audio, blobs, failures, rss
+from memo_ai.config import Settings
 from memo_ai.enrich import NO_ENRICHMENT, Enricher, Enrichment, EnrichmentError
 from memo_ai.memos import ClaimedMemo, MemoQueue
 from memo_ai.stt import local
@@ -73,6 +74,7 @@ def run_job(
     provider: SttProvider,
     audio_dir: Path,
     max_audio_seconds: float,
+    settings: Settings,
     enricher: Enricher = NO_ENRICHMENT,
 ) -> None:
     """
@@ -99,7 +101,7 @@ def run_job(
     duration_ms: int | None = None
 
     try:
-        with owed_audio(memo, provider, audio_dir, max_audio_seconds) as prepared:
+        with owed_audio(memo, provider, audio_dir, max_audio_seconds, settings) as prepared:
             # None means this memo owes no transcript -- see owed_audio.
             duration_ms = None if prepared is None else prepared.duration_ms
             transcript = (
@@ -340,6 +342,7 @@ def owed_audio(
     provider: SttProvider,
     audio_dir: Path,
     max_audio_seconds: float,
+    settings: Settings,
 ) -> Iterator[audio.NormalizedAudio | None]:
     """
     Yield the normalized audio this memo owes a transcript for, or ``None``.
@@ -358,8 +361,11 @@ def owed_audio(
     second bill.
 
     A context manager because what it yields is a temporary file. The normalized
-    copy is deleted when the caller is done with it, and the original on the
-    ``audio`` volume is never touched -- MEMO-23 serves playback from that one.
+    copy is deleted when the caller is done with it, and the original is never
+    touched -- MEMO-23 serves playback from that one. On a bucket deployment there
+    are now *two* temporary files in play, the download and the normalized copy, and
+    both are removed by the nested ``with`` below; the object in the bucket is left
+    exactly as the API wrote it.
 
     Which format gets produced is the provider's choice, defaulting to Opus. See
     ``audio.format_for``.
@@ -376,7 +382,36 @@ def owed_audio(
         # future writer would take.
         raise SttError("This memo owes a transcript but has no audio file recorded against it.")
 
-    source = audio_file(audio_dir, memo.audio_path)
+    # Two places a recording can be, and one shape for both: `available` yields a readable
+    # path either way, so everything below is identical whether the bytes came off the
+    # shared volume or out of a bucket. See memo_ai/blobs.py for why the second exists.
+    with available(memo.audio_path, settings, audio_dir) as source:
+        with audio.normalize(source, audio.format_for(provider), max_audio_seconds) as normalized:
+            yield normalized
+
+
+@contextmanager
+def available(key: str, settings: Settings, audio_dir: Path) -> Iterator[Path]:
+    """
+    Yield a local path holding this recording, fetching it first if it lives in a bucket.
+
+    A context manager because one of the two branches owns a temporary file and the other
+    does not, and the caller must not have to know which -- the volume path is yielded as
+    it is and outlives the block, the downloaded copy is removed on the way out.
+    """
+    if settings.uses_bucket():
+        # BlobError is raised with a sentence already fit for the row, so it is translated
+        # rather than wrapped: SttError is what the caller's failure handling understands,
+        # and re-wording here would put two descriptions of one failure in two files.
+        try:
+            with blobs.fetched(settings, key) as fetched_path:
+                yield fetched_path
+        except blobs.BlobError as error:
+            raise SttError(str(error)) from error
+
+        return
+
+    source = audio_file(audio_dir, key)
 
     if not source.is_file():
         # Checked here rather than left to ffmpeg, which reports a missing input
@@ -385,8 +420,7 @@ def owed_audio(
         # this way the row says which of the two things went wrong.
         raise SttError("The audio file for this memo is missing from the audio volume.")
 
-    with audio.normalize(source, audio.format_for(provider), max_audio_seconds) as normalized:
-        yield normalized
+    yield source
 
 
 def audio_file(audio_dir: Path, key: str) -> Path:

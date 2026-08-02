@@ -23,6 +23,11 @@ CREATED_AT = datetime(2026, 7, 31, 12, 0, 0, 123456, tzinfo=UTC)
 
 MEMO_ID = UUID("01900000-0000-7000-8000-000000000001")
 
+# Whose memos are being searched. A plain string rather than a UUID because that is
+# what reaches psycopg -- memo_ai/ask/app.py parses and re-serialises it, so this is
+# the value the parameter actually carries.
+OWNER = "01900000-0000-7000-8000-0000000000aa"
+
 
 def row(**overrides) -> dict:
     fields = {
@@ -49,7 +54,13 @@ def connection(lexemes=("dentist",), rows=None) -> FakeConnection:
 def test_the_question_is_reduced_to_lexemes_by_postgres_and_not_by_us():
     fake = connection()
 
-    retrieval.retrieve(fake, "what did I say about the dentist", top_k=3, memo_chars=1200)
+    retrieval.retrieve(
+        fake,
+        "what did I say about the dentist",
+        owner_id=OWNER,
+        top_k=3,
+        memo_chars=1200,
+    )
 
     # The whole question goes to `to_tsvector`, unedited. There is no stopword list
     # in this package and there must not be one: the index was built with the
@@ -60,7 +71,13 @@ def test_the_question_is_reduced_to_lexemes_by_postgres_and_not_by_us():
 def test_the_search_is_given_the_lexemes_the_first_statement_found():
     fake = connection(lexemes=("land", "page", "say"))
 
-    retrieval.retrieve(fake, "what did I say about the landing page", top_k=3, memo_chars=1200)
+    retrieval.retrieve(
+        fake,
+        "what did I say about the landing page",
+        owner_id=OWNER,
+        top_k=3,
+        memo_chars=1200,
+    )
 
     params = fake.params_for("ts_headline")
 
@@ -73,12 +90,29 @@ def test_the_search_is_given_the_lexemes_the_first_statement_found():
 def test_top_k_and_the_headline_options_reach_the_statement():
     fake = connection()
 
-    retrieval.retrieve(fake, "dentist", top_k=5, memo_chars=1200)
+    retrieval.retrieve(fake, "dentist", owner_id=OWNER, top_k=5, memo_chars=1200)
 
     params = fake.params_for("ts_headline")
 
     assert params["limit"] == 5
     assert params["headline"] == retrieval.HEADLINE_OPTIONS
+
+
+def test_the_owner_is_bound_into_the_search():
+    """
+    The one parameter here that is not about relevance.
+
+    Without it the statement retrieves across every memo in the database and the model
+    answers one person's question out of another person's transcripts -- quoted back
+    verbatim in an excerpt, which is the worst shape that leak could take. Asserted on
+    the bound parameter rather than on the SQL text, so it fails if the binding is
+    dropped even when the predicate is still written in the statement.
+    """
+    fake = connection()
+
+    retrieval.retrieve(fake, "dentist", owner_id=OWNER, top_k=3, memo_chars=1200)
+
+    assert fake.params_for("ts_headline")["owner_id"] == OWNER
 
 
 def test_a_question_with_no_lexemes_never_reaches_the_search():
@@ -91,7 +125,13 @@ def test_a_question_with_no_lexemes_never_reaches_the_search():
     """
     fake = FakeConnection(rows=[[]])
 
-    found = retrieval.retrieve(fake, "what about it?", top_k=3, memo_chars=1200)
+    found = retrieval.retrieve(
+        fake,
+        "what about it?",
+        owner_id=OWNER,
+        top_k=3,
+        memo_chars=1200,
+    )
 
     assert found.sources == ()
     assert found.terms == ()
@@ -107,7 +147,13 @@ def test_terms_that_match_nothing_are_a_different_empty_from_no_terms():
     """
     fake = connection(lexemes=("kubernetes",), rows=[])
 
-    found = retrieval.retrieve(fake, "what did I say about kubernetes", top_k=3, memo_chars=1200)
+    found = retrieval.retrieve(
+        fake,
+        "what did I say about kubernetes",
+        owner_id=OWNER,
+        top_k=3,
+        memo_chars=1200,
+    )
 
     assert found.sources == ()
     assert found.has_terms
@@ -126,7 +172,13 @@ def test_sources_are_numbered_from_one_in_the_order_the_database_returned_them()
         ]
     )
 
-    found = retrieval.retrieve(fake, "dentist", top_k=3, memo_chars=1200)
+    found = retrieval.retrieve(
+        fake,
+        "dentist",
+        owner_id=OWNER,
+        top_k=3,
+        memo_chars=1200,
+    )
 
     assert [source.ref for source in found.sources] == [1, 2]
     assert [source.title for source in found.sources] == ["First", "Second"]
@@ -135,7 +187,13 @@ def test_sources_are_numbered_from_one_in_the_order_the_database_returned_them()
 def test_an_excerpt_shorter_than_the_cap_is_not_reported_as_truncated():
     fake = connection(rows=[row(excerpt="Short memo.", transcript_chars=11)])
 
-    (source,) = retrieval.retrieve(fake, "memo", top_k=3, memo_chars=1200).sources
+    (source,) = retrieval.retrieve(
+        fake,
+        "memo",
+        owner_id=OWNER,
+        top_k=3,
+        memo_chars=1200,
+    ).sources
 
     assert source.excerpt == "Short memo."
     assert not source.truncated
@@ -152,7 +210,13 @@ def test_whitespace_is_collapsed_without_being_counted_as_truncation():
     # point of the statement computing it rather than returning `length(transcript)`.
     fake = connection(rows=[row(excerpt="Two\n\nlines   here.", transcript_chars=15)])
 
-    (source,) = retrieval.retrieve(fake, "lines", top_k=3, memo_chars=1200).sources
+    (source,) = retrieval.retrieve(
+        fake,
+        "lines",
+        owner_id=OWNER,
+        top_k=3,
+        memo_chars=1200,
+    ).sources
 
     assert source.excerpt == "Two lines here."
     assert not source.truncated
@@ -161,7 +225,13 @@ def test_whitespace_is_collapsed_without_being_counted_as_truncation():
 def test_an_excerpt_over_the_cap_is_cut_on_a_word_boundary_and_marked():
     fake = connection(rows=[row(excerpt="alpha bravo charlie delta", transcript_chars=25)])
 
-    (source,) = retrieval.retrieve(fake, "bravo", top_k=3, memo_chars=15).sources
+    (source,) = retrieval.retrieve(
+        fake,
+        "bravo",
+        owner_id=OWNER,
+        top_k=3,
+        memo_chars=15,
+    ).sources
 
     assert source.excerpt == "alpha bravo …"
     assert source.truncated
@@ -179,7 +249,13 @@ def test_the_cap_includes_the_marker():
     for limit in range(4, len(text) + 4):
         fake = connection(rows=[row(excerpt=text, transcript_chars=len(text))])
 
-        (source,) = retrieval.retrieve(fake, "bravo", top_k=1, memo_chars=limit).sources
+        (source,) = retrieval.retrieve(
+            fake,
+            "bravo",
+            owner_id=OWNER,
+            top_k=1,
+            memo_chars=limit,
+        ).sources
 
         assert len(source.excerpt) <= limit, (limit, source.excerpt)
 
@@ -192,7 +268,13 @@ def test_one_long_word_is_hard_cut_rather_than_returned_whole():
     """
     fake = connection(rows=[row(excerpt="a" * 100, transcript_chars=100)])
 
-    (source,) = retrieval.retrieve(fake, "a", top_k=1, memo_chars=20).sources
+    (source,) = retrieval.retrieve(
+        fake,
+        "a",
+        owner_id=OWNER,
+        top_k=1,
+        memo_chars=20,
+    ).sources
 
     assert len(source.excerpt) == 20
     assert source.excerpt.endswith("…")
@@ -202,6 +284,12 @@ def test_a_blank_title_is_folded_to_none():
     """One spelling of "this memo has no title", for the prompt and for the UI."""
     fake = connection(rows=[row(title="   ")])
 
-    (source,) = retrieval.retrieve(fake, "dentist", top_k=3, memo_chars=1200).sources
+    (source,) = retrieval.retrieve(
+        fake,
+        "dentist",
+        owner_id=OWNER,
+        top_k=3,
+        memo_chars=1200,
+    ).sources
 
     assert source.title is None

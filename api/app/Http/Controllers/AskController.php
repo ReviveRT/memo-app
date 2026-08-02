@@ -7,6 +7,7 @@ namespace App\Http\Controllers;
 use App\Contracts\AskBackend;
 use App\Exceptions\AskUnavailable;
 use App\Http\Requests\AskRequest;
+use App\Services\Owners\OwnerContext;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
@@ -47,7 +48,15 @@ final class AskController extends Controller
      */
     private const NDJSON = 'application/x-ndjson';
 
-    public function __construct(private readonly AskBackend $backend) {}
+    /**
+     * OwnerContext is here rather than behind the backend, because "whose memos" is a property
+     * of the *request* and the backend is a transport. An implementation that read the owner
+     * itself would be one that could be constructed without one.
+     */
+    public function __construct(
+        private readonly AskBackend $backend,
+        private readonly OwnerContext $owner,
+    ) {}
 
     /**
      * Extra seconds of `max_execution_time` beyond the read timeout, for the request itself.
@@ -81,7 +90,7 @@ final class AskController extends Controller
         set_time_limit((int) config('memo.ask.read_timeout') + self::EXECUTION_MARGIN);
 
         try {
-            $chunks = $this->backend->ask($request->question());
+            $chunks = $this->backend->ask($request->question(), $this->owner->current()->id);
         } catch (AskUnavailable $e) {
             // 503 with the exception's own sentence, which is written for a person -- see
             // App\Exceptions\AskUnavailable, including why the browser still does not render

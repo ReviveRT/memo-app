@@ -13,6 +13,7 @@ use App\Http\Rules\SniffedAudioType;
 use App\Services\Memos\Memo;
 use App\Services\Memos\MemoService;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\RedirectResponse;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpFoundation\ResponseHeaderBag;
 
@@ -49,6 +50,21 @@ final class MemoController extends Controller
      * keeps a memo's id, and the id stops resolving the moment the memo is deleted.
      */
     private const PLAYBACK_MAX_AGE = 31_536_000;
+
+    /**
+     * How long a signed bucket URL stays valid, in seconds.
+     *
+     * Five minutes, and the number is bounded from both sides. It has to outlast a playback,
+     * because a browser scrubbing a recording issues a fresh ranged GET per drag and every one
+     * of them goes to the same signed URL -- expire it mid-listen and the player stops with an
+     * error it cannot explain. It has to be short because the URL is a bearer capability that
+     * S3 will honour for anybody who has it, cookie or not (see AudioStorage::temporaryUrl):
+     * whatever this is set to is how long a leaked link keeps working.
+     *
+     * Unused by the local driver, which returns null from temporaryUrl and serves the bytes
+     * itself.
+     */
+    private const PLAYBACK_URL_TTL = 300;
 
     /**
      * AudioStorage is here for `audio()` alone, and MemoService::audioFor has the argument for
@@ -320,12 +336,46 @@ final class MemoController extends Controller
      * 500, which is the distinction MemoController's class docblock draws: a caller can do
      * nothing about an unmounted volume, and that is not this.
      */
-    public function audio(string $memo): AudioFileResponse
+    public function audio(string $memo): AudioFileResponse|RedirectResponse
     {
         $audio = $this->memos->audioFor($memo);
 
         if ($audio === null) {
             abort(Response::HTTP_NOT_FOUND, 'That memo has no recording to play.');
+        }
+
+        // **The ownership check has already happened, and this is the only place it could
+        // have.** audioFor above is scoped to the owner, so reaching this line means the
+        // recording belongs to whoever holds the cookie. Everything below hands out bytes
+        // with no further check -- including, on a bucket deployment, a signed URL that
+        // carries no cookie at all. That ordering is the whole of the authorisation.
+        //
+        // The bucket branch first, and the driver answers exactly one of the two: S3
+        // throws from localPath rather than returning null, so asking in the other order
+        // would 500 every playback on a bucket deployment. See App\Contracts\AudioStorage.
+        $signed = $this->storage->temporaryUrl($audio->key, self::PLAYBACK_URL_TTL);
+
+        if ($signed !== null) {
+            // A redirect rather than streaming the object through this container, and on a
+            // free tier that is the difference between working and not: egress is the metered
+            // resource, and proxying every scrub through PHP spends it twice. S3 and R2 honour
+            // Range themselves, which is the requirement MEMO-23 exists for -- Safari refuses
+            // to play audio from an endpoint that answers a Range request with the whole file.
+            //
+            // 302 rather than 301: the target expires, and a permanent redirect to a URL that
+            // stops working in minutes is one a browser may cache and then be unable to
+            // recover from.
+            //
+            // The redirect itself must not be cached anywhere near as long as the recording
+            // is immutable for -- the bytes never change, but this pointer to them expires --
+            // so it carries its own short freshness rather than inheriting the year below.
+            //
+            // **A fraction of the signature's life, not all of it.** Caching the 302 for
+            // exactly PLAYBACK_URL_TTL means a browser may reuse it at the last second and
+            // follow a URL with a second of validity left, which fails a playback that had no
+            // reason to. The margin is what makes a cached redirect still worth following.
+            return redirect($signed, Response::HTTP_FOUND)
+                ->header('Cache-Control', 'private, max-age='.intdiv(self::PLAYBACK_URL_TTL, 4));
         }
 
         $path = $this->storage->localPath($audio->key);

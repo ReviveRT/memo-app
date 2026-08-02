@@ -451,6 +451,100 @@ h1,
   color: var(--error);
 }
 
+/*
+ * The counterpart, for a claim that worked. Same shape as the error variant so the two read
+ * as one family, in the accent rather than in a fourth colour -- this app has no green and
+ * introducing one for a single message would be a palette decision made by a notice.
+ */
+.notice--ok {
+  padding: 0.6rem 0.75rem;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  color: var(--text);
+}
+
+/* --- the owner panel -------------------------------------------------------- */
+
+/*
+ * "These memos are saved to this browser", and the link that moves them.
+ *
+ * Deliberately quiet. It sits above the recorder, which is the thing the screen is for, so
+ * anything with a border and a background would read as more important than the button it is
+ * standing in front of. Collapsed it is one line of muted text that looks like a link;
+ * expanded it is an explanation and one control.
+ */
+.owner {
+  margin: 0 0 1rem;
+}
+
+.owner__toggle {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.875rem;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+  cursor: pointer;
+}
+
+.owner__toggle:hover {
+  color: var(--text);
+}
+
+.owner__body {
+  margin-top: 0.75rem;
+  padding: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.owner__explainer {
+  margin: 0 0 0.75rem;
+  max-width: 60ch;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.owner__link {
+  margin-top: 0.75rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+/*
+ * Wide enough to show most of a claim URL, and allowed to shrink on a narrow screen rather
+ * than pushing the Copy button off the row -- which is the one control that matters here,
+ * since the text is long enough that nobody is retyping it.
+ */
+.owner__url {
+  flex: 1 1 22rem;
+  min-width: 0;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+}
+
+/*
+ * flex-basis 100% so this always takes its own row under the input and the button, rather
+ * than squeezing in beside them on a wide window -- it is the sentence that says the link is
+ * a credential, and it should not be the thing that gets truncated.
+ */
+.owner__warning {
+  flex: 1 0 100%;
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
 /* --- badges and tags -------------------------------------------------------- */
 
 .tags {

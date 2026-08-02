@@ -133,6 +133,25 @@ final class LocalAudioStorage implements AudioStorage
     }
 
     /**
+     * Null, always: there is no URL a browser could fetch a file on this volume from.
+     *
+     * The volume is not published anywhere -- no web server has it as a root, and the only
+     * way bytes leave it is through the playback route reading localPath above. So this is
+     * "this driver does not do that" rather than "no such object", which is the distinction
+     * the contract draws, and it is what sends MemoController::audio to the local branch.
+     *
+     * The key is still validated. Every method on this interface refuses a malformed key
+     * including the ones that answer nothing, so that a traversal probe cannot be used to
+     * learn which method skips the check.
+     */
+    public function temporaryUrl(string $key, int $seconds): ?string
+    {
+        $this->path($key);
+
+        return null;
+    }
+
+    /**
      * Write to a sibling temp file, flush it to disk, then rename into place.
      *
      * rename(2) within one filesystem is atomic, so a concurrent reader sees either

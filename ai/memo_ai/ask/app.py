@@ -31,6 +31,7 @@ import logging
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from typing import Annotated
+from uuid import UUID
 
 import psycopg
 from fastapi import FastAPI, Response
@@ -65,7 +66,7 @@ MAX_QUESTION_CHARS = 500
 
 class Question(BaseModel):
     """
-    The request body. One field, and pydantic is what refuses everything else.
+    The request body. Two fields, and pydantic is what refuses everything else.
 
     ``min_length`` is 2 rather than 1 because a one-character question cannot
     produce a lexeme worth searching for, and rejecting it here is a clearer answer
@@ -85,6 +86,22 @@ class Question(BaseModel):
             strip_whitespace=True, min_length=2, max_length=MAX_QUESTION_CHARS
         ),
     ]
+
+    # Whose memos to answer from. Required, with no default: this service is
+    # reachable only from the `api` container (no host port is mapped for it, see
+    # config/memo.php), so the owner has already been resolved from a cookie by the
+    # time a request gets here and there is nothing for this side to authenticate.
+    # What it must not do is accept a request that forgot to say. A default of any
+    # kind -- None, empty string, "all" -- would turn a bug in the PHP caller into a
+    # silent retrieval across every memo in the database, so the absence of this
+    # field is a 422 from pydantic instead.
+    #
+    # `UUID` rather than `str`, so a malformed id is refused here rather than
+    # reaching Postgres and coming back as `invalid input syntax for type uuid` in
+    # the middle of a stream that has already begun. It is serialised back to a
+    # string at the call site because psycopg binds it either way and the SQL reads
+    # the same.
+    owner_id: UUID
 
 
 def create_app(settings: Settings, model: Model) -> FastAPI:
@@ -183,7 +200,7 @@ def create_app(settings: Settings, model: Model) -> FastAPI:
             )
 
         return StreamingResponse(
-            _lines(settings, model, body.question),
+            _lines(settings, model, body.question, str(body.owner_id)),
             media_type=NDJSON,
             headers={
                 # The answer is generated once and is never the same twice for a
@@ -205,7 +222,9 @@ def create_app(settings: Settings, model: Model) -> FastAPI:
     return app
 
 
-def _lines(settings: Settings, model: Model, question: str) -> Iterator[bytes]:
+def _lines(
+    settings: Settings, model: Model, question: str, owner_id: str
+) -> Iterator[bytes]:
     """
     The service's events, one JSON object per line.
 
@@ -227,6 +246,7 @@ def _lines(settings: Settings, model: Model, question: str) -> Iterator[bytes]:
                 connection,
                 model,
                 question,
+                owner_id=owner_id,
                 top_k=settings.ask_top_k,
                 memo_chars=settings.ask_memo_chars,
             ):

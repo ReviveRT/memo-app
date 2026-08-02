@@ -84,9 +84,9 @@ final class HttpAskBackend implements AskBackend
      * the ai-api container produced an empty 200 rather than a 503, because the exception was
      * thrown inside the response body long after the headers had gone.
      */
-    public function ask(string $question): iterable
+    public function ask(string $question, string $ownerId): iterable
     {
-        return $this->chunks($this->open($question));
+        return $this->chunks($this->open($question, $ownerId));
     }
 
     /**
@@ -109,21 +109,37 @@ final class HttpAskBackend implements AskBackend
      *
      * @return resource
      */
-    private function open(string $question)
+    private function open(string $question, string $ownerId)
     {
         try {
             $response = Http::withOptions(['stream' => true])
                 ->connectTimeout($this->connectTimeout)
                 ->timeout($this->readTimeout)
-                ->post($this->baseUrl.'/ask', ['question' => $question]);
+                // The owner travels in the body beside the question rather than as a header
+                // or a query parameter, for the reason routes/api.php gives about making this
+                // a POST at the edge: a question is private, and so is the identity of who is
+                // asking. Neither belongs in a URL that ai-api's access log would record.
+                ->post($this->baseUrl.'/ask', [
+                    'question' => $question,
+                    'owner_id' => $ownerId,
+                ]);
         } catch (ConnectionException $e) {
             // The container is not running, the name does not resolve, or nothing accepted the
             // connection in time. One sentence for all three, because the reader has the same
             // one thing to do about each -- and none of the three is worth putting a hostname
             // in front of somebody.
+            //
+            // **This one is for an operator, not for the person who asked the question.**
+            // AskUnavailable's docblock has the full argument: it reaches `curl -i` and the api
+            // log and never the browser, because request.js replaces every 5xx body and
+            // web/src/api/ask.js authors the sentence a reader sees. So it may name a command,
+            // where the frontend's may not -- but it still has to be true on a deployment that
+            // has no compose, which is why the two possibilities are named rather than the one.
             throw new AskUnavailable(
                 'Ask is not available: the ai-api service is not answering. '
-                    .'Check that it is running: docker compose ps ai-api',
+                    .'Under compose, check it with: docker compose ps ai-api. '
+                    .'On a deployment without it, Ask is unavailable by design '
+                    .'(see deploy/README.md) and AI_API_URL should point at a running instance.',
                 previous: $e,
             );
         }

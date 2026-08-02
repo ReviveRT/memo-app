@@ -246,6 +246,11 @@ def _run(
                         provider,
                         settings.audio_dir,
                         settings.max_audio_seconds,
+                        # For AUDIO_BUCKET alone -- pipeline.available consults it to
+                        # decide whether this recording is on the volume or in a bucket.
+                        # audio_dir stays a parameter of its own because the tests drive
+                        # it independently of any Settings.
+                        settings,
                         # Whatever ENRICH_PROVIDER resolved to at boot -- the local
                         # model by default, `NO_ENRICHMENT` on `none`. Passed
                         # explicitly rather than left to the default, which is the
