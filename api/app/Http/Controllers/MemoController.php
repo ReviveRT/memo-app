@@ -85,16 +85,72 @@ final class MemoController extends Controller
      */
     public function update(UpdateMemoRequest $request, string $memo): JsonResponse
     {
-        $moved = $this->memos->moveToCollection($memo, $request->collectionId());
+        $updated = null;
 
-        if ($moved === null) {
-            abort(
-                Response::HTTP_NOT_FOUND,
-                'That memo or collection no longer exists. Refresh and try again.',
-            );
+        // Two independent writes rather than one UPDATE with two SET clauses, and the order
+        // is arbitrary because they touch different columns. Each answers with the whole memo,
+        // so whichever runs last is the state to return -- which is why $updated is
+        // overwritten rather than merged. A body carrying both is one request and two
+        // statements; that is a round trip saved for the client and no transaction needed,
+        // since neither statement can leave the row in a state the other cares about.
+        if ($request->movesCollection()) {
+            $updated = $this->memos->moveToCollection($memo, $request->collectionId());
+
+            if ($updated === null) {
+                abort(
+                    Response::HTTP_NOT_FOUND,
+                    'That memo or collection no longer exists. Refresh and try again.',
+                );
+            }
         }
 
-        return response()->json(['memo' => $moved->toArray()]);
+        if ($request->renames()) {
+            $updated = $this->memos->rename($memo, $request->title());
+
+            if ($updated === null) {
+                abort(
+                    Response::HTTP_NOT_FOUND,
+                    'That memo no longer exists. Refresh and try again.',
+                );
+            }
+        }
+
+        // Unreachable: UpdateMemoRequest refuses a body that asks for neither, so one of the
+        // two branches above has run. Asserted rather than assumed, because the alternative
+        // is a null dereference one edit to the rules away.
+        if ($updated === null) {
+            abort(Response::HTTP_UNPROCESSABLE_ENTITY, 'That request asked for no change.');
+        }
+
+        return response()->json(['memo' => $updated->toArray()]);
+    }
+
+    /**
+     * Delete a memo, its recording, and any reminders hanging off it.
+     *
+     * **200 with the deleted memo rather than 204.** Every other write on this resource
+     * answers with the row, and the frontend reconciles one shape by id -- so a body here
+     * costs nothing and means the client can report *what* it removed rather than only that
+     * something was removed. It also gives the undo-shaped conversation somewhere to start,
+     * if that is ever wanted; a 204 throws the row away at exactly the moment it is last
+     * available. `DELETE /api/collections/{id}` answers 204 and is the odd one out for a
+     * reason that does not apply here: a collection's contents survive it, so the interesting
+     * fact about that request is what happened to the *memos*, and the response cannot say.
+     *
+     * 404 when there is no such memo, which makes this non-idempotent in its status code:
+     * deleting the same memo twice gives 200 then 404. That is the right answer rather than a
+     * blanket 204, because the second request is the client telling us about a memo it thinks
+     * exists -- two tabs, or a stale list -- and it should find out that it does not.
+     */
+    public function destroy(string $memo): JsonResponse
+    {
+        $deleted = $this->memos->delete($memo);
+
+        if ($deleted === null) {
+            abort(Response::HTTP_NOT_FOUND, 'That memo no longer exists.');
+        }
+
+        return response()->json(['memo' => $deleted->toArray()]);
     }
 
     public function index(ListMemosRequest $request): JsonResponse

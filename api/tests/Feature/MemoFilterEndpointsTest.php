@@ -203,15 +203,17 @@ final class MemoFilterEndpointsTest extends TestCase
 
     public function test_a_patch_naming_no_field_is_refused_rather_than_silently_doing_nothing(): void
     {
-        // `present` + `nullable` is the pair that makes this a 422. `nullable` alone would let
-        // an empty body through as "unfile", and `required` would reject the null that unfiles.
-        // A PATCH that silently no-ops is the worst outcome: the client believes it worked.
+        // A PATCH that silently no-ops is the worst outcome available: the client believes the
+        // move happened. This used to be `present` on `collection_id`; with a second writable
+        // field that rule became wrong -- a rename would have to send a collection to say
+        // "leave it where it is" -- so the guarantee moved to a check over the whole body.
         $response = $this->patchJson('/api/memos/019fb4ef-0d71-7011-b678-0cb4004dc2a7', []);
 
-        $response->assertStatus(422)->assertJsonValidationErrors('collection_id');
+        $response->assertStatus(422);
 
-        $this->assertStringContainsString('collection', (string) $response->json('message'));
+        $this->assertStringContainsString('no change', (string) $response->json('message'));
         $this->assertSame([], $this->repository->moved);
+        $this->assertSame([], $this->repository->renamed);
     }
 
     public function test_a_missing_memo_or_collection_is_one_404(): void

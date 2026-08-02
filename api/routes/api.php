@@ -39,9 +39,14 @@ Route::get('/health', [HealthController::class, 'show'])->name('health');
 Route::get('/memos', [MemoController::class, 'index'])->name('memos.index');
 Route::post('/memos', [MemoController::class, 'store'])->name('memos.store');
 
-// Filing a memo into a collection, or taking it back out. PATCH rather than PUT because the
-// body is a change and not a replacement -- a PUT carrying only `collection_id` would be
-// asking the API to discard the transcript.
+// Filing a memo into a collection, taking it back out, or renaming it. PATCH rather than PUT
+// because the body is a change and not a replacement -- a PUT carrying only `collection_id`
+// would be asking the API to discard the transcript.
+//
+// Two fields on one route rather than a `/memos/{memo}/title` of its own, because both are
+// small edits to the same row answering with the same shape, and the client already has one
+// function for "PATCH a memo and merge the result". UpdateMemoRequest has the argument for why
+// `title` is the only *content* a client may write and `transcript` is not.
 //
 // whereUuid on every id below, and it is doing real work rather than tidying: there is no
 // Eloquent in this project (MEMO-05) and therefore no implicit route binding, so without it
@@ -51,6 +56,17 @@ Route::post('/memos', [MemoController::class, 'store'])->name('memos.store');
 Route::patch('/memos/{memo}', [MemoController::class, 'update'])
     ->whereUuid('memo')
     ->name('memos.update');
+
+// Deleting a memo takes its recording and its reminders with it. The reminders go through
+// `ON DELETE CASCADE` inside Postgres; the audio blob is unlinked by MemoService, which has
+// the argument for why the row goes first and why a failed unlink is still a successful
+// delete.
+//
+// Answers 200 with the memo it removed rather than 204 -- see MemoController::destroy for why
+// this differs from the collections delete beside it.
+Route::delete('/memos/{memo}', [MemoController::class, 'destroy'])
+    ->whereUuid('memo')
+    ->name('memos.destroy');
 
 // --- Collections -----------------------------------------------------------
 //
