@@ -425,6 +425,20 @@ async function removeReminder(reminderId) {
           <p class="sheet__meta">
             <span class="badge" :class="`badge--${memo.status}`">{{ memo.status }}</span>
             <span class="badge badge--source">{{ memo.source }}</span>
+
+            <!--
+              What the enrichment pass filed this memo as. Hidden rather than shown empty
+              when it is absent, which today is always: nothing writes `memos.category`
+              until MEMO-21's enricher lands, and a permanent blank badge beside the two
+              that always say something would read as a bug in them.
+
+              Rendered as whatever arrived rather than mapped through a list of the three
+              expected values. The column has no CHECK constraint and the vocabulary is
+              the enricher's, so a category this file has never heard of should still show
+              up as itself -- the same reason the API passes it through unvalidated.
+            -->
+            <span v-if="memo.category" class="badge badge--category">{{ memo.category }}</span>
+
             <time :datetime="memo.created_at">{{ longDate(memo.created_at) }}</time>
           </p>
         </div>

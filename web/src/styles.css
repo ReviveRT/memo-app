@@ -502,6 +502,27 @@ h1,
   color: var(--error);
 }
 
+/*
+ * The enrichment pass's answer to what kind of thing the memo is. Outside the block
+ * above rather than inside it: those are two closed sets with a CHECK constraint each
+ * in 001_init.sql, and this column has nothing behind it at all.
+ *
+ * One rule for every value, for the same reason the source has one -- 'task', 'idea'
+ * and 'note' are three answers to one question and none of them is the exception, so
+ * colouring one would read as a warning about it. A value the enricher invents and this
+ * file has never heard of therefore still gets a badge rather than an unstyled word.
+ *
+ * Filled rather than outlined, which is what tells it apart from the source badge
+ * beside it: both are quiet facts in the same muted ink, and at this size a second
+ * outlined pill reads as one more of the same. colour-mix against the border rather
+ * than a new custom property, so it stays a tint of whatever the scheme's lines are.
+ */
+.badge--category {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--border) 55%, transparent);
+  color: var(--muted);
+}
+
 .tags {
   display: flex;
   flex-wrap: wrap;

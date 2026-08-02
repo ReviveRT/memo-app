@@ -95,6 +95,12 @@ class MemoRepository
         title,
         summary,
         to_jsonb(tags) AS tags,
+
+        -- Which of 'task', 'idea' or 'note' the enrichment pass filed this memo as.
+        -- Projected although nothing writes it yet: MEMO-21 owns the enricher, and
+        -- shipping the column now is what makes landing it a worker change alone.
+        category,
+
         duration_ms,
         last_error,
 

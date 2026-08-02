@@ -216,6 +216,7 @@ final class ReminderEndpointsTest extends TestCase
             title: 'Dentist',
             summary: null,
             tags: [],
+            category: null,
             durationMs: null,
             lastError: null,
             lastErrorCode: null,

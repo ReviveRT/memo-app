@@ -295,6 +295,7 @@ final class MemoEditEndpointsTest extends TestCase
             title: $title,
             summary: null,
             tags: [],
+            category: null,
             durationMs: 4200,
             lastError: null,
             lastErrorCode: null,
