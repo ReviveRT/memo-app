@@ -295,7 +295,47 @@ services:
       # — so naming the language now saves only ~0.2s. Set it to remove the
       # chance of a wrong guess, not for the speed.
       STT_LANGUAGE: ${STT_LANGUAGE:-}
-      ENRICH_MODEL: ${ENRICH_MODEL:-claude-opus-5}
+      # The enrichment pass — title, summary, tags, category (MEMO-21).
+      #
+      # `local` runs Qwen2.5-1.5B-Instruct in the worker process from the GGUF
+      # baked into the image: no key, no account, no network, no extra service.
+      # `none` turns the pass off, and memos still transcribe, store and search —
+      # they get the heuristic title ai/memo_ai/titles.py cuts from the transcript
+      # and NULL for the rest.
+      #
+      # Worth turning off on a small machine, which is the whole reason it is a
+      # setting. The model is loaded lazily, on the first memo that needs
+      # enriching rather than at boot, and adds about 1.7 GB to that replica's
+      # RSS once it is — on top of the 1.65 GB whisper already holds.
+      #
+      # `replicas: 2` does not double all of it. 1.1 GB of that is the mmap-ed
+      # weight file, which both replicas share in page cache; ~0.6 GB is the KV
+      # cache and compute buffers, which each pays. So two enriching replicas
+      # cost about 2.3 GB between them rather than 3.4.
+      ENRICH_PROVIDER: ${ENRICH_PROVIDER:-local}
+      #
+      # **ENRICH_MODEL_PATH is deliberately absent from this list**, unlike every
+      # other setting the worker reads, and adding it would break the case it
+      # looks like it would help.
+      #
+      # ai/Dockerfile sets it as an image ENV holding the filename that build
+      # chose. Any line here replaces that ENV — including the two forms that look
+      # like they would not. Measured on Compose v5.0.2 against an image whose ENV
+      # was set, with the variable unset in .env:
+      #
+      #   ENRICH_MODEL_PATH: ${ENRICH_MODEL_PATH:-}   ->  container sees ""
+      #   ENRICH_MODEL_PATH:                          ->  container sees ""
+      #
+      # The bare key is documented as taking the value from the host environment,
+      # and it does — but when there is nothing to take it passes an empty string
+      # rather than omitting the variable, so the image's own value is gone either
+      # way. The worker reads "" as absent and falls back to the default path,
+      # which happens to be right for an unmodified build and silently wrong for
+      # one made with `--build-arg ENRICH_MODEL_FILE=something-else.gguf`.
+      #
+      # So: to change the model, rebuild with that build arg — README.md has the
+      # command. To point at a GGUF from outside the image, add the variable here
+      # yourself, next to the bind mount you will also need.
       # How long a replica waits after finding an empty queue. Only ever a sleep on
       # the *idle* path: after a claim that found work the worker loops straight back
       # without waiting, so this is not a rate limit and it does not bound throughput.
@@ -313,14 +353,16 @@ services:
       #
       # It has one hard constraint: it must exceed the longest a healthy job can
       # run, or the reaper requeues work that is still in progress. At the defaults
-      # above that ceiling is 2,880s — 180s of ffprobe and ffmpeg, 300s of model
-      # load, and a 2,400s decode deadline for a 600-second memo — so 3,600 clears
-      # it by twelve minutes.
+      # above that ceiling is 3,300s — 180s of ffprobe and ffmpeg, 300s of model
+      # load, a 2,400s decode deadline for a 600-second memo, and 420s of enrichment
+      # — so 3,600 clears it by five minutes. On ENRICH_PROVIDER=none it is 2,880s
+      # and the margin is twelve.
       #
-      # The coupling is the part to remember: raising MAX_AUDIO_SECONDS lengthens
-      # the decode deadline and this number has to follow. The worker recomputes the
-      # ceiling at boot and logs a warning naming both numbers if it no longer fits,
-      # rather than leaving that to whoever edited the .env.
+      # The coupling is the part to remember: raising MAX_AUDIO_SECONDS lengthens the
+      # decode deadline and this number has to follow, and so does turning enrichment
+      # on. The worker recomputes the ceiling at boot and logs a warning naming both
+      # numbers if it no longer fits, rather than leaving that to whoever edited
+      # the .env.
       REAP_AFTER_SECONDS: ${REAP_AFTER_SECONDS:-3600}
       # How often each replica looks for expired leases. Separate from the poll
       # interval, which runs twice a second per replica — reaping writes against

@@ -538,9 +538,10 @@ async function removeReminder(reminderId) {
 
             <!--
               What the enrichment pass filed this memo as. Hidden rather than shown empty
-              when it is absent, which today is always: nothing writes `memos.category`
-              until MEMO-21's enricher lands, and a permanent blank badge beside the two
-              that always say something would read as a bug in them.
+              when it is absent, which since MEMO-21 means a memo that pass has not
+              reached -- one recorded before it existed, one running with
+              ENRICH_PROVIDER=none, or one whose enrichment failed. A permanent blank
+              badge beside the two that always say something would read as a bug in them.
 
               Rendered as whatever arrived rather than mapped through a list of the three
               expected values. The column has no CHECK constraint and the vocabulary is
@@ -559,8 +560,28 @@ async function removeReminder(reminderId) {
       </header>
 
       <!--
-        The transcription, as the main part of the card. First in the body and given the most
-        room, because it is what the memo *is* -- everything else here is metadata about it.
+        The one-line summary the enrichment pass wrote (MEMO-21), above the transcript it was
+        written from.
+
+        Above rather than below, which is the whole reason it is worth showing at all: on a
+        two-minute memo the transcript is a wall, and the point of a summary is to answer "what
+        is this" before the wall. `memoLabel` already falls back to this text when a memo has no
+        title, but the enricher writes both -- so without this section the summary would be a
+        column nobody ever sees.
+
+        `v-if`, because it is NULL on every memo enrichment did not touch: a text memo recorded
+        under ENRICH_PROVIDER=none, anything from before this feature, and any memo whose
+        enrichment failed. Those cards keep the shape they had.
+      -->
+      <section v-if="memo.summary" class="sheet__section">
+        <h3 class="sheet__label">Summary</h3>
+
+        <p class="sheet__summary">{{ memo.summary }}</p>
+      </section>
+
+      <!--
+        The transcription, as the main part of the card. Given the most room, because it is what
+        the memo *is* -- everything else here, the summary included, is derived from it.
       -->
       <section class="sheet__section">
         <h3 class="sheet__label">Transcription</h3>

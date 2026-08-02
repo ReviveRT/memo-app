@@ -687,10 +687,10 @@ class MemoQueue:
         """
         Commit point 2: publish the memo, enriched or not. False if the fence lost.
 
-        Both enrichment arguments absent is the shipped configuration rather than a
-        degenerate case -- no enricher is wired up until MEMO-21 -- and it writes a
-        memo that is ``ready`` with a generated title and nothing else claimed
-        about it.
+        Both enrichment arguments absent is a supported configuration rather than a
+        degenerate case -- it is what ``ENRICH_PROVIDER=none`` produces, and what
+        the reaper's salvage path produces -- and it writes a memo that is
+        ``ready`` with a generated title and nothing else claimed about it.
 
         ``text`` is the transcript this memo now has, which the caller passes rather
         than this method reading it off ``memo``: at commit point 2 a fresh voice

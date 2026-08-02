@@ -21,7 +21,8 @@ rule to ffmpeg's stderr and ``stt/base.py`` states it.
 
 **It cannot pin a replica indefinitely.** Two bounds, both of the same shape,
 because both guard C++ that cannot be interrupted: run it on a daemon thread and
-stop *waiting* at the deadline. :class:`_BackgroundCall` is that shape.
+stop *waiting* at the deadline. :class:`~memo_ai.background.BackgroundCall`
+    is that shape.
 
   * *The download.* A cold cache pulls 1.6 GB from HuggingFace. A memo that waits
     longer than :data:`MODEL_LOAD_TIMEOUT_SECONDS` gives up while the thread keeps
@@ -70,6 +71,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from memo_ai import audio, failures, prose
+from memo_ai.background import BackgroundCall
 from memo_ai.stt.base import SttError, SttUnavailable, Transcript
 
 log = logging.getLogger(__name__)
@@ -423,7 +425,7 @@ class _Engines:
     What one load produces: the model that transcribes, and the one that guesses
     the language for it.
 
-    Both come out of a single :class:`_BackgroundCall`, rather than two, because
+    Both come out of a single :class:`BackgroundCall`, rather than two, because
     the second is 75 MB beside the first's 1.6 GB -- not worth a second slot of
     load state, a second timeout, or a second thing that can be half-ready when a
     memo arrives.
@@ -501,7 +503,7 @@ class LocalWhisperStt:
         self._loader = loader or _load_whisper_model
         self._lock = threading.Lock()
         self._model: object | None = None
-        self._load: "_BackgroundCall | None" = None
+        self._load: BackgroundCall | None = None
 
     def transcribe(self, source: Path, language: str | None = None) -> Transcript:
         engines = self._ready_model()
@@ -694,7 +696,7 @@ class LocalWhisperStt:
                     self.model_size,
                     COMPUTE_TYPE,
                 )
-                self._load = _BackgroundCall(
+                self._load = BackgroundCall(
                     lambda: self._loader(self.model_size, self.language), name="whisper-model-load"
                 )
 
@@ -724,7 +726,9 @@ class LocalWhisperStt:
         batching decodes independent windows and cannot carry a repetition loop
         across them the way long-form sequential decoding can.
         """
-        drain = _BackgroundCall(lambda: "".join(s.text for s in segments).strip())
+        drain = BackgroundCall(
+            lambda: "".join(s.text for s in segments).strip(), name="whisper-decode"
+        )
         deadline = _deadline_seconds(audio_seconds)
 
         if not drain.wait(deadline):
@@ -762,7 +766,7 @@ class LocalWhisperStt:
         -- still holding the old handle -- wipes that new one on its way out. The
         memo after it would start a third load while the second was still
         running, and on a cold cache each of those is 142 MB. Asking
-        ``_BackgroundCall`` whether it failed, in one place, under the lock,
+        ``BackgroundCall`` whether it failed, in one place, under the lock,
         means no caller has to reason about whether what it is holding is still
         current.
         """
@@ -772,7 +776,7 @@ class LocalWhisperStt:
 
             if self._load is None or self._load.failed:
                 log.info("loading whisper model %r (%s)", self.model_size, COMPUTE_TYPE)
-                self._load = _BackgroundCall(
+                self._load = BackgroundCall(
                     lambda: self._loader(self.model_size, self.language), name="whisper-model-load"
                 )
 
@@ -804,56 +808,6 @@ class LocalWhisperStt:
             self._model = pending.result
 
         return pending.result
-
-
-class _BackgroundCall:
-    """
-    One callable on a daemon thread, with the outcome readable from outside.
-
-    Two things in this file need the same shape -- loading the model, and draining
-    the segment generator -- and both need it for the same reason: the work is C++
-    that cannot be interrupted, so the only way to bound it is to stop *waiting*
-    for it and let it finish unattended.
-
-    A bare ``threading.Thread`` rather than ``concurrent.futures``, and the reason
-    is shutdown. ``ThreadPoolExecutor`` registers an ``atexit`` hook that joins its
-    workers, so a call this class has already given up waiting for would block the
-    interpreter from exiting -- which is precisely the hang the timeouts exist to
-    prevent, moved from one memo to ``docker compose down``. A daemon thread is
-    abandoned at exit instead.
-    """
-
-    def __init__(self, work: Callable[[], object], name: str = "whisper") -> None:
-        self.result: object | None = None
-        self.error: BaseException | None = None
-        self._done = threading.Event()
-
-        threading.Thread(target=self._run, args=(work,), name=name, daemon=True).start()
-
-    def _run(self, work: Callable[[], object]) -> None:
-        try:
-            self.result = work()
-        except BaseException as error:  # noqa: BLE001 -- reported to the waiter, not swallowed
-            self.error = error
-        finally:
-            # In the finally, so work that raises still releases whoever is waiting
-            # on it. Without this a failed call reads exactly like a slow one, for
-            # the full timeout, every time.
-            self._done.set()
-
-    def wait(self, timeout: float) -> bool:
-        return self._done.wait(timeout)
-
-    @property
-    def failed(self) -> bool:
-        """
-        Finished, and finished badly. Both halves matter.
-
-        A call still in flight is not failed, which is what stops a memo that timed
-        out waiting on a model download from causing the next one to start a second
-        download of the same weights.
-        """
-        return self._done.is_set() and self.error is not None
 
 
 def _load_whisper_model(model_size: str, language: str | None) -> "_Engines":

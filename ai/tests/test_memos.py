@@ -151,8 +151,8 @@ def test_committing_a_transcript_clears_the_error_a_previous_attempt_left():
 
 
 def test_finishing_with_no_enrichment_falls_back_to_the_transcript_for_a_title():
-    # The shipped configuration, since no enricher is wired up until MEMO-21. All
-    # four enrichment parameters NULL, and the COALESCE chain in the statement is
+    # What `ENRICH_PROVIDER=none` writes, and what the reaper's salvage path writes.
+    # All four enrichment parameters NULL, and the COALESCE chain in the statement is
     # what turns that into a title cut from the transcript rather than no title.
     connection = FakeConnection(rowcount=1)
 

@@ -1,10 +1,10 @@
 """
 The enrichment contract: a transcript in, a title and a summary and some tags out.
 
-No implementation here, and that is the point of the file rather than an omission.
-MEMO-21 writes the local-LLM enricher; what MEMO-16 needs is the *seam* it plugs
-into, because the second of the two commit points is defined by what happens
-around this call:
+No real implementation here, and that is the point of the file rather than an
+omission. memo_ai/enrich/local.py is the enricher MEMO-21 wrote; this is the
+*seam* it plugs into, and the seam predates it because the second of MEMO-16's two
+commit points is defined by what happens around this call:
 
   * enrichment returns something -> ``title``, ``summary``, ``tags``, ``category``
     and ``enriched_at`` are written, and the memo is ``ready``.
@@ -87,7 +87,7 @@ class Enrichment:
         Read by the pipeline to decide whether ``enriched_at`` is set. An enricher
         that ran and found nothing to say has not enriched the memo, and stamping
         the column anyway would make "has this memo been enriched?" unanswerable
-        the day MEMO-21 wants to re-run the ones that were not.
+        the day somebody wants to re-run the ones that were not.
         """
         return not (self.title or self.summary or self.tags or self.category)
 
@@ -116,7 +116,7 @@ class Enricher(Protocol):
 
 class NoEnrichment:
     """
-    The enricher used when none is configured, which today is always.
+    The enricher used when ``ENRICH_PROVIDER=none``, which is no longer the default.
 
     A null object rather than ``None`` and a branch at the call site, because the
     branch would have to be repeated in the pipeline, in its tests, and in whatever
@@ -124,10 +124,13 @@ class NoEnrichment:
     entirely rather than skip the enrichment inside it. The commit must still
     happen: it is what moves the row to ``ready`` and gives it its fallback title.
 
-    So on the shipped configuration a voice memo reaches ``ready`` with a
-    transcript, a title cut from the first characters of that transcript, and NULL
-    for summary, tags, category and ``enriched_at``. That is an accurate
-    description of what was done to it, and it is the row MEMO-21 improves.
+    So under this configuration a voice memo reaches ``ready`` with a transcript, a
+    title ``memo_ai/titles.py`` cut out of that transcript, and NULL for summary,
+    tags, category and ``enriched_at``. That is an accurate description of what was
+    done to it, and it is the row MEMO-21's local model improves on -- at the price
+    of about 1.7 GB of resident memory on the first memo that needs it, which is
+    why this remains a supported way to run the stack rather than a historical
+    artefact.
     """
 
     name = "none"

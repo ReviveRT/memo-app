@@ -22,8 +22,9 @@ use stdClass;
  * table and is never sent; the queue bookkeeping (attempts, locked_at,
  * next_attempt_at) is the worker's business and no client renders it; and
  * `enrichment_error` is separate from `last_error` on purpose (a failed enrichment
- * still reaches 'ready'), which is a distinction MEMO-21 owns and can surface when
- * there is something to surface.
+ * still reaches 'ready'). Since MEMO-21 there is an enricher that can fail, so that
+ * column now carries sentences -- and a client rendering it must not treat one as a
+ * failed memo, because the transcript is there.
  */
 final class Memo
 {
@@ -143,10 +144,11 @@ final class Memo
          * What kind of thing this memo is -- 'task', 'idea' or 'note' -- or null for a
          * memo no enrichment pass has classified.
          *
-         * Null on every row today: MEMO-21 owns the enricher and nothing writes the
-         * column until it lands. It is on the wire regardless, for the same reason
-         * `summary` is -- both are enrichment output, and a client that renders one when
-         * it is present renders the other the same way.
+         * Written by the enrichment pass as of MEMO-21, and still null on any row that
+         * pass has not reached: a memo enriched before it existed, one running with
+         * `ENRICH_PROVIDER=none`, or one whose enrichment failed. On the wire for the
+         * same reason `summary` is -- both are enrichment output, and a client that
+         * renders one when it is present renders the other the same way.
          *
          * Not validated against those three values, and there is no CHECK constraint
          * behind the column either -- unlike `source` and `status`, which have one each.

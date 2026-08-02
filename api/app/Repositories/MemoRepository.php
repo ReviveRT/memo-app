@@ -98,8 +98,8 @@ class MemoRepository
         to_jsonb(tags) AS tags,
 
         -- Which of 'task', 'idea' or 'note' the enrichment pass filed this memo as.
-        -- Projected although nothing writes it yet: MEMO-21 owns the enricher, and
-        -- shipping the column now is what makes landing it a worker change alone.
+        -- Projected ahead of the enricher so that landing MEMO-21 was a worker change
+        -- alone, and written by it since.
         category,
 
         duration_ms,
@@ -534,22 +534,61 @@ class MemoRepository
      * same shape, and the controller runs whichever the body asked for. A combined statement
      * would need every caller to say which halves it meant.
      *
-     * **`search_vector` needs no help here.** It is a STORED generated column over title,
-     * summary, transcript and tags (001_init.sql), so Postgres recomputes it as part of this
-     * UPDATE -- a corrected transcript is findable by its new words, and no longer findable by
-     * the wrong ones, without a line of code. That is the whole reason the column is generated
-     * rather than maintained by a trigger or by the application.
+     * **`search_vector` recomputes itself, but only for the columns this statement writes.**
+     * It is a STORED generated column over title, summary, transcript and tags
+     * (001_init.sql), so Postgres rebuilds it as part of this UPDATE and a corrected
+     * transcript is findable by its new words without a line of code. That is the whole
+     * reason the column is generated rather than maintained by a trigger.
      *
-     * The title is deliberately *not* touched. It may have been cut from the text being
-     * replaced, so it can now be stale -- but it may equally be one the owner typed, and this
-     * route has a `title` field of its own for changing it. Rewriting it as a side effect of a
-     * different edit is the kind of helpfulness that loses somebody's work; the UI puts the two
-     * fields next to each other so a stale title is visible while it is being corrected.
+     * **The other half of that sentence needed MEMO-21 to stay true.** This block used to
+     * end "and no longer findable by the wrong ones", which held while `summary` and `tags`
+     * were always NULL. They are not any more: the enrichment pass fills both from the
+     * transcript, both are in the same generated column, and a correction that left them
+     * would keep the *old* words findable through the summary while the transcript no longer
+     * contains them. Searching for a word somebody had just corrected away would still
+     * return the memo, which is precisely the bug the generated column is supposed to make
+     * impossible.
+     *
+     * So the derived columns are cleared here, and clearing them costs nobody anything they
+     * typed: `summary`, `tags` and `category` are written only by the worker, and
+     * `UpdateMemoRequest` accepts only `collection_id`, `title` and `transcript` -- there is
+     * no user edit to lose. `enriched_at` and `enrichment_error` go with them, because both
+     * describe an enrichment of text that is no longer on the row.
+     *
+     * What this deliberately does *not* do is re-enrich. That would mean putting a `ready`
+     * memo back to `queued`, which re-runs transcription's guards for a memo whose audio has
+     * not changed and reopens the title-overwrite hazard NOTES.md records against requeueing.
+     * A memo with a corrected transcript and no summary is honest; a fresh summary for it is
+     * a feature, not a fix.
+     *
+     * The title is deliberately *not* touched, and it is the one exception to the paragraph
+     * above. It may have been cut from the text being replaced, so it can now be stale -- but
+     * it may equally be one the owner typed, and this route has a `title` field of its own
+     * for changing it. Rewriting it as a side effect of a different edit is the kind of
+     * helpfulness that loses somebody's work; the UI puts the two fields next to each other
+     * so a stale title is visible while it is being corrected.
+     *
+     * That exception has a search consequence worth stating rather than leaving to be found.
+     * Verified against a real Postgres on a memo whose transcript, summary, tags and title
+     * all carried the same wrong name: after this statement the summary and tag words are no
+     * longer matched, the corrected words are, and the *title's* copy of the old name still
+     * is. That is the intended trade -- one visible, editable field keeps one stale word
+     * findable, rather than the invisible ones keeping a whole sentence of them.
      */
     public function correctTranscript(string $memoId, string $transcript): ?Memo
     {
         $rows = $this->db->connection()->selectFromWriteConnection(
-            'UPDATE memos SET transcript = ? WHERE id = ? RETURNING '.self::COLUMNS,
+            <<<'SQL'
+                UPDATE memos
+                   SET transcript = ?,
+                       summary = NULL,
+                       tags = '{}',
+                       category = NULL,
+                       enriched_at = NULL,
+                       enrichment_error = NULL
+                 WHERE id = ?
+                RETURNING
+                SQL.' '.self::COLUMNS,
             [$transcript, $memoId],
         );
 

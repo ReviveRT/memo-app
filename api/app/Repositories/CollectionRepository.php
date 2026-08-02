@@ -53,7 +53,7 @@ class CollectionRepository
      *
      * **recent_labels** picks the best short thing each memo has to identify itself by.
      * coalesce in that order because it is the order they become available: `title` and
-     * `summary` are written by the enrichment pass (MEMO-21) and are null until it runs, so
+     * `summary` are written by the enrichment pass and are null until it runs, so
      * a memo filed seconds after being recorded has only its transcript -- and a voice memo
      * has not even that until it is transcribed, which is what the final fallback covers.
      * Without it the label would be SQL NULL, jsonb_agg would put a JSON `null` in the

@@ -33,3 +33,26 @@ psycopg[binary]==3.3.4
 # would then have to decode itself, to save a fraction of what the model weights
 # cost once MEMO-15 bakes them in.
 faster-whisper==1.2.1
+
+# The local enrichment path (MEMO-21): llama.cpp, in this process, running the
+# Qwen2.5-1.5B-Instruct GGUF that ai/Dockerfile bakes. MIT, like the binding, and
+# Apache 2.0 for the weights -- no account, no key, no network.
+#
+# **It is the one line in this file with no wheel behind it.** PyPI carries an
+# sdist and nothing else for this package -- checked, not assumed: the 0.3.34
+# release publishes exactly `llama_cpp_python-0.3.34.tar.gz`. So a plain
+# `pip install` compiles llama.cpp from source and needs cmake and a C++
+# toolchain, which is why ai/Dockerfile builds it in a stage that is thrown away
+# rather than installing a compiler into the image that ships. That takes about
+# 2m15s on a cold build and nothing at all on a warm one.
+#
+# The upstream project does publish binary wheels, at their own index rather than
+# on PyPI. Declined: it would mean an `--extra-index-url` pointing at a GitHub
+# Pages site for a package this stack executes model weights through, and the CPU
+# wheels there are x86_64 -- NOTES.md requires this image to be arm64-native, so
+# the one machine it was built for is the one that index does not serve.
+#
+# Cheap once built: 19 MB of site-packages, 17 MB of which is the compiled
+# `libggml`/`libllama` shared objects themselves. Beside faster-whisper's 330 MB
+# and the weights' 1,117 MB it does not register.
+llama-cpp-python==0.3.34

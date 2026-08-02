@@ -9,9 +9,9 @@ import time
 
 import psycopg
 
-from memo_ai import audio, db, log, pipeline, stt
+from memo_ai import audio, db, enrich, log, pipeline, stt
 from memo_ai.config import ConfigError, Settings
-from memo_ai.enrich import NO_ENRICHMENT
+from memo_ai.enrich import Enricher
 from memo_ai.memos import MemoQueue, Reaped, RetryPolicy
 
 logger = logging.getLogger("memo_ai.worker")
@@ -48,6 +48,11 @@ def main() -> int:
 
     try:
         provider = stt.resolve_chain(settings)
+        # Same handler as the provider above, because the two failures are the same
+        # failure: a name in the environment that this build has no class for. It
+        # is the *only* way enrichment may stop the boot -- everything after this
+        # point costs a memo its summary and nothing more.
+        enricher = enrich.resolve(settings)
     except ConfigError as error:
         logger.error("%s", error)
 
@@ -67,11 +72,16 @@ def main() -> int:
     # say which model a slow transcription was running.
     logger.info(
         "ai-worker starting: stt_provider=%s stt_fallback=%s stt_model=%s stt_language=%s "
-        "audio_dir=%s max_audio=%.0fs poll=%.1fs attempts=%d backoff=%.0fs lease=%.0fs",
+        "enrich_provider=%s audio_dir=%s max_audio=%.0fs poll=%.1fs attempts=%d "
+        "backoff=%.0fs lease=%.0fs",
         settings.stt_provider,
         settings.stt_fallback,
         settings.stt_model,
         settings.stt_language or "auto",
+        # The name and not the path, which would put a 60-character filename in
+        # the middle of the one line somebody reads to check their .env. The path
+        # is logged by the enricher when it loads, which is when it matters.
+        settings.enrich_provider,
         settings.audio_dir,
         settings.max_audio_seconds,
         settings.poll_seconds,
@@ -80,7 +90,7 @@ def main() -> int:
         settings.reap_after_seconds,
     )
 
-    _warn_if_lease_is_too_short(settings)
+    _warn_if_lease_is_too_short(settings, enricher)
 
     # Start fetching the model now rather than on the first voice memo. Optional
     # on the protocol, so only a provider that has something to warm does
@@ -95,6 +105,15 @@ def main() -> int:
     if prefetch is not None:
         prefetch()
 
+    # **The enricher is deliberately not warmed alongside it**, and the asymmetry
+    # is a decision rather than an oversight. Whisper prefetches because its
+    # weights may still be downloading and whoever records first pays for that; the
+    # enrichment weights are baked into the image, so there is nothing to race and
+    # nothing to warm. What loading it lazily buys instead is memory -- a replica
+    # that only ever transcribes, or only ever takes text memos, never pays the
+    # second model's 1.7 GB. memo_ai/enrich/local.py has the rest of that
+    # argument, and this is the line somebody would otherwise add.
+
     # A warning, not a refusal. Text memos never reach ffmpeg, so a worker without
     # it still drains half the queue -- and MEMO-08's rule, set by UnimplementedStt,
     # is that a missing capability fails the memo that needs it rather than the boot
@@ -107,14 +126,14 @@ def main() -> int:
             "The image built by ai/Dockerfile has both."
         )
 
-    _run(settings, provider, shutdown)
+    _run(settings, provider, enricher, shutdown)
 
     logger.info("ai-worker stopped")
 
     return 0
 
 
-def _warn_if_lease_is_too_short(settings: Settings) -> None:
+def _warn_if_lease_is_too_short(settings: Settings, enricher: Enricher) -> None:
     """
     Compare the configured lease against what a job can actually take, and say so.
 
@@ -129,13 +148,20 @@ def _warn_if_lease_is_too_short(settings: Settings) -> None:
     duration cap invalidates a lease that was correct when it was chosen. This is
     the line that tells them.
 
+    The enricher is passed for the same reason, and MEMO-21 is what made it a
+    second variable: switching ``ENRICH_PROVIDER`` between ``local`` and ``none``
+    moves this budget by 420 seconds, so a lease that clears one may not clear the
+    other. Passing the resolved enricher rather than the setting means the check
+    asks the object what it can spend instead of keeping its own table of what each
+    name costs.
+
     A warning and not a refusal. The stack still works with a short lease -- memos
     are retried rather than lost, because the transcript commit means a reaped job
     resumes rather than restarts -- and refusing to boot over a tuning number would
     take the whole queue down, including the text memos that never come near any of
     these deadlines.
     """
-    budget = pipeline.job_budget_seconds(settings.max_audio_seconds)
+    budget = pipeline.job_budget_seconds(settings.max_audio_seconds, enricher)
 
     if settings.reap_after_seconds > budget:
         return
@@ -151,7 +177,12 @@ def _warn_if_lease_is_too_short(settings: Settings) -> None:
     )
 
 
-def _run(settings: Settings, provider: stt.SttProvider, shutdown: threading.Event) -> None:
+def _run(
+    settings: Settings,
+    provider: stt.SttProvider,
+    enricher: Enricher,
+    shutdown: threading.Event,
+) -> None:
     """
     Claim, work, write, repeat -- across as many connections as it takes.
 
@@ -203,10 +234,11 @@ def _run(settings: Settings, provider: stt.SttProvider, shutdown: threading.Even
                         provider,
                         settings.audio_dir,
                         settings.max_audio_seconds,
-                        # The null enricher until MEMO-21. Passed explicitly rather
-                        # than left to the default so that the day it becomes a real
-                        # one, the change is on this line and not in a signature.
-                        NO_ENRICHMENT,
+                        # Whatever ENRICH_PROVIDER resolved to at boot -- the local
+                        # model by default, `NO_ENRICHMENT` on `none`. Passed
+                        # explicitly rather than left to the default, which is the
+                        # arrangement that made MEMO-21 a change on this line.
+                        enricher,
                     )
 
                     # No sleep on the success path, on purpose: after a claim that

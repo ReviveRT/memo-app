@@ -428,7 +428,7 @@ def test_an_unclassified_enrichment_failure_is_not_copied_onto_the_row(audio_dir
 
 
 def test_no_enricher_configured_is_a_clean_publish_rather_than_an_error(audio_dir, normalizer):
-    # The shipped configuration until MEMO-21. The memo is ready, its transcript is
+    # What `ENRICH_PROVIDER=none` resolves to. The memo is ready, its transcript is
     # committed, and nothing claims enrichment was attempted or that it failed.
     queue = FakeQueue()
 

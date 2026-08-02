@@ -4,9 +4,9 @@ A short name for a memo, cut from its own transcript.
 **What this is not.** It is not a summariser, and it cannot become one. Whisper is a
 speech-to-text model with no summarisation head, so there is no "one more layer" to
 add to the transcription pass -- the natural place to ask for a title is a language
-model, which is what ``ENRICH_MODEL`` and ``ANTHROPIC_API_KEY`` in ``.env.example``
-exist for. This module is the answer for a stack running with neither: no key, no
-credits, no second model download, no network.
+model, and ``ENRICH_PROVIDER=local`` now runs one -- memo_ai/enrich/local.py, from
+weights baked into the image. This module is what answers on `none`, and on any memo
+whose enrichment failed: no model, no key, no network, and no second 1.1 GB resident.
 
 **What it does instead.** Four rules, in order, each of which only ever *removes*
 words:
