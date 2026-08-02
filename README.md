@@ -1,9 +1,8 @@
 # Memo App
 
-Record a voice memo or type one. It gets transcribed, enriched with a title,
-summary and tags, and becomes full-text searchable. Keep the quick ones loose,
-gather the rest into named collections, and set a reminder on anything that
-needs to come back to you.
+Record a voice memo or type one. It gets transcribed, given a short title, and
+becomes full-text searchable. Keep the quick ones loose, gather the rest into
+named collections, and set a reminder on anything that needs to come back to you.
 
 Two screens: a landing page at `/`, and the app itself at `/memos`.
 
@@ -517,12 +516,20 @@ audio, so the levers are the model and `MAX_AUDIO_SECONDS` — not the sample ra
 
 ### Using the Anthropic key
 
-`ANTHROPIC_API_KEY` is optional and nothing here needs it. Without it, memos still
-transcribe, store and search; they get a fallback title (first 60 characters of
-the transcript) and `enrichment_error` is recorded on the row.
+`ANTHROPIC_API_KEY` is optional and nothing here needs it. Every memo gets a title
+without it: `ai/memo_ai/titles.py` cuts one out of the transcript with no model, no
+key and no network — it strips the throat-clearing and the date a spoken memo opens
+with, cuts at the first clause, and caps what is left at six words. "Tomorrow I will
+have a meeting with my friend John at 15am" becomes "Meeting with my friend John".
 
-To use it, paste your own key into `.env`. _TODO (MEMO-26): what measurably
-changes when you do._
+What the key would buy is the things a heuristic cannot do: a summary, tags, and a
+title that reads a list of eighteen document names and answers "Documents for the
+job". Nothing writes `summary`, `tags` or `category` today; those columns exist and
+stay NULL. NOTES.md has the argument for why the local titler is what ships, and
+where a model would plug in.
+
+Every title is editable, from the memo's own card, precisely because a guess this
+cheap is sometimes going to be wrong.
 
 ## Repository layout
 
@@ -549,7 +556,8 @@ server so the browser sees one origin. No authentication — see Assumptions.
 | `GET` | `/health` | Database round trip and upload limits; 503 when it fails |
 | `GET` | `/memos` | The list, newest first. See the parameters below |
 | `POST` | `/memos` | Create one: JSON `{text}`, or `multipart/form-data` with `audio` |
-| `PATCH` | `/memos/{memo}` | `{collection_id}` — file it, or `null` to unfile |
+| `PATCH` | `/memos/{memo}` | `{collection_id}` — file it, or `null` to unfile. `{title}` — rename it, or `null` to clear. Either field, or both |
+| `DELETE` | `/memos/{memo}` | 200 with the memo it removed. Takes the recording and any reminders with it |
 | `GET` | `/collections` | The grid, with each collection's memo count and newest labels |
 | `POST` | `/collections` | `{name}` |
 | `PATCH` | `/collections/{collection}` | `{name}` — rename |
@@ -579,6 +587,11 @@ Two response conventions worth knowing before writing a client:
   it is a read across every memo by a caller holding none of them.
 - **Lists echo the filters they answered for** alongside the rows, so a response
   that arrives after the search box has moved on can still be captioned correctly.
+- **`title` is the only content a client may write.** The transcript is a record of
+  what was said and nothing in this app edits one — the formatter will not respell a
+  word of it, and there is a test asserting so. A title is *generated*, which makes it
+  a guess, and a guess the owner disagrees with is a memo they cannot find again. So
+  the guess is the default and the owner has the last word.
 
 ## Architecture
 
