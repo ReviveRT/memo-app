@@ -257,16 +257,44 @@ TEMPERATURE = 0.0
 # exist to provoke the decoder. It is recorded here so that nobody re-measuring the
 # repetition table wonders why the numbers moved.
 #
-# English, on recordings that may not be. Checked rather than assumed: the Russian
-# fixture still comes back Russian, detected at 0.99, with its words unchanged --
-# because the language token decides the language and the prompt only suggests a
-# register. What is *not* claimed is that an English primer punctuates a long
-# non-English recording as well as it does this one; there is no long non-English
-# recording here to find out on.
+# **English, and therefore only ever sent with English.** This block previously
+# claimed the opposite -- that "the language token decides the language and the
+# prompt only suggests a register", checked against the Russian fixture. That claim
+# was wrong, and the check could not have found it: the Russian fixture is somebody
+# counting to ten, which decodes to the numerals `1, 2, 3...` in either language, so
+# it is the one non-English recording here whose output cannot reveal a language
+# shift. `test_a_real_recording_transcribes_on_the_local_model` only asserts the
+# text is non-empty, which digits satisfy in any language.
+#
+# What actually happens, measured on a real 9.7-second Russian memo recorded into
+# the app, decoded four ways on `large-v3-turbo`:
+#
+#   language='ru' + this primer     "Me tomorrow is a meeting with Andrey..."
+#   language='ru' + no primer       "Мне завтра встреча с Андреем..."
+#   language=None + this primer     "Me tomorrow is a meeting with Andrey..."
+#   language=None + no primer       "Мне завтра встреча с Андреем..."
+#
+# The language token is not the variable -- `info.language` came back `ru` on all
+# four -- and neither is detection, which called it `ru` at 0.98. The primer is the
+# whole of it. Whisper receives `initial_prompt` as the transcript of the audio
+# immediately preceding this one, and continuing English prose into Russian speech
+# is a translation task; the model obliges, silently and fluently. A memo app that
+# returns a user's words in a language they did not speak has lost the memo, so this
+# is a correctness bound rather than a quality one.
+#
+# Hence PRIMER_LANGUAGE below, and the condition at the `initial_prompt` line in
+# `transcribe`. Anyone localising this primer should note that translating the text
+# is not enough on its own -- the digits and the exact phrasing are load-bearing per
+# the two bullets above, and each translation needs its own pass over the fixtures.
 PUNCTUATION_PRIMER = (
     "Okay, here is a note to myself. It runs to 2 or 3 sentences, with commas "
     "where they belong and a full stop at the end. Does it read well? Yes, it does."
 )
+
+# The one language PUNCTUATION_PRIMER may be sent with, because it is the language
+# the primer is written in. Kept beside the text rather than inline at the callsite
+# so that rewording one without the other is harder.
+PRIMER_LANGUAGE = "en"
 
 # The model that decides what language a recording is in, when STT_LANGUAGE has
 # not already said.
@@ -494,8 +522,10 @@ class LocalWhisperStt:
             # measured here. The two settings did produce different text on that
             # file; which is *better* is not something a character count answers,
             # so the library's tuned default stands.
+            language = self.language or _detected(engines.detector, source)
+
             options = {
-                "language": self.language or _detected(engines.detector, source),
+                "language": language,
                 "vad_filter": True,
                 "vad_parameters": {"speech_pad_ms": VAD_SPEECH_PAD_MS},
                 # See REPETITION_PENALTY. Applied to both decode paths, though
@@ -506,10 +536,24 @@ class LocalWhisperStt:
                 # not worth two decode paths that behave differently.
                 "temperature": TEMPERATURE,
                 "repetition_penalty": REPETITION_PENALTY,
-                # See PUNCTUATION_PRIMER, which also has the reason
-                # `condition_on_previous_text` is left at its default beside it.
-                "initial_prompt": PUNCTUATION_PRIMER,
             }
+
+            # See PUNCTUATION_PRIMER, which has the measurement behind this
+            # condition and the reason `condition_on_previous_text` is left at its
+            # default beside it. The primer is English prose, and whisper reads it
+            # as the transcript preceding this audio, so it carries a language as
+            # well as a register -- sent with Russian speech it returns an English
+            # translation.
+            #
+            # `== PRIMER_LANGUAGE` rather than `!= some-other-language`, so the
+            # unknown case is unprimed. `language` is None whenever detection came
+            # back under DETECT_MIN_CONFIDENCE, and not knowing is not English. The
+            # two mistakes are not symmetric: withholding the primer from an English
+            # memo costs punctuation on the minority of recordings whose register
+            # whisper guesses wrong, while sending it with a non-English one costs
+            # the memo. Cheaper to under-punctuate.
+            if language == PRIMER_LANGUAGE:
+                options["initial_prompt"] = PUNCTUATION_PRIMER
             seconds = _wav_seconds(source)
             transcriber = engines.transcriber
 
