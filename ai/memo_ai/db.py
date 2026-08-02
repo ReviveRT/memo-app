@@ -45,14 +45,19 @@ def connect(settings: Settings, role: str = "worker") -> psycopg.Connection:
     working?" from ``pg_stat_activity`` without adding a healthcheck or a metrics
     endpoint. The hostname is the container id under compose.
 
-    ``role`` is what keeps that answer readable now that two services share this
-    function. ``ai-api`` (MEMO-24) opens short connections of its own against the
-    same database, and without a name of their own they would appear in
-    ``pg_stat_activity`` as workers -- so "are both replicas working?" would be
-    answered by counting three things and getting four. It is a parameter with a
-    default rather than a field on ``Settings`` because it is a property of the
-    entrypoint, not of the environment: nothing in a ``.env`` could know or should
-    decide which of the two opened a connection.
+    ``role`` is what that name is built from, and it exists because this is no
+    longer only the worker's door to the database. Two entrypoints arrived on the
+    same release and each would otherwise have appeared in ``pg_stat_activity`` as
+    another replica: ``python -m memo_ai.ask`` (MEMO-24) opens a short connection
+    per question, and ``python -m memo_ai.costs`` (MEMO-22) runs its aggregates over
+    the same connection settings. Unnamed, "are both replicas working?" is answered
+    by counting two things and getting four.
+
+    A parameter with a default rather than a field on ``Settings``, for two reasons
+    that agree: it is a property of the entrypoint rather than of the environment --
+    nothing in a ``.env`` could know or should decide which process opened a
+    connection -- and the default keeps every existing caller writing the name it
+    always wrote.
     """
     return psycopg.connect(
         settings.database_url,

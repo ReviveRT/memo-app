@@ -26,6 +26,7 @@ from memo_ai.enrich.base import (
     Enrichment,
     EnrichmentError,
     NoEnrichment,
+    Usage,
 )
 from memo_ai.enrich.local import LocalLlmEnricher
 
@@ -37,6 +38,7 @@ __all__ = [
     "EnrichmentError",
     "LocalLlmEnricher",
     "NoEnrichment",
+    "Usage",
     "require_known",
     "resolve",
 ]

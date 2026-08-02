@@ -73,13 +73,15 @@ import json
 import logging
 import re
 import threading
+import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from string import Template
 
 from memo_ai import titles
 from memo_ai.background import BackgroundCall
-from memo_ai.enrich.base import Enrichment, EnrichmentError
+from memo_ai.enrich.base import Enrichment, EnrichmentError, Usage
 
 log = logging.getLogger(__name__)
 
@@ -516,7 +518,13 @@ class LocalLlmEnricher:
             return None
 
         model = self._ready_model()
+
+        # Started after the model is ready, so a first memo that paid for the load
+        # does not report it as generation time. `Usage.inference_ms` states the
+        # rule and memo_ai/stt/local.py applies the same one to whisper.
+        started = time.monotonic()
         answer = self._generate(model, text)
+        usage = self._usage(answer, round((time.monotonic() - started) * 1000))
 
         try:
             content = answer["choices"][0]["message"]["content"]
@@ -545,7 +553,10 @@ class LocalLlmEnricher:
 
             raise EnrichmentError(_BAD_ANSWER)
 
-        return enrichment
+        # Attached here rather than threaded through `_validated`, which validates
+        # what the *model* said and has no business with what the run consumed.
+        # `replace` because Enrichment is frozen.
+        return replace(enrichment, usage=usage)
 
     def _ready_model(self) -> object:
         """
@@ -660,6 +671,58 @@ class LocalLlmEnricher:
             raise EnrichmentError(_FAILED) from call.error
 
         return call.result
+
+    def _usage(self, answer: object, elapsed_ms: int) -> Usage:
+        """
+        What that generation consumed, for MEMO-22's columns.
+
+        llama-cpp-python fills in an OpenAI-shaped ``usage`` object --
+        ``prompt_tokens``, ``completion_tokens``, ``total_tokens`` -- and the two
+        that matter are kept apart because hosted providers bill them at different
+        rates. ``total_tokens`` is dropped rather than stored: it is the sum of the
+        other two, and a third column that can disagree with them is a column that
+        eventually will.
+
+        **Nothing here can fail the memo.** Every field is read defensively and a
+        missing or oddly-typed one becomes ``None``, because this is bookkeeping
+        hanging off a result that is already good. A `KeyError` raised while
+        counting tokens would cost a memo the title and summary it had already
+        generated -- which is the one outcome MEMO-16's second commit point exists
+        to prevent, thrown away by the cheapest code in the file.
+        """
+        fields = answer.get("usage") if isinstance(answer, dict) else None
+
+        return Usage(
+            provider=self.name,
+            # The filename, not the path. `enrich_model` is grouped by in
+            # memo_ai/costs.py, and `/opt/models/llm/` in front of every row is a
+            # fact about one image's layout rather than about the model.
+            model=self.model_path.name,
+            input_tokens=_count(fields, "prompt_tokens"),
+            output_tokens=_count(fields, "completion_tokens"),
+            inference_ms=elapsed_ms,
+        )
+
+
+def _count(fields: object, key: str) -> int | None:
+    """
+    One token count out of the response's ``usage``, or ``None``.
+
+    ``bool`` is excluded explicitly because it is an ``int`` in Python, and
+    ``prompt_tokens: true`` would otherwise be stored as one token. Nothing
+    produces that today; the check costs a clause and removes the need to know
+    that.
+
+    Negative is rejected rather than clamped: a count below zero is a response
+    this code does not understand, and writing 0 would put a confident wrong
+    number in a column that gets summed.
+    """
+    if not isinstance(fields, dict):
+        return None
+
+    value = fields.get(key)
+
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 def _messages(text: str) -> list[dict[str, str]]:

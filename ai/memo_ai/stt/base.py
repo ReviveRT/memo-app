@@ -101,6 +101,22 @@ class Transcript:
     # provider that has nothing to say leaves whatever an earlier attempt recorded.
     cost_micro_usd: int | None = None
 
+    # How long the transcription itself took, in milliseconds, or None for "no
+    # inference happened here". MEMO-22 divides it by `duration_ms` to get seconds
+    # of inference per minute of audio, which is the number that answers "would
+    # this scale?" for a design whose dollar cost is zero.
+    #
+    # **Timed by the provider rather than by the pipeline, and that is the whole
+    # reason it is on this class.** A caller can only time the call it makes, which
+    # for `local` includes `_ready_model()` -- and the first voice memo after a boot
+    # would then record a 1.65 GB model load as its inference time and be the median
+    # on any small sample. A provider knows where its own model load ends.
+    #
+    # None from `fake`, on the same argument its `model` is None: nothing ran, and a
+    # near-zero timing from a provider that never opened the file would drag down a
+    # median that is supposed to describe real transcription.
+    inference_ms: int | None = None
+
 
 class SttProvider(Protocol):
     """

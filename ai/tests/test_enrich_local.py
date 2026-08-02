@@ -17,6 +17,7 @@ other way -- see the note there.
 import json
 import threading
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -28,7 +29,7 @@ from memo_ai.config import (
     ConfigError,
     Settings,
 )
-from memo_ai.enrich import NO_ENRICHMENT, Enrichment, EnrichmentError
+from memo_ai.enrich import NO_ENRICHMENT, Enrichment, EnrichmentError, Usage
 from memo_ai.enrich import resolve as resolve_enricher
 from memo_ai.enrich.base import NoEnrichment
 from memo_ai.enrich.local import (
@@ -61,11 +62,40 @@ ANSWER = {
 }
 
 
-def completion(content) -> dict:
+# What llama-cpp-python reports having consumed, in the OpenAI shape it copies.
+#
+# Plausible rather than round: ~250 tokens of instructions, ~250 of worked
+# examples and a short memo on the way in, a hundred-odd tokens of JSON on the way
+# out. MEMO-22 persists the two separately because hosted providers bill them at
+# different rates, so a fixture where they were equal would let a test that
+# transposed them pass.
+USAGE = {"prompt_tokens": 812, "completion_tokens": 97, "total_tokens": 909}
+
+
+def completion(content, usage=USAGE) -> dict:
     """The envelope llama-cpp-python returns, around whatever the model said."""
     text = content if isinstance(content, str) else json.dumps(content)
+    envelope = {"choices": [{"message": {"content": text}}]}
 
-    return {"choices": [{"message": {"content": text}}]}
+    # Omitted entirely when a test passes None, which is the shape of a binding
+    # version that does not report usage -- MEMO-22's counting has to survive it
+    # rather than fail the memo that was otherwise fine.
+    if usage is not None:
+        envelope["usage"] = usage
+
+    return envelope
+
+
+def labels(enrichment):
+    """
+    An :class:`Enrichment` with its usage dropped, for comparing what was *said*.
+
+    Every assertion about the four content fields wants this rather than the whole
+    object, because ``usage.inference_ms`` is a wall-clock reading and two
+    otherwise identical enrichments are only equal by luck. Tests that are about
+    the accounting assert on ``.usage`` directly.
+    """
+    return replace(enrichment, usage=None)
 
 
 class StubLlm:
@@ -395,7 +425,9 @@ def test_a_tag_is_lowercased_trimmed_and_singularised(raw, expected):
 def test_the_happy_path_sends_the_memo_and_returns_what_came_back(weights):
     llm = StubLlm()
 
-    assert enricher_for(weights, llm).enrich("Ring the dentist on Thursday.") == _validated(ANSWER)
+    result = enricher_for(weights, llm).enrich("Ring the dentist on Thursday.")
+
+    assert labels(result) == _validated(ANSWER)
     assert llm.calls[0][-1]["content"].startswith(MEMO_OPEN)
     assert "Ring the dentist on Thursday." in llm.calls[0][-1]["content"]
 
@@ -454,7 +486,7 @@ def test_a_load_that_fails_is_retried_by_the_next_memo(weights):
     with pytest.raises(EnrichmentError, match="could not be loaded"):
         enricher.enrich("first")
 
-    assert enricher.enrich("second") == _validated(ANSWER)
+    assert labels(enricher.enrich("second")) == _validated(ANSWER)
     assert len(attempts) == 2
 
 
@@ -546,6 +578,97 @@ def test_the_generation_is_constrained_and_deterministic(weights):
 
     assert llm.kwargs["temperature"] == 0.0
     assert llm.kwargs["grammar"] is not None
+
+
+# --------------------------------------------------------------------------
+# What the run consumed (MEMO-22)
+# --------------------------------------------------------------------------
+
+
+def test_the_token_counts_are_kept_apart_and_the_total_is_dropped(weights):
+    # Two columns rather than one, because hosted providers bill input and output
+    # at different rates -- four to five times apart on the models in
+    # memo_ai/rates.py. `total_tokens` is deliberately not stored: it is the sum of
+    # the other two, and a third column that can disagree with them eventually will.
+    usage = enricher_for(weights, StubLlm()).enrich("Ring the dentist.").usage
+
+    assert usage.input_tokens == 812
+    assert usage.output_tokens == 97
+    assert not hasattr(usage, "total_tokens")
+
+
+def test_the_run_records_what_produced_it_rather_than_what_was_configured(weights):
+    # The same argument `stt_provider` makes: only the enricher that ran can say
+    # what ran. The model is the GGUF's filename and not its path, because
+    # memo_ai/costs.py groups by it and `/opt/models/llm/` in front of every row is
+    # a fact about one image's layout.
+    usage = enricher_for(weights, StubLlm()).enrich("Ring the dentist.").usage
+
+    assert usage.provider == "local"
+    assert usage.model == "qwen.gguf"
+
+
+def test_the_generation_is_timed_and_the_model_load_is_not(weights):
+    # The clock starts after `_ready_model()`. A first memo that had waited out a
+    # load would otherwise report it as inference time and be the median of any
+    # small sample -- which is exactly the figure MEMO-22's second acceptance query
+    # produces.
+    slow_load = 0.2
+    fast_generation = StubLlm()
+
+    def loader():
+        time.sleep(slow_load)
+
+        return fast_generation
+
+    usage = LocalLlmEnricher(weights, loader=loader).enrich("Ring the dentist.").usage
+
+    assert usage.inference_ms < slow_load * 1000
+
+
+def test_a_binding_that_reports_no_usage_still_produces_a_title(weights):
+    # Accounting hangs off a result that is already good, so a missing `usage`
+    # envelope may not cost the memo the title and summary it generated -- which is
+    # the one outcome MEMO-16's second commit point exists to prevent, thrown away
+    # by the cheapest code in the file.
+    result = enricher_for(weights, StubLlm(answer=ANSWER)).enrich("Ring the dentist.")
+
+    assert labels(result) == _validated(ANSWER)
+
+    without = StubLlm()
+    without.create_chat_completion = lambda messages, **kwargs: completion(ANSWER, usage=None)
+    bare = enricher_for(weights, without).enrich("Ring the dentist.")
+
+    assert labels(bare) == _validated(ANSWER)
+    assert bare.usage.input_tokens is None
+    assert bare.usage.output_tokens is None
+    # The timing is this module's own measurement rather than the binding's, so it
+    # survives a response that reports nothing.
+    assert bare.usage.inference_ms is not None
+
+
+@pytest.mark.parametrize("value", [-1, "812", 3.5, True, None])
+def test_a_token_count_that_is_not_a_whole_positive_number_is_dropped(value, weights):
+    # A confident wrong number in a column that gets summed is worse than a NULL.
+    # `True` is in this list because bool is an int in Python, and
+    # `prompt_tokens: true` would otherwise be stored as one token.
+    odd = StubLlm()
+    odd.create_chat_completion = lambda messages, **kwargs: completion(
+        ANSWER, usage={"prompt_tokens": value, "completion_tokens": 97}
+    )
+
+    usage = enricher_for(weights, odd).enrich("Ring the dentist.").usage
+
+    assert usage.input_tokens is None
+    assert usage.output_tokens == 97
+
+
+def test_usage_does_not_make_an_empty_enrichment_look_enriched():
+    # `is_empty` decides whether `enriched_at` is stamped, and it must answer "did
+    # this produce anything to show a person". A run that spent 900 tokens and
+    # returned no usable field has not enriched the memo, whatever it cost to find
+    # that out -- and the usage is still written to the row.
+    assert Enrichment(usage=Usage(input_tokens=812, output_tokens=97)).is_empty()
 
 
 # --------------------------------------------------------------------------

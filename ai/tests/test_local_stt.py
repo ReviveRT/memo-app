@@ -147,6 +147,30 @@ def test_it_transcribes_and_reports_the_model_that_did_it():
     # is the column MEMO-22 prices a run from.
     assert result.model == "base"
 
+    # And how long it ran, which MEMO-22 divides by the recording's length. Timed
+    # here rather than by the caller because only this class knows where its own
+    # model load ended -- see the note at the clock in `transcribe`. Zero is a legal
+    # reading against a stub that returns instantly; None would mean the timing was
+    # never taken.
+    assert result.inference_ms is not None
+    assert result.inference_ms >= 0
+
+
+def test_the_model_load_is_not_counted_as_inference():
+    # A first memo that waited out a 1.6 GB download would otherwise report it as
+    # transcription time and be the median of any small sample -- which is exactly
+    # the figure MEMO-22's second acceptance query produces.
+    slow_load = 0.2
+
+    def loader(size, configured_language):
+        time.sleep(slow_load)
+
+        return _Engines(transcriber=StubModel(), detector=StubDetector())
+
+    result = LocalWhisperStt("base", None, loader=loader).transcribe(AUDIO)
+
+    assert result.inference_ms < slow_load * 1000
+
 
 def test_it_asks_for_wav_and_switches_the_voice_filter_on():
     model = StubModel()

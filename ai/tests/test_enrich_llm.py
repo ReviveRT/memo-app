@@ -26,6 +26,7 @@ set, in the same language every time, and identically across two runs.
 """
 
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -112,7 +113,21 @@ def test_the_same_memo_twice_gives_the_same_answer(enricher):
     # Greedy decoding, asserted rather than assumed. MEMO-16 can re-run enrichment
     # after an interrupted job, and a memo whose title changed because it was
     # retried would be worse than either title on its own.
-    assert enricher.enrich(RAMBLING) == enricher.enrich(RAMBLING)
+    #
+    # The four content fields, not the whole object: `usage.inference_ms` is a
+    # wall-clock reading, so two identical generations are equal on everything the
+    # model said and unequal on how long it took to say it. Determinism is a claim
+    # about the answer.
+    first, second = enricher.enrich(RAMBLING), enricher.enrich(RAMBLING)
+
+    assert replace(first, usage=None) == replace(second, usage=None)
+
+    # And the token counts *are* deterministic, which is worth the extra line: the
+    # prompt is the same and greedy decoding stops at the same token, so a change
+    # here would mean the sampler stopped being greedy rather than merely being
+    # slower. MEMO-22 sums this column, so a drift in it is a drift in the bill.
+    assert first.usage.input_tokens == second.usage.input_tokens
+    assert first.usage.output_tokens == second.usage.output_tokens
 
 
 def test_a_memo_that_is_only_filler_is_not_enriched(enricher):

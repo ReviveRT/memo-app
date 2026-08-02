@@ -869,8 +869,10 @@ provider that actually ran, so `memos.stt_provider` never claims a request was
 made that was not.
 
 Pricing it needs no invoice, either. Hosted transcription bills per minute of
-audio, so the levers are the model and `MAX_AUDIO_SECONDS` — not the sample rate
-— and MEMO-22 keeps the rate table that turns "10,000 memos" into a number.
+audio, so the levers are the model and `MAX_AUDIO_SECONDS` — not the sample rate.
+`python -m memo_ai.costs` turns the minutes this stack has already transcribed
+into what they would have cost on `whisper-1`; see [What this costs, and what it
+would cost hosted](#what-this-costs-and-what-it-would-cost-hosted).
 
 ### Enrichment
 
@@ -941,6 +943,156 @@ A failed enrichment never fails a memo. It lands as a sentence in
 
 Every title is editable, from the memo's own card, precisely because a guess this
 cheap is sometimes going to be wrong.
+
+## What this costs, and what it would cost hosted
+
+**Nothing has been billed to this project.** Every model runs in the `ai-worker`
+container — faster-whisper for transcription, llama.cpp for enrichment, both from
+weights baked into the image — so there is no key, no account and no invoice, and
+`memos.cost_micro_usd` is `NULL` on every row.
+
+That is not the same as being unable to price it. What a hosted provider bills on
+is minutes of audio and tokens, and those are measurable for free, so the worker
+records them per memo and one command turns them into a number:
+
+```bash
+docker compose run --rm ai-worker python -m memo_ai.costs
+```
+
+```
+Cost and usage accounting (MEMO-22)
+
+  memos                       10
+  transcribed                 9 (7 from a recording)
+  enriched                    8
+  audio                       12.6 minutes, 4s to 9m 12s
+  enrichment tokens           7,340 in, 692 out
+
+Measured spend
+
+  charged by a provider       $0.0000
+    every model in this stack runs in the ai-worker container, so nothing
+    was billed and no key was needed. This is a reading, not an assumption.
+
+Projection onto hosted providers (rates checked 2026-08-02)
+
+  transcription  whisper-1
+    rate                      $0.0060 per audio-minute
+    12.6 audio-minutes        $0.0753
+  enrichment     gpt-4o-mini
+    rate                      $0.15 in / $0.60 out, per Mtok
+    8,032 tokens              $0.0015
+
+  total for these 10 memos    $0.0768
+  per 1,000 memos             $7.6826
+
+Local inference, which is what this design actually costs
+
+  transcription               6 recordings, 12.4 minutes of audio
+    median                    38.4s of inference per audio-minute (0.64x realtime)
+    p95                       39.2s per audio-minute
+    total                     8.0 minutes of inference
+  enrichment                  8 memos
+    median                    2.6s (210 tokens/s)
+    p95                       28.1s
+    total                     1.1 minutes of inference
+
+  resident memory             per worker, in the worker's own log
+    both models load lazily, so the figure moves: an idle replica is 18 MB
+    and one holding whisper and the enricher is about 1,708 MB, of which
+    1,081 MB is the mmap-ed weights and is shared with the other replica.
+    `docker compose logs ai-worker | grep rss`
+```
+
+Ten memos there, deliberately mixed: short and long recordings, two text memos
+with no audio at all, one refused for length, and one transcribed on `fake`. The
+counts differ line by line for real reasons — a text memo is `transcribed` but is
+not a recording, the refused one is measured but was never sent to a provider and
+so is not projected, and `fake` produced words without running a model and so is
+not timed.
+
+The zero is **read** rather than asserted: it is `sum(cost_micro_usd)`, so the day
+somebody points the configuration at a hosted provider this line changes on its
+own.
+
+### What is recorded per memo
+
+| Column | Written by |
+| --- | --- |
+| `duration_ms` | ffprobe, off the *normalized* file |
+| `stt_provider`, `stt_model` | the provider that actually ran, not the one configured |
+| `stt_ms` | transcription inference, excluding the model load |
+| `cost_micro_usd` | what a provider reported charging — `NULL` on every local run |
+| `enrich_provider`, `enrich_model` | as above, for the second pass |
+| `enrich_input_tokens`, `enrich_output_tokens` | billed at different rates, so kept apart |
+| `enrich_ms` | generation, excluding the model load |
+
+`NULL` means "nobody measured this" and `0` means "measured, and it was zero" —
+which is why a text memo has no `stt_ms` rather than a zero, and why
+`ENRICH_PROVIDER=none` leaves five nulls rather than five zeroes. A zero would
+average into the medians above.
+
+The unit is the **micro-dollar**, a millionth of a dollar. That is deliberate for a
+project that spends nothing: at whisper-1's rate a 20-second memo is 0.2 cents,
+which integer cents would round to zero, and a sum over a thousand of them would
+read `$0.00` against a true `$2.00`.
+
+### The rate table
+
+`ai/memo_ai/rates.py`, and it is the only place a price is written down. Nothing
+reads it at boot and no behaviour depends on it — a stale rate produces a wrong
+projection and nothing else.
+
+```bash
+docker compose run --rm --no-deps ai-worker python -m memo_ai.costs --rates
+```
+
+Project onto a different model with `--stt-model` and `--enrich-model`, and scale
+the total with `--per`. `--stt-model local` is a legal projection whose answer is
+`$0.0000`, out of the same arithmetic as every other row.
+
+**These are list prices noted on a date, not a quote.** They exclude volume tiers
+and they move; every figure the report prints carries the date on the rate behind
+it, and `--rates` prints where each one came from. Re-check the provider before
+repeating a number to anyone who cares about it.
+
+### The levers, and one that is not a lever
+
+Hosted transcription bills **per minute of audio** — not per byte, not per sample.
+So the two things that move the bill are the model and `MAX_AUDIO_SECONDS`, and
+the downsampling in `ai/memo_ai/audio.py` saves bandwidth, disk and decode time
+while saving exactly nothing in money. It also means `duration_ms` is the only
+input a transcription projection needs, which is just as well: `whisper-1` returns
+no usage fields at all.
+
+### The numbers that actually constrain this design
+
+Since the dollars are zero, the real limits are latency and memory. The report's
+last block is the first: **seconds of inference per minute of audio**, median and
+p95, measured over whatever this stack has actually processed. Both timings
+exclude the model load, so a first memo after a boot does not become an outlier.
+
+Memory is the second, and it belongs to a *process* rather than to any row — so
+it is logged by the workers rather than stored on a memo, and the report prints no
+live figure for it at all. The only resident set `memo_ai.costs` can read is its
+own, which is a bare Python process of about 35 MB; printing that under a heading
+about what the design costs would only invite the reading that a worker holding
+two models costs 35 MB.
+
+```bash
+docker compose logs ai-worker | grep rss
+```
+
+Each replica states the full shared/private split once at boot, before either
+model has loaded, and the running total on every memo it publishes. The split is
+logged once rather than every time because producing it means walking the
+process's page tables: measured in this image, `/proc/self/smaps_rollup` costs
+10.8 ms on a process holding 1.5 GB against `/proc/self/status`'s 0.042 ms, and it
+does not change from memo to memo.
+
+The split matters more than the total: both models are `mmap`-ed read-only, so
+most of a replica's resident set is shared with the other one. [What it costs to
+run](#what-it-costs-to-run) has the table.
 
 ## Repository layout
 

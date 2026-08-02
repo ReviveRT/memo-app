@@ -965,6 +965,113 @@ Worth recording because of how it hid. The first version of the 416 test asserte
 and the `Content-Range` and passed, which is the shape of assertion that reads as coverage
 and is not: nothing in it was about the bytes. The test now pins the framing as well.
 
+## Cost is recorded as usage, priced by a table nobody has been billed against
+
+**Decision.** Every memo carries what it consumed — `duration_ms`, `stt_ms`,
+`enrich_input_tokens`, `enrich_output_tokens`, `enrich_ms`, and the provider and
+model that produced each half. `cost_micro_usd` records what a provider said it
+charged, and is `NULL` on every row this stack has ever written. The dollars come
+from `ai/memo_ai/rates.py`, a table of list prices that nothing reads at boot, and
+`python -m memo_ai.costs` multiplies the two.
+
+**The split is the point: measurements on the row, prices in code.** A measurement
+stays true; a price does not. Storing `cost_micro_usd` computed from a rate would
+mean every historical row silently re-stating a number that was correct in August
+and is not in November, and there would be no way to tell which rows were priced
+when. Storing minutes and tokens means the projection can be re-run against a new
+rate, or against a different model, without touching a row. The one thing that
+*is* stored as money is what a provider actually reported billing, which is a fact
+about a transaction rather than a derivation — and which is exactly the column
+that has to stop reading zero the day this stops being a local-only stack.
+
+**Micro-dollars, and this is the detail worth defending.** A 20-second memo at
+`whisper-1`'s $0.006/minute is 0.2 cents. In integer cents that is `0`, and a sum
+over a thousand of them is also `0` — against a true $2.00. The wrong unit here
+does not produce a wrong number, it produces a *plausible* one: a report that says
+a hosted provider is free reads as a working feature. `bigint` millionths costs
+nothing and cannot fail that way.
+
+**Timings exclude the model load, on both sides.** `stt_ms` starts after
+`_ready_model()` and `enrich_ms` starts after the lazy load, so the first memo
+after a boot does not record a 1.6 GB download as its inference time. The
+alternative was timing the call from `pipeline.run_job`, which is what a caller
+can do — and on a small sample that one row would be the median of "seconds of
+inference per audio-minute", which is the whole figure. What a load costs is a
+property of the process, and the worker logs it separately.
+
+**Tokens accumulate across attempts; timings do not.** The one asymmetry in the
+write rules, and it follows from what each column is. A job reaped between the two
+commit points re-runs enrichment, and on a hosted provider both runs are billed —
+so `enrich_input_tokens` adds. A latency is not a spend: a memo enriched twice has
+two generation times, not one twice as long, so `enrich_ms` is replaced.
+`memos._accumulated` is the expression, and its shape is load-bearing:
+`COALESCE(COALESCE(col, 0) + %(p)s, col)` leaves a never-enriched row `NULL`,
+where the obvious `COALESCE(col,0) + COALESCE(p,0)` would turn "nobody measured
+this" into a confident zero and average it into every figure the report prints.
+Checked against Postgres rather than reasoned about: all four cases behave as
+described.
+
+**The projection excludes audio that was never sent.** `duration_ms` is written on
+failure paths too — a memo refused for length carries its own length, so the UI
+can show it — and a hosted provider is not paid for a request nobody made. So the
+spend query sums `duration_ms FILTER (WHERE transcript IS NOT NULL)`. On the mixed
+set this was verified against, that is the difference between 27.6 audio-minutes
+and 12.6: without the filter the projection would have been more than double.
+
+**Rates are code, not configuration.** No environment variable, because a price is
+not a deployment setting — it is a fact about a provider that changes when the
+provider changes it, and putting it in a `.env` would spread one number across
+every machine that runs this. It is a table with a date on it, the report prints
+that date beside every figure, and `--rates` prints where each number came from.
+Nothing validates them against a provider and nothing can; the honest thing is to
+say so in the output rather than to imply an invoice.
+
+**Memory is logged, not stored, and the report prints no number for it.** RAM is a
+property of a process, not of a memo: the same memo costs 18 MB on a worker that
+has not loaded whisper and 1.7 GB on one that has, and two replicas share most of
+what they hold. There is no column that would mean anything. So `ai/memo_ai/rss.py`
+reads `/proc/self/status` and `/proc/self/smaps_rollup`, and the worker states it
+at boot — before either model loads, which is what makes the later numbers
+comparable — and again on every memo it publishes. Reporting the shared/private
+split rather than the total is what keeps the answer honest: two enriching replicas
+cost about 2.3 GB between them rather than 3.4, and only the total would suggest
+otherwise.
+
+`memo_ai.costs` deliberately prints a pointer to those logs instead of a figure.
+The only resident set it can read is its own — a bare Python process, about 35 MB
+— and a live-looking number under a heading about what the design costs invites
+exactly one misreading. It sampled itself in the first version; that was the bug.
+
+**And the split is logged once, not per memo, because it is not free.** Measured
+inside this image on a process holding 1.5 GB: `/proc/self/status` answers in
+0.042 ms because `VmRSS` is a counter the kernel already maintains, while
+`/proc/self/smaps_rollup` takes **10.8 ms** because it walks the page tables to
+produce it — and that grows with resident memory, so it is worst on exactly the
+worker worth measuring. A logging argument is evaluated whether or not the line is
+emitted, so the first version spent that on every memo even at `LOG_LEVEL=WARNING`.
+`rss.brief()` reads the counter for the per-memo line and `rss.describe()` does the
+walk once at boot, where the process is 18 MB and it costs nothing.
+
+**What is deliberately not built.** No `/api/costs` endpoint and nothing in the
+UI. This answers a question asked once, on a call, by somebody with a shell — not
+a question a user of a memo app has. An endpoint would be a public surface, a
+projection to maintain and a permission model to think about, for a report that
+`docker compose run` already prints.
+
+**One gap, stated rather than closed: a failed enrichment records no usage.**
+`LocalLlmEnricher` raises `EnrichmentError` on an answer it cannot use, so the
+tokens that generation spent reach nothing — the row gets a sentence in
+`enrichment_error` and five NULLs. On a hosted provider that is a real
+under-count, because a response you could not parse is still a response you were
+billed for. Closing it means `EnrichmentError` carrying a `Usage`, `_enriched`
+returning three values instead of two, and `finish_ready` taking usage
+independently of the enrichment — three signatures widened for a case that costs
+exactly zero here, and that for most of its causes (the model still loading, a
+generation past its deadline, a busy context) has no tokens to report anyway. The
+write path is already shaped for it: `finish_ready` reads `enrichment.usage`
+rather than gating on `enriched`, so the day an enricher wants to report a spend
+with nothing to show for it, the column is there.
+
 ## Ask is the one synchronous path, and everything about it follows from that
 
 **Decision.** `POST /api/ask` retrieves the three best-matching memos through the full-text

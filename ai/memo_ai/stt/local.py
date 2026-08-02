@@ -65,6 +65,7 @@ batches; ``tiny`` adds 75 MB of weights and no measurable memory.
 
 import logging
 import threading
+import time
 import wave
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -508,6 +509,18 @@ class LocalWhisperStt:
     def transcribe(self, source: Path, language: str | None = None) -> Transcript:
         engines = self._ready_model()
 
+        # **After the model is ready, which is the whole reason this clock starts
+        # here rather than in the caller.** MEMO-22 divides this by the recording's
+        # length to get seconds of inference per audio-minute, and a first memo that
+        # had waited out a 1.6 GB download would otherwise report a rate two orders
+        # of magnitude off and be the median of any small sample. What a load costs
+        # is a fact about the process, not about this recording; memo_ai/rss.py
+        # covers that side.
+        #
+        # `monotonic` and not `time()`: this is an interval, and a clock adjustment
+        # mid-transcription would otherwise be able to produce a negative one.
+        started = time.monotonic()
+
         try:
             # vad_filter is off by default in faster-whisper and is switched on
             # here, with more padding than it ships with -- see VAD_SPEECH_PAD_MS
@@ -661,7 +674,20 @@ class LocalWhisperStt:
             # what is done with it.
             raise SttError(_NO_SPEECH, code=failures.NO_SPEECH)
 
-        return Transcript(text=text, provider=self.name, model=self.model_size)
+        # Only on the success path, deliberately. A failed attempt has a duration
+        # too, but it is not *inference* -- a memo that ran out of memory after two
+        # seconds would otherwise contribute a two-second transcription to the
+        # median, and the failure paths above already carry their own reason.
+        #
+        # No `cost_micro_usd`: this model runs here and bills nobody, and zero would
+        # claim a measurement where None states the truth. memo_ai/stt/base.py has
+        # that argument at the field.
+        return Transcript(
+            text=text,
+            provider=self.name,
+            model=self.model_size,
+            inference_ms=round((time.monotonic() - started) * 1000),
+        )
 
     def prefetch(self) -> None:
         """
