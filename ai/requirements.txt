@@ -56,3 +56,25 @@ faster-whisper==1.2.1
 # `libggml`/`libllama` shared objects themselves. Beside faster-whisper's 330 MB
 # and the weights' 1,117 MB it does not register.
 llama-cpp-python==0.3.34
+
+# The ai-api service (MEMO-24). MIT, both of them, and installed into the same
+# image as the worker because `ai-api` *is* that image with a different command --
+# ai/Dockerfile has that contract at its first paragraph. So the worker carries a
+# web framework it never imports, which is the price of one image instead of two,
+# and it is a cheap one: 12 MB of site-packages across fastapi, starlette, uvicorn,
+# pydantic and their dependencies, measured on the built image -- of which 8.4 MB is
+# pydantic and its compiled core. Against 330 MB of faster-whisper and 1,117 MB of
+# weights it does not register.
+#
+# Nothing at module scope in memo_ai/worker imports either of these, so a worker
+# replica does not pay for them at runtime either -- memo_ai/ask/app.py is the only
+# module that imports fastapi and the worker never reaches it.
+fastapi==0.141.1
+
+# **`uvicorn`, deliberately not `uvicorn[standard]`.** The extra pulls uvloop,
+# httptools, watchfiles and a websockets implementation, none of which this service
+# can use: it answers one question at a time because a single llama_context may not
+# be entered twice, so the event loop is idle for the twenty seconds that matter and
+# a faster one saves nothing measurable. What the extra would cost is four more
+# dependencies -- two of them compiled -- in an image that has to build on arm64.
+uvicorn==0.52.1

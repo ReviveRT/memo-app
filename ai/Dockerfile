@@ -1,9 +1,19 @@
 # syntax=docker/dockerfile:1
 
-# The image behind two services. `ai-worker` is this file's CMD (MEMO-08) and
-# `ai-api` (MEMO-24, a stretch) is a `command:` override on the same image, which
-# is what "same image as ai-api, different entrypoint" means here -- one build
-# context, one dependency set, one uid.
+# The image behind two services, and as of MEMO-24 both of them exist. `ai-worker`
+# is this file's CMD (MEMO-08); `ai-api` is `python -m memo_ai.ask` as a `command:`
+# override on the same image. One build context, one dependency set, one uid -- and
+# one copy of the model weights, which is the part that turned out to matter most.
+# Sharing an `mmap` needs the same *file*, not merely the same bytes, and one image
+# is what guarantees it: measured on two containers from this image with the model
+# loaded in both, each reports those pages as `Shared_Clean 1,117,840 kB` with
+# `Private_Clean` at zero. Two images built from two Dockerfiles would have been two
+# copies in memory for the rest of the stack's life. README.md has the table.
+#
+# What the worker pays for that is a web framework it never imports -- 12 MB of
+# site-packages across fastapi, starlette, uvicorn, pydantic and their dependencies,
+# measured on this image -- and what it buys is one Dockerfile, one requirements.txt
+# and one `memo` user to keep right.
 #
 # `python:3.12-slim`, and both halves of that are chosen rather than default.
 # 3.12 because NOTES.md already documents this image as it, from MEMO-12's survey of
@@ -385,7 +395,7 @@ USER memo
 # a worker mid-job. memo_ai/worker/__main__.py installs the handler that makes the
 # other half of that work.
 #
-# `-m memo_ai.worker` rather than a script path: it is the module path an `ai-api`
-# service overrides with its own `command:`, and it keeps /app on sys.path without
-# a PYTHONPATH or an install step.
+# `-m memo_ai.worker` rather than a script path: it is the module path the `ai-api`
+# service overrides with `python -m memo_ai.ask` (MEMO-24), and it keeps /app on
+# sys.path without a PYTHONPATH or an install step.
 CMD ["python", "-m", "memo_ai.worker"]

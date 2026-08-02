@@ -137,6 +137,33 @@ services:
       DATABASE_URL: *database-url
       AUDIO_DIR: *audio-dir
       MAX_AUDIO_BYTES: ${MAX_AUDIO_BYTES:-12582912}
+      # Where POST /api/ask proxies to (MEMO-24). A compose service name, so it
+      # resolves on this network and nowhere else -- which is the whole of what
+      # keeps ai-api private, since that service maps no host port.
+      #
+      # **`api` deliberately does not `depends_on` it.** Waiting for ai-api to be
+      # healthy would gate the entire stack -- and therefore recording, listing and
+      # searching memos -- on a 1.5 GB model finishing its load. Ask is one optional
+      # feature; when it is not up, `/api/ask` answers a 503 saying so and nothing
+      # else on the page notices. That is also what makes
+      # `docker compose up --scale ai-api=0` a supported way to run this.
+      AI_API_URL: ${AI_API_URL:-http://ai-api:8000}
+      # Both timeouts are passed through for the reason OPENAI_API_KEY is passed to
+      # ai-worker: they are documented in .env.example and listed in README.md, and
+      # a variable somebody sets there has to reach the container that reads it
+      # rather than being dropped one layer earlier. Left out of this block at
+      # first, which made both of them settings that changed nothing.
+      #
+      # Short, because what it bounds is "ai-api is not running" and the useful
+      # answer to that is a 503 now rather than in a minute.
+      AI_API_CONNECT_TIMEOUT: ${AI_API_CONNECT_TIMEOUT:-5}
+      # Per *read*, not for the whole answer -- Guzzle's `stream` option puts this on
+      # the socket. It has to clear the gap before the first token, which is the
+      # model processing the prompt, so it is set from the same order of magnitude as
+      # ASK_DEADLINE_SECONDS and deliberately above it: ai-api giving up first
+      # produces a readable `error` event, and this side giving up first produces a
+      # truncated stream with nothing to explain it.
+      AI_API_READ_TIMEOUT: ${AI_API_READ_TIMEOUT:-210}
       # FrankenPHP listens on :80 by default; the Vite proxy target is api:8080.
       SERVER_NAME: ":8080"
       # Laravel reads these. APP_KEY is deliberately absent: it exists for
@@ -424,11 +451,107 @@ services:
     stop_grace_period: 30s
     restart: unless-stopped
 
-  # A sixth service, ai-api, joins this file only if "Ask my memos" lands (MEMO-24).
-  # It shares the ai image with a different entrypoint -- concretely, `build:
-  # context: ./ai` again plus a `command:` override, since ai/Dockerfile's CMD is
-  # `python -m memo_ai.worker` and memo_ai is one package with room for a second
-  # entrypoint beside it.
+  # --- Ask my memos ------------------------------------------------------------
+  # The sixth service, and the shape this file predicted for it: `build: context:
+  # ./ai` again plus a `command:` override, because ai/Dockerfile's CMD is
+  # `python -m memo_ai.worker` and memo_ai had room for a second entrypoint beside
+  # it. One build context, one dependency set, one uid, two processes.
+  #
+  # **It is the one synchronous path in the stack**, and that is the contrast worth
+  # understanding rather than an inconsistency to fix. Everything else queues,
+  # because a memo is already saved and its transcript can arrive whenever it
+  # arrives. A question has no row to come back to, so this request is held open
+  # while a local model reads three memos and writes three sentences -- and the
+  # architecture that rescues the rest of the app rescues nothing here. NOTES.md
+  # compares the two.
+  #
+  # **What it costs while it is up.** The model is loaded at start and kept, on
+  # purpose: this is the one path where a person is watching, so the first question
+  # of the day must not be the one that waits out a load. Resident, that is 1,402 MB
+  # of RSS -- of which only 310 MB is anonymous, because the 1,092 MB weight file is
+  # mmap-ed read-only and is the *same file* every other process running this image
+  # maps. Measured with smaps_rollup on two containers from this image with the
+  # model up in both: Shared_Clean 1,117,840 kB and Private_Clean 0 on each.
+  # README.md has the table and the comparison against a worker.
+  #
+  # Not wanted? `docker compose up --scale ai-api=0` and the rest of the stack is
+  # unchanged -- `/api/ask` then answers a 503 saying so, and nothing else in the
+  # app touches this service.
+  ai-api:
+    build:
+      context: ./ai
+    # The whole of the difference from ai-worker. Exec form, so python is PID 1 and
+    # uvicorn's own SIGTERM handling gets the signal directly.
+    command: ["python", "-m", "memo_ai.ask"]
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: *database-url
+      # ENRICH_MODEL_PATH is absent here for exactly the reason it is absent from
+      # ai-worker above -- the paragraph there has the measurement. This service
+      # opens the same GGUF, so the same trap applies: any line naming that variable
+      # replaces the image's own ENV, including the two spellings that look like
+      # they would not.
+      #
+      # How many memos go in front of the model, and how much of each.
+      #
+      # These two are the latency, near enough: prompt processing dominates CPU
+      # inference, so what is retrieved is what is waited for. Three memos at 1,200
+      # characters is about 3,600 characters of evidence. Raise them on a fast
+      # machine; the service refuses a pair that would need more context than it
+      # will load, at boot, naming both numbers.
+      ASK_TOP_K: ${ASK_TOP_K:-3}
+      ASK_MEMO_CHARS: ${ASK_MEMO_CHARS:-1200}
+      # The ceiling on one answer. Loose against a measured worst case, for the
+      # reason memo_ai/ask/model.py gives: it exists to stop a wedged generation
+      # holding the one model this service has, not to enforce a latency target.
+      # What bounds the felt wait is that the answer streams.
+      ASK_DEADLINE_SECONDS: ${ASK_DEADLINE_SECONDS:-180}
+    # **No ports.** PHP is the only public surface -- the browser reaches this
+    # through `POST /api/ask` on the api container, which is what keeps CORS, auth
+    # and rate limiting a question with one answer instead of two. To poke at it
+    # directly, go in from a container that is already on this network:
+    #
+    #     docker compose exec api curl -s http://ai-api:8000/health
+    #
+    # **No `user:`, unlike the two services above.** That anchor is the shared-audio
+    # contract and this service never mounts the audio volume -- it reads the memos
+    # table and nothing else. The image still runs as `memo`; there is simply no
+    # second container here to agree with about a uid.
+    #
+    # **No volumes at all**, for the same reason: the weights are baked into the
+    # image (MEMO-15) and nothing here writes a file.
+    healthcheck:
+      # python rather than curl, because this image has no curl -- it is
+      # python:3.12-slim plus ffmpeg. urllib is in the standard library and raises
+      # on a non-2xx, which is exactly the exit code this needs.
+      #
+      # /health answers 503 until the weights are in, so `healthy` here means a
+      # question could actually be answered rather than that a socket is open. The
+      # start period covers the load: a fraction of a second on a warm page cache
+      # and a few seconds cold, with retries behind it either way.
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health').read()"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    # Set rather than inherited, for the reason the worker's is: an unset grace
+    # period SIGKILLs after ~1.2s on this Compose version, which would cut off an
+    # answer mid-sentence on every `docker compose down`.
+    #
+    # 10s rather than the worker's 30s, and far under ASK_DEADLINE_SECONDS, because
+    # what is at stake is different. A killed worker abandons a claim the reaper
+    # then has to take back; a killed answer abandons nothing at all -- nothing on
+    # this path writes to the database. So the number only buys a tidy ending for an
+    # answer already in flight, and a `down` that waits three minutes for one would
+    # be the worse trade.
+    stop_grace_period: 10s
+    restart: unless-stopped
 
 volumes:
   pgdata:

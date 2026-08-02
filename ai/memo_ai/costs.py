@@ -340,12 +340,19 @@ def render(report: Report) -> str:
     # exactly one misreading: that a worker holding two models costs 35 MB. RSS
     # belongs to a process, the workers are other containers, and there is no
     # channel from here to theirs. So this points at the place the real numbers are.
+    # "every other process that has loaded it" rather than "the other replica",
+    # which is what this said until MEMO-24 landed beside it. There is now a third
+    # mapper of the same file -- `ai-api` loads the enrichment GGUF at boot and keeps
+    # it -- and the sharing is a property of the file rather than of how many
+    # replicas there happen to be. Naming a count here would make the sentence go
+    # stale again the next time the service list changes.
     lines += [
         "",
         _row("resident memory", "per worker, in the worker's own log"),
         "    both models load lazily, so the figure moves: an idle replica is 18 MB",
         "    and one holding whisper and the enricher is about 1,708 MB, of which",
-        "    1,081 MB is the mmap-ed weights and is shared with the other replica.",
+        "    1,081 MB is the mmap-ed weights, shared with every other process that",
+        "    has loaded them -- the second replica, and ai-api if it is running.",
         "    `docker compose logs ai-worker | grep rss`",
     ]
 

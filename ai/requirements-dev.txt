@@ -8,3 +8,17 @@
 -r requirements.txt
 
 pytest==9.1.1
+
+# For `fastapi.testclient.TestClient`, which is a thin wrapper over an HTTP client
+# and raises telling you so if it is missing (MEMO-24). Test-only for the same
+# reason pytest is: the ai-api container serves requests, it does not make any.
+#
+# It is what lets tests/test_ask_app.py drive the real routes -- the validation, the
+# status codes, the NDJSON framing -- in-process against a fake model, rather than
+# asserting about a function and hoping FastAPI wires it up the same way.
+#
+# `httpx2` rather than `httpx`, which was the first version of this line: starlette
+# 0.5x accepts either and emits `StarletteDeprecationWarning: Using httpx with
+# starlette.testclient is deprecated; install httpx2 instead` on every run with the
+# older one. A warning printed by every test session is a warning nobody reads.
+httpx2==2.9.1
