@@ -1543,6 +1543,53 @@ h1,
   font-style: italic;
 }
 
+/*
+ * The transcript, being corrected.
+ *
+ * Same border, radius and background as the rename field, because they are the same kind of
+ * control on the same card and two spellings of one input is the sort of difference that reads
+ * as a bug. What differs is the size: this holds a memo rather than a label.
+ *
+ * `font: inherit` so the text being edited looks like the text it replaces -- a textarea
+ * defaults to a monospace stack, which would make the same words look like a different memo
+ * the moment Edit was pressed.
+ *
+ * `resize: vertical` rather than the browser default of `both`. Six rows is a guess about a
+ * memo whose length nothing here knows, so being able to make it taller matters; making it
+ * *wider* only pushes it out of the card.
+ */
+.sheet__transcript-input {
+  display: block;
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+/* Matches .sheet__retry's gap, so the two rows of buttons on one card sit on one rhythm. */
+.sheet__transcript-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+/*
+ * The button that opens the field, under the transcript rather than beside the heading.
+ *
+ * Beside the heading is where Rename sits, and putting a second one there would make the two
+ * compete for the same corner while acting on different things. Below the text it is next to
+ * what it edits.
+ */
+.sheet__section > .ghost {
+  margin-top: 0.6rem;
+}
+
 /* The reason, standing where the transcript would have been. See .memo-card__preview--failed. */
 .sheet__transcript--failed {
   color: var(--error);
@@ -1611,18 +1658,6 @@ h1,
   font: inherit;
 }
 
-/*
- * The spoken-language block on a memo card. The select itself is a `.sheet__select`; this is
- * only the gap above it.
- *
- * `margin-top` matches `.sheet__retry`, since the two can appear one after the other on a memo
- * that both failed and was decoded in the wrong language, and an uneven gap between them would
- * read as one belonging to something else.
- */
-.sheet__language-control {
-  display: block;
-  margin-top: 0.4rem;
-}
 
 .sheet__hint {
   margin: 0.4rem 0 0;

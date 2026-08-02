@@ -82,6 +82,44 @@ the API has stored it, and the transcript fills in when the worker gets to it.
 **Discard** throws a recording away before it is uploaded — once it is sent there
 is no delete yet.
 
+### Telling it what language you are speaking
+
+Next to **Record** is a language picker, set to **Auto-detect**. Leave it there
+most of the time: detection is right on ordinary recordings, and it is what lets
+one stack take memos in several languages without being configured for any of them.
+
+Choose a language when you are about to record something detection is likely to get
+wrong, and it is worth knowing what that looks like, because the failure is quiet.
+A wrong guess does not produce a worse transcript — it produces a *confident* one in
+the wrong language. A Romanian memo recorded into this app came back as
+`Салют, Манамеск Василий!`: the right sounds, transliterated into Cyrillic, because
+the language was decided as Russian.
+
+**Short recordings are where it happens.** Language ID reads the first window of
+audio, and under about three seconds there is not much in it — accent, a name, or
+two words run together are enough to tip it. That case was measured across nine
+approaches on one 2.76-second clip, and not one of them answered Romanian:
+
+| | | | |
+| --- | --- | --- | --- |
+| whisper `tiny` (the shipped detector) | `en` 0.14 | SpeechBrain VoxLingua107 | `lt` 0.99 |
+| whisper `base` | `el` 0.39 | Meta MMS-LID-256 | `rus` 0.98 |
+| whisper `small` | `lt` 0.63 | SpeechBrain CommonLanguage | no signal |
+| whisper `medium` | `lt` 0.23 | decode-and-rescore, no new model | `uk` |
+| whisper `large-v3-turbo` | `ru` 0.19 | | |
+
+Three unrelated model families, trained on different corpora, two of them
+confidently wrong. The same models identify this speaker's *Russian* correctly, and
+clean Romanian speech correctly — so this is a limit of short-audio language ID
+rather than a model worth swapping, which is why the app asks you instead of trying
+harder. Whisper's own API exposes a `language` parameter for the same reason.
+
+The picker applies to the **next** recording and stays where you put it, so a run of
+memos in one language is set once rather than every time. It is per memo: choosing
+Romanian does not stop the next one being detected as English if you set it back.
+`STT_LANGUAGE` is the same setting for the whole deployment — see
+[Transcription](#transcription).
+
 The elapsed timer next to the button is there so you know the length before you
 send it. A recording longer than `MAX_AUDIO_SECONDS` (10 minutes) is **accepted,
 stored, and then failed by the worker** rather than refused at the door — the memo
@@ -355,7 +393,7 @@ reference and contains no real credentials.
 | `STT_PROVIDER` | `local` | Transcription provider: `local` \| `fake` \| `openai`. `openai` is recognised but not built — see below |
 | `STT_FALLBACK` | `local` | Provider used when the primary cannot run at all. Not used when a recording simply produced no words |
 | `STT_MODEL` | `large-v3-turbo` | Whisper size for the `local` provider. The accuracy lever — see the table below before changing it |
-| `STT_LANGUAGE` | _(empty)_ | ISO code of your recordings (`en`, `ru`, …). Empty detects it per recording. Setting it is ~30% faster and safer on short or accented audio |
+| `STT_LANGUAGE` | _(empty)_ | ISO code for **every** recording (`en`, `ru`, …). Empty detects it per recording. ~30% faster and safer on short or accented audio. Overridden per memo by the picker beside **Record** |
 | `OPENAI_API_KEY` | _(empty)_ | Read by nothing today. Passed through for whoever writes the hosted adapter |
 | `ANTHROPIC_API_KEY` | _(empty)_ | Optional. Enables Claude enrichment |
 | `ENRICH_MODEL` | `claude-opus-5` | Claude model for title/summary/tags/category |
@@ -396,8 +434,21 @@ install. It is where a model you asked for but nobody baked gets cached — see
 
 The language is detected per recording rather than configured, so one stack takes
 memos in several languages; the Russian test recording is identified as Russian
-with nothing told to it. Set `STT_LANGUAGE=en` if you only ever speak one — it is
-about 30% faster and removes a misdetection risk that is real on short clips.
+with nothing told to it.
+
+There are two ways to overrule that, and they answer different questions:
+
+- **The picker beside Record**, per memo, for a stack whose user speaks more than
+  one language. See [Telling it what language you are
+  speaking](#telling-it-what-language-you-are-speaking) for when detection is worth
+  overruling and the measurements behind it.
+- **`STT_LANGUAGE`**, per deployment, for one that does not. It is about 30% faster,
+  because naming the language skips a whole encoder pass, and it removes the
+  misdetection risk entirely.
+
+Set `STT_LANGUAGE` if everyone using this stack speaks the same language; use the
+picker if you switch. Setting both is fine — the memo's own choice wins, and
+`STT_LANGUAGE` is what applies when the picker is left on Auto-detect.
 
 ### Choosing a model
 
@@ -487,7 +538,10 @@ waiting for a comma — so the threshold is where it is.
 **`STT_LANGUAGE=en`** is still worth setting if you only ever dictate in one
 language, but it is now a small win rather than a large one — it skips `tiny`'s
 0.2 s and, more usefully, removes any chance of a wrong guess. Language detection
-is unreliable on short or accented audio whatever model does it.
+is unreliable on short or accented audio whatever model does it, which was measured
+across nine of them rather than assumed — see [Telling it what language you are
+speaking](#telling-it-what-language-you-are-speaking). If you dictate in several
+languages, the picker beside **Record** buys the same certainty one memo at a time.
 
 Raising CTranslate2's thread count is *not* worth it: it was tried, and bought 10%
 on a long memo while making short memos slower and costing 890 MB per replica.
@@ -801,11 +855,15 @@ Two response conventions worth knowing before writing a client:
   it is a read across every memo by a caller holding none of them.
 - **Lists echo the filters they answered for** alongside the rows, so a response
   that arrives after the search box has moved on can still be captioned correctly.
-- **`title` is the only content a client may write.** The transcript is a record of
-  what was said and nothing in this app edits one — the formatter will not respell a
-  word of it, and there is a test asserting so. A title is *generated*, which makes it
-  a guess, and a guess the owner disagrees with is a memo they cannot find again. So
-  the guess is the default and the owner has the last word.
+- **`title` and `transcript` are the content a client may write.** Both are guesses a
+  model made, and the owner has the last word on each: a title is *generated*, and a
+  wrong one is a memo they cannot find again; a transcript is what a speech model
+  thought it heard, and a wrong one is a memo that no longer says what was said. The
+  recording itself is what is kept as evidence — the transcript is a derivative of it.
+  Nothing in the app rewrites either: the formatter will not respell a word, and there
+  is a test asserting so. Only a person may. `status`, `tags` and the rest stay out for
+  a different reason — they belong to the queue and the worker, and a client setting
+  `status` would be a client claiming a job.
 - **A 5xx body is never shown to the user, whatever it says.** With `APP_DEBUG=false`
   it is `{"message":"Server Error"}`, which tells nobody anything; with it on, it is
   the exception and its trace. The frontend replaces both with a sentence naming the

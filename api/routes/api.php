@@ -67,10 +67,11 @@ Route::get('/memos/{memo}/audio', [MemoController::class, 'audio'])
 // because the body is a change and not a replacement -- a PUT carrying only `collection_id`
 // would be asking the API to discard the transcript.
 //
-// Two fields on one route rather than a `/memos/{memo}/title` of its own, because both are
-// small edits to the same row answering with the same shape, and the client already has one
-// function for "PATCH a memo and merge the result". UpdateMemoRequest has the argument for why
-// `title` is the only *content* a client may write and `transcript` is not.
+// Three fields on one route rather than a `/memos/{memo}/title` and a `/transcript` of their
+// own, because all three are small edits to the same row answering with the same shape, and the
+// client already has one function for "PATCH a memo and merge the result". UpdateMemoRequest has
+// the argument for which of a memo's columns a client may write, and why `transcript` -- which
+// this note used to name as the example of one they may not -- is now among them.
 //
 // whereUuid on every id below, and it is doing real work rather than tidying: there is no
 // Eloquent in this project (MEMO-05) and therefore no implicit route binding, so without it
@@ -96,14 +97,6 @@ Route::patch('/memos/{memo}', [MemoController::class, 'update'])
 Route::post('/memos/{memo}/retry', [MemoController::class, 'retry'])
     ->whereUuid('memo')
     ->name('memos.retry');
-
-// Beside retry rather than merged with it: same verb and shape, different question. Retry
-// asks "this failed, try again"; this one asks "the language was wrong, do it again in
-// Romanian" about a memo that usually succeeded. MemoController::retranscribe has why one
-// route could not safely answer both.
-Route::post('/memos/{memo}/retranscribe', [MemoController::class, 'retranscribe'])
-    ->whereUuid('memo')
-    ->name('memos.retranscribe');
 
 // Deleting a memo takes its recording and its reminders with it. The reminders go through
 // `ON DELETE CASCADE` inside Postgres; the audio blob is unlinked by MemoService, which has

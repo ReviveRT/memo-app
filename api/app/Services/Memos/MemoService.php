@@ -101,35 +101,6 @@ final class MemoService
     }
 
     /**
-     * Send a voice memo back through transcription in a named language.
-     *
-     * Separate from `retry` below, which answers a different question -- see
-     * `MemoRepository::retranscribe` for why the two SQL statements are not one. What
-     * they do share is :class:`RetryOutcome`, and that is reuse rather than a shortcut:
-     * its three cases are "it went back to the queue", "the memo is in a state where it
-     * cannot" and "there is no such memo", which is exactly this call's answer set too.
-     * The alternative was a second identical class differing only in the word Retry.
-     *
-     * `$language` may be null, which re-runs the memo on auto-detect. That is worth
-     * having rather than refusing: it is the way back for somebody who pinned the wrong
-     * language and wants the model to try again on its own.
-     */
-    public function retranscribe(string $memoId, ?string $language): RetryOutcome
-    {
-        $requeued = $this->repository->retranscribe($memoId, $language);
-
-        if ($requeued !== null) {
-            return RetryOutcome::requeued($requeued);
-        }
-
-        $current = $this->repository->find($memoId);
-
-        return $current === null
-            ? RetryOutcome::missing()
-            : RetryOutcome::refused($current);
-    }
-
-    /**
      * Newest first, capped, and narrowed by whichever filters the request carried.
      *
      * Unpaginated by design rather than by omission. MEMO-18 polls this route and
@@ -203,11 +174,14 @@ final class MemoService
     /**
      * Rename a memo, or clear the name with null.
      *
-     * The one field of a memo a client may write. `title` is generated -- the worker cuts a
-     * fallback from the transcript and the enrichment pass replaces it with something
-     * shorter -- so it is a guess, and a guess the owner disagrees with is what makes a memo
-     * unfindable in a strip of thirty. Everything else on the row is either a record of what
-     * was said or the queue's own bookkeeping, and neither is the client's.
+     * `title` is generated -- the worker cuts a fallback from the transcript and the
+     * enrichment pass replaces it with something shorter -- so it is a guess, and a guess the
+     * owner disagrees with is what makes a memo unfindable in a strip of thirty.
+     *
+     * One of two writable content fields rather than the only one, which is what this note used
+     * to say: correctTranscript above is the other. What is still not the client's is the
+     * queue's own bookkeeping -- `status`, `attempts`, `locked_at` -- because a client setting
+     * those would be a client claiming a job.
      *
      * Trimmed, and an empty result becomes null rather than an empty string, so there is one
      * spelling of "this memo has no title of its own" for every reader to test. Postgres
@@ -217,6 +191,23 @@ final class MemoService
      * UpdateMemoRequest normalises on its own side too; that is agreement rather than
      * reliance, and this is the side the database is on.
      */
+    /**
+     * Correct a memo's transcript.
+     *
+     * The words a model produced, replaced by the words the person who recorded it says were
+     * said. UpdateMemoRequest has the argument for why this is writable at all, and why the
+     * block that used to say it was not has been rewritten rather than deleted.
+     *
+     * Trimmed here as well as in the request, which is the same agreement `rename` makes: the
+     * request trims so its `min:1` rule is honest about whitespace, and this trims because the
+     * database is on this side of the line and should never be handed a value that depends on
+     * a validator having run.
+     */
+    public function correctTranscript(string $memoId, string $transcript): ?Memo
+    {
+        return $this->repository->correctTranscript($memoId, trim($transcript));
+    }
+
     public function rename(string $memoId, ?string $title): ?Memo
     {
         $trimmed = $title === null ? null : trim($title);
