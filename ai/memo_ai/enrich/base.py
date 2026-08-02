@@ -54,6 +54,43 @@ class EnrichmentError(Exception):
 
 
 @dataclass(frozen=True)
+class Usage:
+    """
+    What one enrichment consumed. MEMO-22's half of the result.
+
+    Separate from :class:`Enrichment` rather than five more fields on it, and the
+    reason is :meth:`Enrichment.is_empty`. That method decides whether
+    ``enriched_at`` is stamped, and it must answer "did this produce anything to
+    show a person" -- a run that burned 900 tokens and returned no usable field
+    has *not* enriched the memo. Flat fields would make that a rule somebody has
+    to remember; a nested object makes it obvious, because ``is_empty`` never
+    looks in here.
+
+    **Tokens rather than dollars, deliberately.** An enricher reports what it
+    consumed; what that is worth is a rate table's job, and memo_ai/rates.py is
+    where the rate lives precisely so the row keeps a measurement that stays true
+    when prices move. The same split :class:`~memo_ai.stt.base.Transcript` makes,
+    from the other side: a hosted provider that reports a charge fills in
+    ``cost_micro_usd`` there, and everything local reports usage and no money.
+
+    ``inference_ms`` is the generation alone and excludes the lazy model load, for
+    the reason ``Transcript.inference_ms`` excludes whisper's: the load is a cost
+    of the process and would make the first enriched memo after a boot an outlier
+    in a latency figure.
+
+    Every field is optional because an implementation may know some of them and
+    not others -- a provider that reports no token counts still has a wall-clock
+    time, and ``memos`` writes each column independently.
+    """
+
+    provider: str | None = None
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    inference_ms: int | None = None
+
+
+@dataclass(frozen=True)
 class Enrichment:
     """
     What an enricher produces. Every field optional, and that is deliberate.
@@ -70,9 +107,10 @@ class Enrichment:
     It is converted to a Python list on the way into psycopg, which is what maps to
     ``text[]``.
 
-    Nothing here carries a cost. Enrichment spend belongs on the row rather than on
-    the result, and MEMO-22 owns the column -- see ``Transcript`` for the same
-    argument on the transcription side.
+    Nothing here carries a cost in dollars. Enrichment spend belongs on the row
+    rather than on the result -- see ``Transcript`` for the same argument on the
+    transcription side -- and what an enricher reports instead is :class:`Usage`,
+    which is a measurement rather than a price.
     """
 
     title: str | None = None
@@ -80,14 +118,32 @@ class Enrichment:
     tags: tuple[str, ...] = ()
     category: str | None = None
 
+    # What producing the four fields above consumed, or None for an enricher that
+    # does not say. MEMO-22 persists it; nothing else reads it, and no behaviour
+    # anywhere branches on it.
+    usage: Usage | None = None
+
     def is_empty(self) -> bool:
         """
-        Whether this carries nothing at all.
+        Whether this carries nothing **to show a person**.
 
         Read by the pipeline to decide whether ``enriched_at`` is set. An enricher
         that ran and found nothing to say has not enriched the memo, and stamping
         the column anyway would make "has this memo been enriched?" unanswerable
         the day somebody wants to re-run the ones that were not.
+
+        ``usage`` is deliberately not consulted. A generation that spent 900 tokens
+        and produced no usable field is exactly the case this method has to call
+        empty -- the memo has no title, no summary and no tags, whatever it cost to
+        find that out -- and ``memo_ai/memos.py`` writes the accounting columns off
+        ``usage`` rather than off this answer, so such a run is still recorded.
+
+        That combination is reachable through the contract and **not** through the
+        enricher this project ships: :class:`~memo_ai.enrich.local.LocalLlmEnricher`
+        raises rather than returning an empty result, so its unusable answers reach
+        the row as an ``enrichment_error`` with no usage beside it. See NOTES.md,
+        which states that gap and why it is not worth closing while every
+        generation here is free.
         """
         return not (self.title or self.summary or self.tags or self.category)
 

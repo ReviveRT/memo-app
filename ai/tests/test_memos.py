@@ -16,7 +16,7 @@ from uuid import UUID
 import pytest
 
 from memo_ai import failures
-from memo_ai.enrich import Enrichment
+from memo_ai.enrich import Enrichment, Usage
 from memo_ai.memos import (
     _CLAIM_COLUMNS,
     FALLBACK_TITLE_CHARS,
@@ -25,6 +25,7 @@ from memo_ai.memos import (
     ClaimedMemo,
     MemoQueue,
     RetryPolicy,
+    _accumulated,
 )
 from memo_ai.stt.base import Transcript
 from tests.support import LOCKED_AT, POLICY, FakeConnection, claimed_memo
@@ -133,6 +134,32 @@ def test_the_measured_duration_and_the_cost_ride_along_with_the_transcript():
     assert connection.last_params["cost_micro_usd"] == 380
     assert "duration_ms = COALESCE" in connection.last_sql
     assert "cost_micro_usd = COALESCE" in connection.last_sql
+
+
+def test_the_transcription_timing_comes_off_the_result_rather_than_being_measured_here():
+    # MEMO-22's `stt_ms`. On the result because only the provider knows where its
+    # own model load ended -- a caller timing `transcribe()` would record whisper's
+    # 1.6 GB download as the first memo's inference and make it the median of any
+    # small sample. memo_ai/stt/base.py has the argument at the field.
+    connection = FakeConnection(rowcount=1)
+    transcript = Transcript(text="words", provider="local", model="base", inference_ms=4_812)
+
+    queue(connection).commit_transcript(claimed_memo(), transcript, duration_ms=7_314)
+
+    assert connection.last_params["stt_ms"] == 4_812
+
+
+def test_a_provider_that_ran_no_model_records_no_timing():
+    # `fake` returns None, on the same argument its `model` is None: nothing ran,
+    # and a near-zero timing from a provider that never opened the file would drag
+    # down a median that is supposed to describe real transcription. COALESCE keeps
+    # whatever an earlier attempt measured rather than overwriting it with the NULL.
+    connection = FakeConnection(rowcount=1)
+
+    queue(connection).commit_transcript(claimed_memo(), Transcript(text="canned", provider="fake"))
+
+    assert connection.last_params["stt_ms"] is None
+    assert "stt_ms = COALESCE" in connection.last_sql
 
 
 def test_committing_a_transcript_clears_the_error_a_previous_attempt_left():
@@ -308,6 +335,98 @@ def test_an_enrichment_is_written_field_by_field_with_tags_as_a_list():
     assert connection.last_params["tags"] == ["work", "orders"]
     assert connection.last_params["category"] == "task"
     assert connection.last_params["enriched"] is True
+
+
+def test_the_enrichment_usage_is_written_beside_what_the_model_said():
+    # MEMO-22's five columns, read off the result for the reason `stt_provider` is:
+    # what was configured and what actually ran are different questions.
+    connection = FakeConnection(rowcount=1)
+    enrichment = Enrichment(
+        title="Order confirmation",
+        usage=Usage(
+            provider="local",
+            model="qwen2.5-1.5b-instruct-q4_k_m.gguf",
+            input_tokens=812,
+            output_tokens=97,
+            inference_ms=2_400,
+        ),
+    )
+
+    queue(connection).finish_ready(claimed_memo(), enrichment)
+
+    assert connection.last_params["enrich_provider"] == "local"
+    assert connection.last_params["enrich_model"] == "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+    assert connection.last_params["enrich_input_tokens"] == 812
+    assert connection.last_params["enrich_output_tokens"] == 97
+    assert connection.last_params["enrich_ms"] == 2_400
+
+
+def test_the_token_counts_add_up_across_attempts_and_the_timing_does_not():
+    # The one asymmetry in MEMO-22's writes, and it is the whole of `_accumulated`.
+    # A job reaped between the two commit points re-runs enrichment, and on a hosted
+    # provider both runs are billed -- so tokens add. A latency does not: a memo
+    # enriched twice has two generation times, not one that is twice as long.
+    connection = FakeConnection(rowcount=1)
+
+    queue(connection).finish_ready(claimed_memo(), Enrichment(title="t", usage=Usage()))
+
+    assert "enrich_input_tokens = COALESCE(COALESCE(enrich_input_tokens, 0) +" in (
+        connection.last_sql
+    )
+    assert "enrich_output_tokens = COALESCE(COALESCE(enrich_output_tokens, 0) +" in (
+        connection.last_sql
+    )
+    assert "enrich_ms = COALESCE(%(enrich_ms)s, enrich_ms)" in connection.last_sql
+
+
+def test_the_accumulator_leaves_a_never_enriched_row_null_rather_than_zero():
+    # The trap `_accumulated` exists to avoid, checked as an expression rather than
+    # against a database. `COALESCE(col, 0) + COALESCE(param, 0)` looks equivalent
+    # and turns "nobody measured this" into a confident zero, which then averages
+    # into every figure memo_ai/costs.py prints. The shipped shape collapses to NULL
+    # instead, because `0 + NULL` is NULL and the outer COALESCE falls back.
+    assert _accumulated("enrich_input_tokens", "enrich_input_tokens") == (
+        "COALESCE(COALESCE(enrich_input_tokens, 0) + %(enrich_input_tokens)s, "
+        "enrich_input_tokens)"
+    )
+
+
+def test_an_enricher_that_reports_nothing_writes_five_nulls():
+    # `ENRICH_PROVIDER=none` and the reaper's salvage path. NULL rather than zero,
+    # which is the accurate description of a memo nothing enriched -- and what keeps
+    # it out of the medians rather than at the bottom of them.
+    connection = FakeConnection(rowcount=1)
+
+    queue(connection).finish_ready(claimed_memo())
+
+    for column in (
+        "enrich_provider",
+        "enrich_model",
+        "enrich_input_tokens",
+        "enrich_output_tokens",
+        "enrich_ms",
+    ):
+        assert connection.last_params[column] is None, column
+
+
+def test_usage_is_recorded_even_when_the_enrichment_produced_nothing_usable():
+    # `is_empty()` deliberately does not look at usage, and this is the case that
+    # separates the two: a generation that spent 900 tokens and came back with no
+    # field worth keeping still spent them. `enriched_at` stays unstamped and the
+    # accounting columns are written anyway.
+    #
+    # A test of this method's contract rather than of a path the shipped enricher
+    # takes -- `LocalLlmEnricher` raises on an unusable answer, so it arrives here
+    # as `enrichment=None`. What is pinned is that the gate is `enrichment.usage`
+    # and not `enriched`, which is what a hosted enricher would need in order to
+    # record a response it was billed for and could not use.
+    connection = FakeConnection(rowcount=1)
+    spent = Enrichment(usage=Usage(provider="local", input_tokens=812, output_tokens=97))
+
+    queue(connection).finish_ready(claimed_memo(), spent)
+
+    assert connection.last_params["enriched"] is False
+    assert connection.last_params["enrich_input_tokens"] == 812
 
 
 def test_an_enrichment_that_produced_nothing_does_not_stamp_enriched_at():

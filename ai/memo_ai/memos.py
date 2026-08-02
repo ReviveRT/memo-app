@@ -326,12 +326,19 @@ _CLAIM = f"""
 # else would need a status the schema does not have. `processing` already means
 # "claimed and not finished", which is exactly true between these two writes.
 #
-# COALESCE on all five, which is not defensiveness: `duration_ms` and
-# `cost_micro_usd` are frequently absent on a result that still has a transcript,
-# and a bare assignment would erase what an earlier attempt measured. The useful
-# side effect is that this statement *cannot* null a transcript out. MEMO-16's
-# goal is that a transcript is never lost, and this is the shape that makes losing
-# one require editing the SQL rather than passing the wrong argument.
+# COALESCE on all six, which is not defensiveness: `duration_ms`, `cost_micro_usd`
+# and `stt_ms` are frequently absent on a result that still has a transcript, and a
+# bare assignment would erase what an earlier attempt measured. The useful side
+# effect is that this statement *cannot* null a transcript out. MEMO-16's goal is
+# that a transcript is never lost, and this is the shape that makes losing one
+# require editing the SQL rather than passing the wrong argument.
+#
+# `stt_ms` is MEMO-22's, and COALESCE is the *right* rule for it rather than merely
+# the consistent one. It is a latency, not a spend: a job that resumed after commit
+# 1 ran no transcription this time and has nothing to report, and the timing the
+# earlier attempt recorded is still the one that describes how long this memo's
+# audio took to decode. The token counts on the enrichment side accumulate instead,
+# and `_accumulated` below has that argument.
 #
 # `last_error` is cleared here, and only here on this path. A memo that failed
 # twice and transcribed on the third attempt still carries the second attempt's
@@ -345,11 +352,40 @@ _COMMIT_TRANSCRIPT = """
            stt_model = COALESCE(%(stt_model)s, stt_model),
            duration_ms = COALESCE(%(duration_ms)s, duration_ms),
            cost_micro_usd = COALESCE(%(cost_micro_usd)s, cost_micro_usd),
+           stt_ms = COALESCE(%(stt_ms)s, stt_ms),
            last_error = NULL,
            last_error_code = NULL
      WHERE id = %(id)s
        AND locked_at = %(locked_at)s
 """
+
+def _accumulated(column: str, param: str) -> str:
+    """
+    ``column + param``, treating a NULL parameter as "leave it alone" (MEMO-22).
+
+    The token counts are the one thing on this row that has to *add up* rather
+    than be replaced. A job reaped in the gap between the two commit points
+    re-runs enrichment, and on a hosted provider both runs are billed -- so a
+    memo enriched twice consumed both sets of tokens, and a column that recorded
+    only the last one would understate the invoice by exactly the retries.
+    ``cost_micro_usd`` needs no equivalent because the two-commit design is what
+    stops transcription running twice at all.
+
+    The nesting is what makes a plain ``+`` safe here. ``0 + NULL`` is NULL in
+    SQL, so when the parameter is absent the inner expression collapses to NULL
+    and the outer COALESCE falls back to the column's existing value -- which is
+    the same "absent means leave it alone" rule every other write in this file
+    follows. The obvious spelling, ``COALESCE(col, 0) + COALESCE(%(p)s, 0)``,
+    looks equivalent and is not: it turns the NULL on a memo nothing ever
+    enriched into a confident 0, which claims a measurement that was never taken
+    and drags an average toward it.
+
+    A helper rather than the expression written twice, on the rule
+    ``_FALLBACK_TITLE`` sets: two copies of a trick like this is one copy that
+    eventually gets simplified by somebody who has not read this docstring.
+    """
+    return f"COALESCE(COALESCE({column}, 0) + %({param})s, {column})"
+
 
 # Commit 2. `status='ready'`, whatever enrichment produced, and a title either way.
 #
@@ -391,6 +427,14 @@ _COMMIT_TRANSCRIPT = """
 # arguments, because "did an enricher run and produce something" is not derivable
 # from them: `NoEnrichment` returns nothing at all and an enricher can legally
 # return a title alone. memo_ai/enrich.py's `is_empty` is what answers it.
+#
+# **The five accounting columns are written here and not at commit 1**, which is
+# the only place they could be: enrichment runs between the two commits, so what it
+# consumed does not exist until this statement. They are also the reason this write
+# happens on a memo with nothing to show for it -- an enricher that burned tokens
+# and returned nothing usable still spent them, and `is_empty` above deliberately
+# does not look at usage. db/migrations/006_cost_accounting.sql has the columns and
+# `_accumulated` has why two of them add rather than replace.
 _FINISH_READY = f"""
     UPDATE memos
        SET status = 'ready',
@@ -403,6 +447,16 @@ _FINISH_READY = f"""
            summary = COALESCE(%(summary)s, summary),
            tags = COALESCE(%(tags)s::text[], tags),
            category = COALESCE(%(category)s, category),
+           enrich_provider = COALESCE(%(enrich_provider)s, enrich_provider),
+           enrich_model = COALESCE(%(enrich_model)s, enrich_model),
+           enrich_input_tokens = {_accumulated("enrich_input_tokens", "enrich_input_tokens")},
+           enrich_output_tokens = {_accumulated("enrich_output_tokens", "enrich_output_tokens")},
+
+           -- Assigned through COALESCE like the names above and unlike the two
+           -- counts, because it is a latency rather than a spend: a memo enriched
+           -- twice has two generation times, not one that is twice as long.
+           enrich_ms = COALESCE(%(enrich_ms)s, enrich_ms),
+
            enrichment_error = %(enrichment_error)s,
            enriched_at = CASE WHEN %(enriched)s THEN now() ELSE enriched_at END,
            last_error = NULL,
@@ -672,6 +726,12 @@ class MemoQueue:
                 # is the same NULL the row was inserted with, and COALESCE keeps it.
                 "duration_ms": duration_ms,
                 "cost_micro_usd": transcript.cost_micro_usd,
+                # Read off the result rather than timed here, for the reason
+                # memo_ai/stt/base.py gives at the field: only the provider knows
+                # where its own model load ended, and this method would otherwise
+                # record a 1.6 GB download as the first memo's transcription time.
+                # None from `fake`, which runs no model.
+                "stt_ms": transcript.inference_ms,
             },
             memo,
             "transcript",
@@ -702,6 +762,20 @@ class MemoQueue:
         enriched = enrichment is not None and not enrichment.is_empty()
         complaint = None if enrichment_error is None else _truncate(enrichment_error)
 
+        # MEMO-22's five, read off the result rather than out of the settings, for
+        # the reason `stt_provider` is: what was *configured* and what actually ran
+        # are different questions, and only the enricher that ran can answer the
+        # second. `NoEnrichment` returns None and so contributes five NULLs, which
+        # is the accurate description of a memo nothing enriched.
+        #
+        # Read from `enrichment` rather than gated on `enriched`, so an enricher
+        # that reports what it spent and produces nothing worth showing still has
+        # its spend recorded. That is this method's half of the contract; whether
+        # any enricher takes it up is theirs, and the shipped one does not -- it
+        # raises instead, which arrives here as `enrichment=None` beside a
+        # complaint. NOTES.md states the gap.
+        usage = None if enrichment is None else enrichment.usage
+
         return self._fenced(
             _FINISH_READY,
             {
@@ -720,6 +794,11 @@ class MemoQueue:
                 # the NULL that COALESCE reads as "leave the column alone".
                 "tags": list(enrichment.tags) if enrichment and enrichment.tags else None,
                 "category": None if enrichment is None else enrichment.category,
+                "enrich_provider": None if usage is None else usage.provider,
+                "enrich_model": None if usage is None else usage.model,
+                "enrich_input_tokens": None if usage is None else usage.input_tokens,
+                "enrich_output_tokens": None if usage is None else usage.output_tokens,
+                "enrich_ms": None if usage is None else usage.inference_ms,
                 "enrichment_error": complaint,
                 "enriched": enriched,
                 "title_chars": FALLBACK_TITLE_CHARS,

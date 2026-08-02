@@ -38,7 +38,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
-from memo_ai import audio, failures
+from memo_ai import audio, failures, rss
 from memo_ai.enrich import NO_ENRICHMENT, Enricher, Enrichment, EnrichmentError
 from memo_ai.memos import ClaimedMemo, MemoQueue
 from memo_ai.stt import local
@@ -193,13 +193,33 @@ def run_job(
     # claim predates its own transcript.
     if queue.finish_ready(memo, enrichment, enrichment_error, text=text):
         log.info(
-            "memo %s ready in %.0fms (attempt %d, %s%s%s)",
+            # `rss=` is MEMO-22's, and this line is where it goes rather than in a
+            # periodic tick of its own. Resident memory is a property of the
+            # process and not of the memo, so what makes it worth reading is
+            # *when* it is sampled: both models load lazily, so the interesting
+            # transitions -- 18 MB to 1.65 GB on the first transcription, and
+            # again on the first enrichment -- happen exactly at the boundary this
+            # line already marks. A separate timer would sample them at random and
+            # add a log line a minute per replica saying nothing changed.
+            #
+            # **`brief` and not `describe`**, which is the difference between free
+            # and 10.8 ms of page-table walking per memo on a loaded worker -- and
+            # paid whether or not this line is emitted, since a logging argument is
+            # evaluated either way. The shared/private split does not change from
+            # memo to memo; the worker states it once at boot, where the process is
+            # small enough for the walk to cost nothing. memo_ai/rss.py has the
+            # measurement.
+            #
+            # `docker compose logs ai-worker | grep rss` is the whole of the RAM
+            # half of that task, and memo_ai/costs.py's footer says so.
+            "memo %s ready in %.0fms (attempt %d, %s%s%s, rss=%s)",
             memo.id,
             (time.monotonic() - started) * 1000,
             memo.attempts,
             "transcribed" if transcript else "transcript already present",
             "" if duration_ms is None else f", {duration_ms}ms of audio",
             "" if enrichment_error is None else ", enrichment failed",
+            rss.brief(),
         )
 
 
