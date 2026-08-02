@@ -7,6 +7,102 @@ Decisions and trade-offs that the code cannot state for itself.
 > several files — and, in every case, two different runtimes — have to agree
 > about, so it cannot live in any one of them.
 
+## One job, two commits, and no second status column
+
+**Decision.** A worker job writes to the memo row twice. Transcription success
+commits `transcript`, `duration_ms`, `stt_provider`, `stt_model` and
+`cost_micro_usd`, and the row stays `processing`. Enrichment finishing — however it
+finished — commits `title`, `summary`, `tags`, `category`, `enriched_at` and
+`status = 'ready'`. `failed` is reachable only from the first stage, and only once
+the attempts are spent.
+
+**Why not one commit.** Because the two stages have opposite requirements and one
+commit forces them to share an outcome. The transcript is the memo and must survive
+anything; a summary is a convenience and must cost nothing when it fails. With a
+single write, an enrichment error either discards a transcript that already
+succeeded — on a hosted provider, one that was paid for — or is swallowed and
+reported as success. Both are wrong, and no amount of care inside the job fixes it,
+because the problem is that one write cannot express two independent results.
+
+**Why not a second status column.** The obvious alternative is `stt_status` and
+`enrichment_status` beside `status`, and it was rejected because the information is
+already on the row and would then exist twice. `transcript IS NULL` answers "is
+transcription owed" exactly, for both kinds of memo — a text memo is inserted with
+its transcript already set (MEMO-06) and therefore owes none. Two columns that must
+agree with a third and with the data is three ways to be inconsistent; the predicate
+cannot disagree with itself. The claim query, the pipeline and the reaper all read
+it, and none of them needs to know what stage a memo is in — only what it lacks.
+
+**What the split buys, concretely.** A job killed between the two commits resumes at
+the second one, because the re-claim finds the transcript present. Transcription is
+never repeated and never re-billed, which is what makes the reaper safe to be
+aggressive with: requeueing a half-finished job costs the enrichment and nothing
+else. That property is why the reaper can afford a one-hour lease rather than a
+conservative one — the worst case is cheap.
+
+**Costs, stated plainly.** A memo is briefly `processing` with a usable transcript
+and no title, and the API shows it as unfinished during that window — correct, but
+it means "has a transcript" and "is ready" are not the same question, and a client
+that wants the first has to ask for the transcript rather than the status. Two
+writes per voice memo instead of one. And a row can be in `processing` with a
+transcript and no live worker, which is a state no single statement produces and
+which only the reaper's third branch resolves — the case that would be easiest to
+forget if the reaper were written before the two-commit split rather than with it.
+
+## The retry cap lives in the claim, not in the failure handler
+
+**Decision.** `attempts` is incremented by the `UPDATE ... RETURNING` that claims a
+memo. Nothing on the failure path touches it.
+
+**Why.** The memo that most needs a bound is the one that destroys its worker —
+ffmpeg wedged on a pathological file, an out-of-memory kill during a model load, a
+`docker compose down` mid-job. That memo never reaches a failure handler, so a
+counter incremented on the way *out* of a job would never move for it, and it would
+be retried for as long as the stack ran. Incrementing in the claim means the count
+is committed before any of our code runs, and it survives a `SIGKILL` with nothing
+cooperating. This only works because the connection is in autocommit
+(`ai/memo_ai/db.py`): with an open transaction the claim would roll back on the kill
+and take the count with it, which was reproduced with two psql sessions before the
+worker existed.
+
+**The consequence.** Because a killed job leaves the row in `processing` rather than
+in a state the claim will pick up, something has to enforce the cap from outside the
+job — otherwise an exhausted memo sits there forever. That is the reaper's second
+and third branches, and it is why the cap is checked there rather than in the claim
+predicate: a row the claim silently skipped would be an invisible dead end with
+nothing on it to explain why nothing is happening.
+
+**One hand-off, for whoever builds the manual retry (MEMO-17).** Nothing resets
+`attempts`, deliberately — it is a record of what the memo cost, and MEMO-22 reads
+that kind of column. But it means moving a `failed` row back to `queued` and
+nothing else buys exactly one more attempt, because the claim increments a count
+that is already at the cap and the next failure is terminal again. A manual retry
+is a person saying "the reason it failed is gone", so it should set
+`attempts = 0` along with the status. That is a one-line difference between a retry
+button that works and one that looks like it does nothing.
+
+## The reaper's lease is derived from the deadlines, not chosen
+
+**Decision.** `REAP_AFTER_SECONDS` defaults to 3,600, and
+`pipeline.job_budget_seconds` computes the number it has to exceed: 30s of ffprobe
+on the upload, 120s of ffmpeg, 30s of ffprobe on the result, 300s of model load, and
+a decode deadline of four times the audio — 2,880s at `MAX_AUDIO_SECONDS=600`. The
+worker recomputes it at boot and warns if the configured lease no longer clears it.
+
+**Why a check and not a comment.** A lease under the budget does not fail; it reaps
+healthy jobs. That presents as transcription being unreliable on exactly the
+recordings that take longest, and the row it leaves says it was "interrupted" with
+nothing to say by what — a diagnosis nobody reaches from the symptom. And the budget
+is not a constant: it scales with `MAX_AUDIO_SECONDS`, so a lease that was correct
+when it was chosen is invalidated by an unrelated edit to a different variable. A
+comment cannot notice that; a line in the boot log can.
+
+**Why a warning and not a refusal.** The stack still works with a short lease. Memos
+are retried rather than lost, precisely because the transcript commit means a reaped
+job resumes instead of restarting. Refusing to boot over a tuning number would take
+the whole queue down, including text memos, which come nowhere near any of these
+deadlines.
+
 ## The date filter is half-open, and the browser owns the timezone
 
 **Decision.** `GET /api/memos` and `GET /api/collections` take `from` and `to` as
@@ -309,11 +405,27 @@ move it.
 
 ## A title is generated by a heuristic, and it is the one column a client may write
 
-**Decision.** `memos.title` is filled by the worker from the memo's own transcript,
-by `ai/memo_ai/titles.py` — three regexes and a word list, no model and no key. It is
-written on the pass that moves a memo to `ready`, and only when the column is NULL.
-`PATCH /api/memos/{id}` accepts a `title`, and that is the only field of a memo's
-*content* the API lets a client set.
+**Decision.** `memos.title` is filled at commit point 2 by a COALESCE over four
+sources, in this order: whatever an enricher produced, whatever is already on the
+row, a short phrase `ai/memo_ai/titles.py` cuts out of the transcript, and finally
+the SQL expression that takes its first sixty characters. `PATCH /api/memos/{id}`
+accepts a `title`, and that is the only field of a memo's *content* the API lets a
+client set.
+
+**Why two fallbacks rather than one.** They answer the same question with different
+information, and the difference is where the transcript is. `titles.py` runs in
+Python and needs the text in memory; the SQL expression needs only the row. Almost
+always the first is available and is much the better answer — "Meeting with my friend
+John" against "Tomorrow I will have a meeting with my friend John at 15a…" — so it
+goes first. But the reaper's salvage branch publishes rows in bulk with no job in
+memory at all, so the SQL one stays as the last resort rather than being replaced.
+`_REAP_SALVAGE` uses it alone, and that is the case it exists for.
+
+The pipeline hands the text to commit 2 explicitly rather than letting the statement
+read `memo.transcript`, because at that point a *fresh* voice memo's transcript is on
+the row and not on the claim — the claim happened before the transcript existed. It
+is the same expression the enricher is given, so a memo's title and its summary can
+never turn out to be about different text.
 
 **Why a heuristic rather than the model that is already running.** The obvious idea is
 to have the transcription pass produce the title as a finishing step — one model, one
@@ -364,13 +476,12 @@ a memo the owner cannot find again. So the guess is the default and the owner ov
 it. `status` and `tags` stay out for a different reason: they belong to the queue and
 the worker, and a client setting `status` would be a client claiming a job.
 
-**The COALESCE runs the other way from every other clause in that statement.** The
-success write is `SET transcript = COALESCE(%(transcript)s, transcript)` throughout —
-the *new* value wins, and the row's value is the fallback. `title` is
-`COALESCE(title, %(title)s)`: the row wins. That asymmetry is the whole of the
-protection. A memo can be re-claimed — a retry, a reaper handing back a lease — and a
-worker that recomputed the title on the second pass would overwrite what somebody typed
-with what a regular expression guessed, silently, some minutes after they typed it.
+**The row's own title sits ahead of both fallbacks, and that is what makes the column
+safe to edit.** A memo can be re-claimed — a retry, a reaper handing back a lease —
+and a worker that recomputed the title on the second pass would overwrite what
+somebody typed with what a regular expression guessed, silently, minutes after they
+typed it. Only an *enricher's* title outranks it, which is the one case where
+something read the whole transcript rather than its first clause.
 
 **What was rejected.**
 

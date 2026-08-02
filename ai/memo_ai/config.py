@@ -91,6 +91,53 @@ DEFAULT_MAX_AUDIO_SECONDS = 600.0
 # One second is the idle-path sleep only: after a claim that finds work the worker
 # loops back without waiting, so this bounds pickup latency, not throughput.
 DEFAULT_POLL_SECONDS = 1.0
+
+# Three attempts including the first, mirroring docker-compose.yml.
+#
+# The count is incremented by the claim statement rather than by the failure write
+# (memo_ai/memos.py), which is what makes this bound hold through a SIGKILL: a memo
+# claimed and destroyed three times carries `attempts = 3` on the row with no code
+# of ours having run, and the reaper resolves it terminally instead of handing it
+# to a fourth claim. A cap enforced on the way *out* of a job would count only the
+# failures a job survived long enough to record, and a memo that kills its worker
+# would be immortal.
+DEFAULT_MAX_ATTEMPTS = 3
+
+# The base of the exponential backoff written to `next_attempt_at`, doubling per
+# attempt with jitter: roughly 30s before the second attempt and 60s before the
+# third, so a poison memo is terminal inside two minutes of queue time.
+#
+# Chosen against the slowest retryable failure rather than against a poison memo,
+# because that is the case the delay is actually for. `SttUnavailable` on a cold
+# cache means the model is still downloading, and each attempt waits out its own
+# MODEL_LOAD_TIMEOUT_SECONDS (300s) before saying so -- so the three attempts span
+# about 16 minutes of wall clock, not 90 seconds, and a 1.6 GB fetch has that long
+# to finish. A much larger base would only add idle time to that; a much smaller
+# one would spend all three attempts inside a single download.
+DEFAULT_RETRY_BACKOFF_SECONDS = 30.0
+
+# The claim lease: how long a row may sit in `processing` before the reaper takes
+# it back. It must exceed the longest a healthy job can legitimately run, or the
+# reaper requeues work that is still in progress -- so it is derived rather than
+# picked, and memo_ai/pipeline.py's `job_budget_seconds` is the derivation.
+#
+# At the shipped defaults that budget is 2,880s: 180s of ffprobe and ffmpeg, 300s
+# waiting for a model load, and 2,400s of decode deadline for a 600-second memo.
+# 3,600 clears it by twelve minutes.
+#
+# The margin is not the interesting part -- the coupling is. Raise
+# MAX_AUDIO_SECONDS and the budget moves with it, so this number has to move too.
+# The worker recomputes the budget at boot and says so in the log rather than
+# leaving that to whoever edits the .env; see `_warn_if_lease_is_too_short`.
+DEFAULT_REAP_AFTER_SECONDS = 3600.0
+
+# How often each replica looks for expired leases. Independent of the poll
+# interval, which runs twice a second per replica -- reaping is a write against
+# every `processing` row and there is nothing to gain from doing it at that rate.
+# A minute is well under the lease it enforces, so the delay it adds to a reaped
+# memo is noise beside the hour it already waited.
+DEFAULT_REAPER_INTERVAL_SECONDS = 60.0
+
 DEFAULT_LOG_LEVEL = "INFO"
 
 # The five real levels, rather than logging.getLevelNamesMapping(), which was the
@@ -131,6 +178,16 @@ class Settings:
 
     max_audio_seconds: float
     poll_seconds: float
+
+    # The retry and reaper policy. Read together by memo_ai/memos.py's RetryPolicy
+    # rather than one at a time, because they only make sense as a set: the lease
+    # has to outlast a job, and the backoff has to fit inside the lease often
+    # enough that three attempts are not three reaps.
+    max_attempts: int
+    retry_backoff_seconds: float
+    reap_after_seconds: float
+    reaper_interval_seconds: float
+
     log_level: str
 
     @classmethod
@@ -161,6 +218,21 @@ class Settings:
                 source, "MAX_AUDIO_SECONDS", DEFAULT_MAX_AUDIO_SECONDS
             ),
             poll_seconds=_positive_float(source, "WORKER_POLL_SECONDS", DEFAULT_POLL_SECONDS),
+            # An int, and refused at zero for a reason the float version does not
+            # have: `MAX_ATTEMPTS=0` is a configuration in which nothing is ever
+            # retried *and* every claimed memo is immediately over the cap, so the
+            # reaper resolves each one terminally the first time it looks. That is
+            # a stack that transcribes nothing and blames the recordings.
+            max_attempts=_positive_int(source, "MAX_ATTEMPTS", DEFAULT_MAX_ATTEMPTS),
+            retry_backoff_seconds=_positive_float(
+                source, "RETRY_BACKOFF_SECONDS", DEFAULT_RETRY_BACKOFF_SECONDS
+            ),
+            reap_after_seconds=_positive_float(
+                source, "REAP_AFTER_SECONDS", DEFAULT_REAP_AFTER_SECONDS
+            ),
+            reaper_interval_seconds=_positive_float(
+                source, "REAPER_INTERVAL_SECONDS", DEFAULT_REAPER_INTERVAL_SECONDS
+            ),
             log_level=_log_level(source, "LOG_LEVEL", DEFAULT_LOG_LEVEL),
         )
 
@@ -211,6 +283,26 @@ def _positive_float(env: Mapping[str, str], key: str, default: float) -> float:
     # not a slow poll, it is a loop with no sleep in it: two replicas issuing the
     # claim statement as fast as Postgres can answer, which looks like a database
     # problem rather than a typo in one variable.
+    if value <= 0:
+        raise ConfigError(f"{key} must be greater than zero, got {value}.")
+
+    return value
+
+
+def _positive_int(env: Mapping[str, str], key: str, default: int) -> int:
+    raw = env.get(key)
+
+    if not raw:
+        return default
+
+    try:
+        value = int(raw)
+    except ValueError:
+        # int() rather than int(float()), so `MAX_ATTEMPTS=3.5` is a refusal rather
+        # than a silent 3. A fractional attempt count is a misunderstanding of the
+        # setting, and rounding it teaches the misunderstanding.
+        raise ConfigError(f"{key} must be a whole number, got {raw!r}.") from None
+
     if value <= 0:
         raise ConfigError(f"{key} must be greater than zero, got {value}.")
 
