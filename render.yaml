@@ -90,6 +90,13 @@ databases:
     # locally, so a migration that passes there is running against the same major here.
     postgresMajorVersion: "16"
 
+    # Empty on purpose, and not the same as absent: an empty allow list means *no* public
+    # access, reachable only from inside Render's network, which is where the web service
+    # above connects from via `fromDatabase`. Omitting the key entirely lets the dashboard
+    # default decide, and a Postgres holding other people's memos is not a thing to leave to
+    # a default. Add your own address here temporarily if you need to psql into it.
+    ipAllowList: []
+
     # Free Postgres on Render **expires 30 days after it is created** and is then deleted.
     # That is the shortest fuse in this file and the one that will end the demonstration
     # without warning if nobody is expecting it.
