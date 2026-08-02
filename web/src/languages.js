@@ -75,9 +75,9 @@ export const LANGUAGES = Object.freeze([
 /*
  * There is deliberately no `languageName(code)` helper here.
  *
- * One existed while a memo card showed which language it had been decoded in, next to a
- * control that decoded it again. That control is gone -- a transcript is now corrected by
- * editing it rather than by re-running the model -- so nothing renders a stored code, and a
- * lookup with no caller is a thing that rots. It is a five-line Map over LANGUAGES if a
- * reason to display one comes back.
+ * One existed while MemoDialog named a memo's language in the hint beside a select that
+ * decoded it again. That select is gone -- a transcript is now corrected by editing it
+ * rather than by re-running the model -- so nothing renders a stored code, and a lookup
+ * with no caller is a thing that rots. It is a five-line Map over LANGUAGES if a reason
+ * to display one comes back.
  */

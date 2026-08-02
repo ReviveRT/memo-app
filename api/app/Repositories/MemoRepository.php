@@ -110,9 +110,11 @@ class MemoRepository
         -- not both. 004_last_error_code.sql has why the token exists at all.
         last_error_code,
 
-        -- What the worker was told to decode this in, or NULL for "detect it". Read by
-        -- the browser as well as the worker: the UI shows what a memo was transcribed
-        -- as, so "re-transcribe as Romanian" can say whether it already is.
+        -- What the worker was told to decode this in, or NULL for "detect it". The
+        -- worker reads it from its own claim projection rather than this one, so what
+        -- this line adds is the copy the browser gets: the stored choice, on the wire
+        -- with the rest of the row. Nothing in the UI renders it today, and
+        -- web/src/languages.js has why.
         language,
         collection_id,
         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at_iso,
