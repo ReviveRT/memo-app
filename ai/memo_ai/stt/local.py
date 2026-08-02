@@ -929,10 +929,13 @@ def _model_source(size: str) -> str:
 
     ``model.bin`` rather than the directory, and that is the check worth being
     exact about. A directory alone proves nothing: an interrupted build, or a
-    ``docker build`` whose fetch failed after ``mkdir``, leaves one behind empty,
-    and handing an empty directory to CTranslate2 is a ``RuntimeError`` from C++
-    that :meth:`LocalWhisperStt.transcribe` can only classify as a generic engine
-    failure. Falling through to a download says something true instead.
+    ``docker build`` whose fetch failed after ``mkdir``, leaves one behind empty.
+    Run rather than reasoned about -- ``WhisperModel`` on an empty directory
+    raises ``RuntimeError: Unable to open file 'model.bin' in model '...'`` out of
+    C++, which :meth:`LocalWhisperStt.transcribe` classifies as ``SttUnavailable``
+    with the generic engine-failure sentence. So the memo would fail talking about
+    the engine, three times, while the fix was to fetch the weights. Falling
+    through to a download says something true instead.
 
     Logged at INFO on both paths, because "did this container reach the network
     for weights" is the question this task exists to make answerable, and the

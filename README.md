@@ -30,8 +30,8 @@ Then open **<http://localhost:5173>**.
 
 ### What the first build costs
 
-**About three and a half minutes and 6.7 GB of disk for the `ai-worker` image
-alone.** Nothing after the first build pays either again.
+**Three to four minutes, and 6.7 GB of disk for the `ai-worker` image alone.**
+Nothing after the first build pays either cost again.
 
 That is the price of "no account, no key, nothing to sign up for", and it is worth
 naming rather than letting you discover it. `docker compose build` downloads 2.8 GB
@@ -39,7 +39,12 @@ of model weights and bakes them into the image, so the running app never fetches
 model and works with networking switched off. See
 [Transcription](#transcription) for which models and why.
 
-Measured on an M-series Mac with a fast connection, rebuilding every layer:
+The weights are fetched at pinned commits, so a build today and a build next year
+produce the same transcripts — the accuracy table below is a measurement of
+specific bytes, and one of these repositories has already changed hands once.
+
+Measured on an M-series Mac with a fast connection, rebuilding every layer except
+the `python:3.12-slim` base, which was already pulled:
 
 | | |
 | --- | --- |
@@ -49,9 +54,10 @@ Measured on an M-series Mac with a fast connection, rebuilding every layer:
 
 Two honest caveats about those numbers. The 52 s is bandwidth, so on a 50 Mbit/s
 link expect closer to eight minutes for that step alone. And the 6.74 GB is what
-`docker images` reports, which on Docker's containerd store counts the unpacked
-image (3.8 GB) plus the compressed layers kept beside it (3.0 GB); `docker image
-prune` reclaims some of the second number.
+`docker images` reports, which on Docker's containerd store adds two things: the
+unpacked image (3.8 GB) and the compressed layers kept beside it (3.0 GB). Both are
+real disk, and neither is the 2.8 GB of weights on its own — `docker system df`
+breaks the total down if you need to reclaim space.
 
 Rebuilding after a code change does **not** refetch the weights — the model layer
 sits above `COPY`, so an edit to the worker rebuilds in about three seconds.
@@ -417,15 +423,18 @@ model is still being downloaded"_ while it finishes. Record another a minute lat
 
 To bake a different one instead — worth doing if you are short of disk and your
 speakers are easy to understand — change `DEFAULT_STT_MODEL` in
-`ai/memo_ai/config.py` and build with a matching argument:
+`ai/memo_ai/config.py` and build with matching arguments:
 
 ```bash
-docker compose build --build-arg STT_MODEL=base ai-worker
+docker compose build --build-arg STT_MODEL=base --build-arg STT_MODEL_REVISION= ai-worker
 ```
 
-Both, not one. The build argument decides what the image carries and the config
-decides what the worker asks for; changing only the argument gives you an image
-that carries `base` and still downloads turbo the first time somebody records.
+Both parts matter. The config decides what the worker asks for and the build
+argument decides what the image carries, so changing only the argument gives you an
+image that carries `base` and still downloads turbo the first time somebody
+records. The empty `STT_MODEL_REVISION` clears the pinned commit, which belongs to
+turbo's repository and does not exist in `base`'s — leave it set and the build
+fails on a 404 rather than silently fetching something else.
 
 ### Speed
 

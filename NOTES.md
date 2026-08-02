@@ -406,11 +406,16 @@ move it.
 ## Model weights are fetched at build time, and the cache volume is the exception
 
 **Decision.** `ai/Dockerfile` downloads all three model weights during
-`docker compose build` and bakes them into the image at `/opt/models` — 2.8 GB, on
-top of an image that was 1.27 GB. Nothing is fetched at runtime on the shipped
-configuration. The `model-cache` volume, mounted at `/cache`, is still there but
-now holds nothing unless somebody sets `STT_MODEL` to a size the image does not
-carry.
+`docker compose build`, at pinned revisions, and bakes them into the image at
+`/opt/models`. Nothing is fetched at runtime on the shipped configuration. The
+`model-cache` volume, mounted at `/cache`, is still there but now holds nothing
+unless somebody sets `STT_MODEL` to a size the image does not carry.
+
+The weights are 2.81 GB, which takes the unpacked image from 0.95 GB to 3.77 GB.
+`docker images` reports 1.27 GB → 6.74 GB for the same two builds, because on
+Docker's containerd store that column adds the compressed layers kept beside the
+snapshot. Both numbers are real and they are not the same measurement; README.md
+quotes the `docker images` one, since that is the number a reader will see.
 
 **Why not at first use.** There is no paid API anywhere in this project, so the
 local models are not an implementation detail of the product — they *are* the

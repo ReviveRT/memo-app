@@ -89,9 +89,11 @@ RUN pip install -r requirements.txt
 # Neither is what "works with no account and no key" is supposed to mean.
 #
 # Placed here, after the pip install and before `COPY . .`, so editing the claim
-# loop does not refetch 2.8 GB. Docker caches the layer on the ARG values below,
+# loop does not refetch 2.8 GB. Docker keys the layer on the model settings below,
 # which is also the answer to "a rebuild does not refetch either model": the fetch
-# re-runs only when one of these lines changes.
+# re-runs only when one of those lines changes. Verified both ways -- an edit to
+# memo_ai/ rebuilds in 2.8 s with this layer CACHED, and changing a revision
+# re-runs it.
 #
 # Three models, and the third one is the one that gets forgotten:
 #
@@ -124,15 +126,42 @@ RUN pip install -r requirements.txt
 # Calling the library's own resolver means the build and the runtime cannot
 # disagree about which weights `STT_MODEL` names.
 #
+# That redirect is also why the revisions below are pinned. requirements.txt pins
+# every dependency exactly, for a reason it states plainly -- a rebuild months
+# from now should resolve what this stack was verified against -- and the weights
+# were the one thing in the image still tracking a moving branch. They are the
+# least stable thing here, not the most: a repository that changed hands once can
+# change contents without changing its name, and the accuracy table in README.md
+# is a measurement of specific bytes.
+#
+# An empty revision means "whatever is on main", which is the escape hatch for
+# building a size these shas do not belong to. Passing STT_MODEL without it fails
+# loudly at build time -- a 404 on the revision -- rather than quietly fetching
+# different weights, and README.md gives both arguments together.
+#
 # Licences, since this is the only download in the project: whisper weights are
 # MIT (checked on both repos, not assumed from the Systran one), and
 # Qwen2.5-1.5B-Instruct is Apache 2.0. Both are public repos -- no account, no
-# token, nothing for a reviewer to sign up for.
-ARG MODEL_DIR=/opt/models
+# token, nothing for a reviewer to sign up for. Unauthenticated fetches are rate
+# limited by IP, which the build log warns about; it has not been hit here, and
+# an HF_TOKEN would be the fix if a shared CI address ever does.
+
+# Not an ARG, unlike everything below it, and that asymmetry is deliberate. This
+# path is half of a contract with memo_ai/stt/local.py's BAKED_MODEL_DIR, which is
+# a literal for the same reason the uid/gid numbers are -- a fact about how the
+# image was built rather than a knob. As a build arg it would be a foot-gun with
+# no failure mode: `--build-arg MODEL_DIR=/srv/models` would produce an image
+# whose weights the worker never looks for, and the symptom is a silent 2.8 GB
+# download on the first memo. Moving it means editing both files.
+ENV MODEL_DIR=/opt/models
+
 ARG STT_MODEL=large-v3-turbo
+ARG STT_MODEL_REVISION=0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf
 ARG DETECT_MODEL=tiny
+ARG DETECT_MODEL_REVISION=d90ca5fe260221311c53c58e660288d3deb8d356
 ARG ENRICH_MODEL_REPO=Qwen/Qwen2.5-1.5B-Instruct-GGUF
 ARG ENRICH_MODEL_FILE=qwen2.5-1.5b-instruct-q4_k_m.gguf
+ARG ENRICH_MODEL_REVISION=91cad51170dc346986eccefdc2dd33a9da36ead9
 
 # Build args reach a RUN as environment variables, which is why this script reads
 # os.environ instead of being interpolated by the shell -- a quoted heredoc keeps
@@ -148,14 +177,25 @@ from huggingface_hub import hf_hub_download
 
 root = Path(os.environ["MODEL_DIR"])
 
-# dict.fromkeys rather than a set, to keep the order stable in the build log and
-# to collapse the STT_MODEL == DETECT_MODEL case -- `--build-arg STT_MODEL=tiny`
-# is a legitimate way to build a small image, and it should not fetch twice into
-# the same directory.
-for size in dict.fromkeys((os.environ["STT_MODEL"], os.environ["DETECT_MODEL"])):
+
+def revision(name: str) -> str | None:
+    """An empty build arg means the repository's default branch, not the empty sha."""
+    return os.environ.get(name) or None
+
+
+# A dict rather than a list of pairs, to collapse the STT_MODEL == DETECT_MODEL
+# case -- `--build-arg STT_MODEL=tiny` is a legitimate way to build a small image,
+# and it should not fetch twice into the same directory. Insertion order is kept,
+# so the build log still reads big-model-first.
+whisper = {
+    os.environ["STT_MODEL"]: revision("STT_MODEL_REVISION"),
+    os.environ["DETECT_MODEL"]: revision("DETECT_MODEL_REVISION"),
+}
+
+for size, sha in whisper.items():
     target = root / "whisper" / size
-    print(f"baking whisper {size} -> {target}", flush=True)
-    download_model(size, output_dir=str(target))
+    print(f"baking whisper {size} ({sha or 'main'}) -> {target}", flush=True)
+    download_model(size, output_dir=str(target), revision=sha)
 
 target = root / "llm"
 target.mkdir(parents=True, exist_ok=True)
@@ -163,6 +203,7 @@ print(f"baking {os.environ['ENRICH_MODEL_FILE']} -> {target}", flush=True)
 hf_hub_download(
     repo_id=os.environ["ENRICH_MODEL_REPO"],
     filename=os.environ["ENRICH_MODEL_FILE"],
+    revision=revision("ENRICH_MODEL_REVISION"),
     local_dir=str(target),
 )
 
@@ -171,7 +212,12 @@ hf_hub_download(
 # kilobytes rather than gigabytes, and it is removed anyway: it records where the
 # bytes came from at build time, and leaving it invites a later reader to believe
 # this directory is a cache that something maintains.
-for junk in root.rglob(".cache"):
+#
+# The list() is not decoration. rglob walks lazily with scandir, so deleting a
+# directory it is still holding open is a generator mutating the tree underneath
+# itself -- and rmtree's ignore_errors does not cover the *iterator*. Materialize
+# the matches, then delete.
+for junk in list(root.rglob(".cache")):
     shutil.rmtree(junk, ignore_errors=True)
 PY
 
@@ -184,11 +230,10 @@ PY
 RUN chmod -R a+rX ${MODEL_DIR}
 
 # Read by nothing today. It is set here so MEMO-21's enricher has one documented
-# place to look and does not have to reconstruct this filename from two build
-# args, and so `docker inspect` answers "which model did this image bake" without
-# a shell in the container.
-ENV MODEL_DIR=${MODEL_DIR} \
-    ENRICH_MODEL_PATH=${MODEL_DIR}/llm/${ENRICH_MODEL_FILE}
+# place to look and does not have to reconstruct this filename from a build arg
+# that will not exist by then, and so `docker inspect` answers "which model did
+# this image bake" without a shell in the container.
+ENV ENRICH_MODEL_PATH=${MODEL_DIR}/llm/${ENRICH_MODEL_FILE}
 
 COPY . .
 

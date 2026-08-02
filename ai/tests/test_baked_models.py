@@ -68,9 +68,11 @@ def test_an_empty_baked_directory_is_not_treated_as_baked(tmp_path, monkeypatch)
     The case the check exists for, and the reason it looks at `model.bin`.
 
     A build whose fetch died after mkdir leaves the directory behind. Handing an
-    empty one to CTranslate2 raises out of C++, which memo_ai/stt/local.py can
-    only classify as a generic engine failure -- so the memo fails with a sentence
-    about the engine rather than downloading the weights and working.
+    empty one to CTranslate2 raises `RuntimeError: Unable to open file 'model.bin'
+    in model '...'` out of C++ -- checked against the real library, not assumed --
+    which memo_ai/stt/local.py can only classify as a generic engine failure. The
+    memo would fail with a sentence about the engine rather than downloading the
+    weights and working.
     """
     (tmp_path / "large-v3-turbo").mkdir()
     monkeypatch.setattr(local, "BAKED_MODEL_DIR", tmp_path)
@@ -154,8 +156,18 @@ def test_the_enrichment_weights_are_baked_and_are_a_real_gguf():
     or filename that has moved does not always fail loudly, and a file of roughly
     the right size that starts with anything else is a failure MEMO-21 would
     inherit as an unexplained llama.cpp error months from now.
+
+    The variable is asserted rather than indexed. `ENRICH_MODEL_PATH` is set by
+    ai/Dockerfile and is the only thing telling MEMO-21 where to look, so an image
+    that baked the weights and lost the variable is a real defect -- and a bare
+    `os.environ[...]` reports it as a KeyError traceback, which reads like a
+    broken test rather than a broken image.
     """
-    path = Path(os.environ["ENRICH_MODEL_PATH"])
+    configured = os.environ.get("ENRICH_MODEL_PATH")
+
+    assert configured, "ai/Dockerfile must set ENRICH_MODEL_PATH; MEMO-21 reads it"
+
+    path = Path(configured)
 
     assert path.is_file()
 
