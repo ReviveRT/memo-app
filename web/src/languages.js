@@ -72,24 +72,12 @@ export const LANGUAGES = Object.freeze([
   { code: 'ca', name: 'Català · Catalan' },
 ])
 
-/** Lookup built once, rather than a find() per card on a list of thirty. */
-const BY_CODE = new Map(LANGUAGES.map((language) => [language.code, language.name]))
-
-/**
- * What to call a language code in the UI.
+/*
+ * There is deliberately no `languageName(code)` helper here.
  *
- * Falls back to the code itself, which matters more than it looks: the API accepts all 99
- * Whisper codes while this file lists ~34, so a memo can legitimately carry one that is not
- * here -- set by hand, by `STT_LANGUAGE`, or by a future longer list. Showing `sw` is a worse
- * label than "Kiswahili" and a much better one than blank or "undefined".
- *
- * @param {?string} code
- * @returns {?string} null when there is no code, meaning the language was detected.
+ * One existed while a memo card showed which language it had been decoded in, next to a
+ * control that decoded it again. That control is gone -- a transcript is now corrected by
+ * editing it rather than by re-running the model -- so nothing renders a stored code, and a
+ * lookup with no caller is a thing that rots. It is a five-line Map over LANGUAGES if a
+ * reason to display one comes back.
  */
-export function languageName(code) {
-  if (!code) {
-    return null
-  }
-
-  return BY_CODE.get(code) ?? code
-}

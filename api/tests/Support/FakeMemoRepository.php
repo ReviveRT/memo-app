@@ -78,6 +78,15 @@ final class FakeMemoRepository extends MemoRepository
     /** What rename() answers with. Null is the "no such memo" case the controller 404s. */
     public ?Memo $renameResult = null;
 
+    /** Every correctTranscript() call, in order, as `[memoId, transcript]`.
+     *
+     * @var list<array{0: string, 1: string}>
+     */
+    public array $corrected = [];
+
+    /** What correctTranscript() answers with. Null is the "no such memo" case the controller 404s. */
+    public ?Memo $correctResult = null;
+
     /** Every delete() call, in order.
      *
      * @var list<string>
@@ -198,6 +207,13 @@ final class FakeMemoRepository extends MemoRepository
         return $this->renameResult;
     }
 
+    public function correctTranscript(string $memoId, string $transcript): ?Memo
+    {
+        $this->corrected[] = [$memoId, $transcript];
+
+        return $this->correctResult;
+    }
+
     /**
      * Imitates the real guard rather than answering from a stored result, and rewrites `$rows`.
      *
@@ -241,59 +257,6 @@ final class FakeMemoRepository extends MemoRepository
                 lastError: $memo->lastError,
                 lastErrorCode: $memo->lastErrorCode,
                 language: $memo->language,
-                createdAt: $memo->createdAt,
-                collectionId: $memo->collectionId,
-                reminders: $memo->reminders,
-            );
-
-            $this->rows[$at] = $queued;
-
-            return $queued;
-        }
-
-        return null;
-    }
-
-    /**
-     * Mirrors the real statement's three conditions, because they are what the endpoint's
-     * two 409 messages are about and a fake that accepted anything would let both pass
-     * untested. See MemoRepository::retranscribe.
-     */
-    public function retranscribe(string $memoId, ?string $language): ?Memo
-    {
-        foreach ($this->rows as $at => $memo) {
-            if ($memo->id !== $memoId) {
-                continue;
-            }
-
-            if ($memo->source !== Memo::SOURCE_VOICE) {
-                return null;
-            }
-
-            if (! in_array($memo->status, ['ready', 'failed'], true)) {
-                return null;
-            }
-
-            // `transcript: null` is the part worth copying rather than glossing: the
-            // worker decides whether a claimed memo owes a transcript by asking whether it
-            // already has one, so a fake that kept the old text would hide the bug where
-            // the real UPDATE forgets to clear it.
-            //
-            // `title`, `summary` and `tags` go the same way, and that is a bug this fake
-            // once hid: the title is cut out of the transcript, so a Romanian memo
-            // re-decoded from Cyrillic kept the title `Салют`.
-            $queued = new Memo(
-                id: $memo->id,
-                source: $memo->source,
-                status: Memo::STATUS_QUEUED,
-                transcript: null,
-                title: null,
-                summary: null,
-                tags: [],
-                durationMs: $memo->durationMs,
-                lastError: null,
-                lastErrorCode: null,
-                language: $language,
                 createdAt: $memo->createdAt,
                 collectionId: $memo->collectionId,
                 reminders: $memo->reminders,

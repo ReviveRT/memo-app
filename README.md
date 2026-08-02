@@ -757,11 +757,15 @@ Two response conventions worth knowing before writing a client:
   it is a read across every memo by a caller holding none of them.
 - **Lists echo the filters they answered for** alongside the rows, so a response
   that arrives after the search box has moved on can still be captioned correctly.
-- **`title` is the only content a client may write.** The transcript is a record of
-  what was said and nothing in this app edits one — the formatter will not respell a
-  word of it, and there is a test asserting so. A title is *generated*, which makes it
-  a guess, and a guess the owner disagrees with is a memo they cannot find again. So
-  the guess is the default and the owner has the last word.
+- **`title` and `transcript` are the content a client may write.** Both are guesses a
+  model made, and the owner has the last word on each: a title is *generated*, and a
+  wrong one is a memo they cannot find again; a transcript is what a speech model
+  thought it heard, and a wrong one is a memo that no longer says what was said. The
+  recording itself is what is kept as evidence — the transcript is a derivative of it.
+  Nothing in the app rewrites either: the formatter will not respell a word, and there
+  is a test asserting so. Only a person may. `status`, `tags` and the rest stay out for
+  a different reason — they belong to the queue and the worker, and a client setting
+  `status` would be a client claiming a job.
 - **A 5xx body is never shown to the user, whatever it says.** With `APP_DEBUG=false`
   it is `{"message":"Server Error"}`, which tells nobody anything; with it on, it is
   the exception and its trace. The frontend replaces both with a sentence naming the

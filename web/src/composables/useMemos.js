@@ -1,5 +1,6 @@
 import { ref } from 'vue'
 import {
+  correctTranscript,
   createMemo,
   createVoiceMemo,
   deleteMemo,
@@ -7,7 +8,6 @@ import {
   createReminder,
   patchMemo,
   renameMemo,
-  retranscribeMemo,
   retryMemo,
 } from '../api/memos'
 import { applyMemoEverywhere, createMemoList, removeMemoEverywhere } from './useMemoList'
@@ -368,6 +368,27 @@ function rename(memo, title) {
 }
 
 /**
+ * Correct a memo's transcript.
+ *
+ * Through writeMemo like the rename above, and it earns that more than most: the transcript is
+ * what every list renders as the memo's preview and what memoLabel falls back to for a memo
+ * with no title, so a corrected one has to reach the card behind the dialog and the same memo
+ * inside an opened collection, not just the field it was typed into.
+ *
+ * @param {object} memo The memo being corrected, as the caller is rendering it.
+ * @param {string} transcript The words that were actually said. Cannot be blank -- the API
+ *   answers 422, since a memo with no text is not something this control should be able to
+ *   make. See api/memos.js.
+ * @returns {Promise<?object>}
+ */
+function correct(memo, transcript) {
+  return writeMemo(
+    () => correctTranscript(memo.id, transcript),
+    'Could not save the transcript',
+  )
+}
+
+/**
  * Delete a memo, its recording and its reminders.
  *
  * `removeMemoEverywhere` rather than `applyMemoEverywhere`, because there is no memo left to
@@ -484,53 +505,6 @@ async function retry(memo) {
 }
 
 /**
- * Decode a memo's recording again, in a language the user names.
- *
- * The same shape as `retry` above and for the same reasons -- per-memo re-entry guard rather
- * than the page-wide `working` flag, toasts rather than `memoError`, and the returned row
- * applied everywhere it is rendered. `retrying` is reused as that guard: from the user's side
- * both buttons mean "do this memo again", and a memo with one of them in flight should not
- * accept the other.
- *
- * What differs is which memos it is offered on. Retry is for a memo that failed; this is for
- * one that came back with the wrong words because the language was misdetected, which is a
- * `ready` memo the API will happily requeue. web/src/languages.js has the measurements behind
- * why that case is common enough to build a control for.
- *
- * The old transcript is cleared server-side, so the card goes back to `queued` and the poll
- * that was already watching it shows the replacement arriving. Nothing here has to blank it.
- *
- * @param {object} memo The memo to decode again, as the caller is rendering it.
- * @param {?string} language A Whisper code, or null to put it back on auto-detect.
- * @returns {Promise<?object>} The memo, now queued, or null if it was refused or a press for
- *   this memo was already in flight.
- */
-async function retranscribe(memo, language) {
-  if (retrying.has(memo.id)) {
-    return null
-  }
-
-  retrying.add(memo.id)
-
-  const toast = startMemoToast('retry')
-
-  try {
-    const updated = await retranscribeMemo(memo.id, language)
-
-    applyMemoEverywhere(updated)
-    toast.stored(updated)
-
-    return updated
-  } catch (error) {
-    toast.rejected(error.message)
-
-    return null
-  } finally {
-    retrying.delete(memo.id)
-  }
-}
-
-/**
  * Set a reminder on a memo.
  *
  * @param {object} memo The memo being reminded about, as the caller is rendering it.
@@ -577,9 +551,9 @@ export function useMemos() {
     submitAudio,
     moveMemo,
     rename,
+    correct,
     remove,
     retry,
-    retranscribe,
     addReminder,
     dropReminder,
   }

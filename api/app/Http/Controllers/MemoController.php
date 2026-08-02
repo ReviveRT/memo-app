@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace App\Http\Controllers;
 
 use App\Http\Requests\ListMemosRequest;
-use App\Http\Requests\RetranscribeMemoRequest;
 use App\Http\Requests\StoreMemoRequest;
 use App\Http\Requests\UpdateMemoRequest;
 use App\Services\Memos\Memo;
@@ -119,6 +118,21 @@ final class MemoController extends Controller
             }
         }
 
+        // Last of the three, so a body carrying both a title and a transcript returns the row
+        // with both applied. The order is otherwise arbitrary -- they touch different columns
+        // -- but "whichever ran last is what we return" only holds if the last one ran after
+        // the others, and a reader should not have to check that.
+        if ($request->correctsTranscript()) {
+            $updated = $this->memos->correctTranscript($memo, $request->transcript());
+
+            if ($updated === null) {
+                abort(
+                    Response::HTTP_NOT_FOUND,
+                    'That memo no longer exists. Refresh and try again.',
+                );
+            }
+        }
+
         // Unreachable: UpdateMemoRequest refuses a body that asks for neither, so one of the
         // two branches above has run. Asserted rather than assumed, because the alternative
         // is a null dereference one edit to the rules away.
@@ -174,50 +188,6 @@ final class MemoController extends Controller
         // frontend's `pending` and restarts the poll that will show the retry finishing. A
         // 204 would leave the card sitting on `failed` until something else happened to
         // refresh it.
-        return response()->json(['memo' => $outcome->memo->toArray()]);
-    }
-
-    /**
-     * Decode a voice memo again, in a language the user names.
-     *
-     * **Why this is not `retry` with a parameter.** Retry's contract is "this failed, try
-     * again", and its `status = 'failed'` guard is the whole of its safety. The memo this
-     * route is called about is usually `ready`: a Romanian recording transliterated into
-     * Cyrillic is a *successful* job by every measure the worker has, and it is the user
-     * who can see it is wrong. Widening Retry to accept `ready` would mean a Retry click
-     * could discard a transcript somebody is reading. MemoRepository::retranscribe has
-     * the three conditions and what each refuses.
-     *
-     * The 409 is the same shape as Retry's and reachable for more reasons: a text memo has
-     * no audio to decode, and a memo already `queued` or `processing` is mid-flight with a
-     * worker possibly holding its fence token. Both name the state they found, because
-     * these sentences reach the user verbatim.
-     *
-     * 200 with the whole memo, for the reason Retry gives -- the row comes back `queued`
-     * with `transcript` cleared, which is what flips the frontend to pending and restarts
-     * the poll that will show the new transcript arriving. A client that got a 204 here
-     * would sit on the old, wrong transcript with no indication anything was happening.
-     */
-    public function retranscribe(RetranscribeMemoRequest $request, string $memo): JsonResponse
-    {
-        $outcome = $this->memos->retranscribe($memo, $request->language());
-
-        if ($outcome->memo === null) {
-            abort(Response::HTTP_NOT_FOUND, 'That memo no longer exists.');
-        }
-
-        if (! $outcome->requeued) {
-            // Two distinct refusals, and the difference is worth spelling out rather than
-            // reporting both as "wrong state": one is permanent and the other resolves on
-            // its own in a second or two.
-            $reason = $outcome->memo->source === Memo::SOURCE_TEXT
-                ? 'Only a voice memo can be transcribed again, and this one was typed.'
-                : "A memo can only be transcribed again once it has finished, and this one is {$outcome->memo->status}."
-                    .' Refresh to see where it got to.';
-
-            abort(Response::HTTP_CONFLICT, $reason);
-        }
-
         return response()->json(['memo' => $outcome->memo->toArray()]);
     }
 
