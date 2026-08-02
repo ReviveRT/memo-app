@@ -12,6 +12,7 @@
 
 declare(strict_types=1);
 
+use App\Http\Controllers\AskController;
 use App\Http\Controllers\CollectionController;
 use App\Http\Controllers\HealthController;
 use App\Http\Controllers\MemoController;
@@ -19,6 +20,26 @@ use App\Http\Controllers\ReminderController;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/health', [HealthController::class, 'show'])->name('health');
+
+// Ask my memos (MEMO-24). The one route here that does not answer for itself: it proxies to
+// the `ai-api` container, which retrieves a few memos through the same full-text index
+// `?q=` uses and has a local model answer from them.
+//
+// POST rather than GET, and it is not only that a question can be long. A GET would put
+// somebody's question in a URL -- into the api container's access log, into the browser's
+// history, into whatever sits in front of this later -- and a question about your own memos
+// is at least as private as their contents. The body is also what makes `?q=` and this route
+// visibly different things rather than two spellings of search.
+//
+// Not under /memos, even though every memo it reads is one, because it is not a sub-resource
+// of anything: it answers across the whole table and produces no memo. `/api/ask` says what it
+// is, which is the same reasoning `/api/health` gets.
+//
+// **The one route in this file that streams**, and the only one that is not JSON except for
+// the audio bytes. It answers `application/x-ndjson` -- one JSON object per line -- so the
+// browser can render words as the model produces them rather than after forty seconds of
+// nothing. AskController has why a failure partway through cannot be a status code.
+Route::post('/ask', [AskController::class, 'store'])->name('ask');
 
 // The memo collection (MEMO-06). The intended shape for MEMO-11 is a second
 // accepted body on this same POST rather than a /api/memos/audio of its own: both

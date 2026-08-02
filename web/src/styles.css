@@ -2128,3 +2128,141 @@ button:disabled:hover,
   /* The pointer is the other half of it, and the half that answers before the click. */
   cursor: not-allowed;
 }
+
+/* --- ask my memos (MEMO-24) -------------------------------------------------- */
+
+/*
+ * The panel sits between the composer and the fast strip, so the two write paths stay at the
+ * top of the screen where the recorder's bloom is centred. See MemosView for the ordering
+ * argument.
+ */
+.ask__form {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.ask__result {
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.ask__answer {
+  margin: 0;
+  line-height: 1.55;
+
+  /*
+   * The answer arrives a token at a time and the last one is regularly a fragment, so the box
+   * would otherwise reflow on almost every frame as a part-word pushed the line over. Breaking
+   * inside a word is the lesser evil here: the alternative is a paragraph that twitches for
+   * the whole time it is being written.
+   */
+  overflow-wrap: anywhere;
+}
+
+/*
+ * A caret while the model is still writing.
+ *
+ * It is the one thing on screen that distinguishes "the answer stopped here" from "the answer
+ * ends here", and those look identical without it -- a three-sentence answer and a
+ * three-sentence answer that is about to become five are the same pixels.
+ *
+ * Inline rather than a pseudo-element on the paragraph, so it sits immediately after the last
+ * character rather than at the end of the last line box.
+ */
+.ask__cursor {
+  display: inline-block;
+  width: 0.5ch;
+  height: 1em;
+  margin-left: 0.1em;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  animation: ask-blink 1s steps(2, start) infinite;
+}
+
+@keyframes ask-blink {
+  to {
+    visibility: hidden;
+  }
+}
+
+/*
+ * Honoured rather than assumed harmless. A blinking element is the textbook trigger this
+ * media query exists for, and a caret that simply stays visible still says what it is for.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .ask__cursor {
+    animation: none;
+  }
+}
+
+.ask__waiting {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.ask__sources {
+  margin: 0.9rem 0 0;
+  padding: 0.85rem 0 0;
+  border-top: 1px solid var(--border);
+  list-style: none;
+  display: grid;
+  gap: 0.7rem;
+}
+
+.ask__source {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+}
+
+/*
+ * The bracketed number, matching what the answer above writes inline. Tabular figures so a
+ * [1] and a [10] occupy the same width and the excerpts below them stay on one left edge.
+ */
+.ask__ref {
+  flex: none;
+  color: var(--accent);
+  font-size: 0.85rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.ask__source-body {
+  min-width: 0;
+}
+
+/*
+ * A button that reads as a link, because it opens a dialog rather than navigating -- the same
+ * reason MemoStrip's cards are buttons. Reset to nothing but the underline, since the default
+ * button chrome next to an excerpt reads as a form control.
+ */
+.ask__open,
+.ask__title {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.92rem;
+  font-weight: 600;
+  text-align: left;
+}
+
+.ask__open {
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.ask__excerpt {
+  margin: 0.15rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}

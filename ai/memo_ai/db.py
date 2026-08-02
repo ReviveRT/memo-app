@@ -15,7 +15,7 @@ from memo_ai.config import Settings
 CONNECT_TIMEOUT_SECONDS = 5
 
 
-def connect(settings: Settings) -> psycopg.Connection:
+def connect(settings: Settings, role: str = "worker") -> psycopg.Connection:
     """
     ``autocommit=True`` is the line that makes MEMO-08's claim a *committed*
     claim, and it is not a performance setting.
@@ -44,10 +44,19 @@ def connect(settings: Settings) -> psycopg.Connection:
     ``application_name`` costs nothing and answers "are both replicas actually
     working?" from ``pg_stat_activity`` without adding a healthcheck or a metrics
     endpoint. The hostname is the container id under compose.
+
+    ``role`` is what keeps that answer readable now that two services share this
+    function. ``ai-api`` (MEMO-24) opens short connections of its own against the
+    same database, and without a name of their own they would appear in
+    ``pg_stat_activity`` as workers -- so "are both replicas working?" would be
+    answered by counting three things and getting four. It is a parameter with a
+    default rather than a field on ``Settings`` because it is a property of the
+    entrypoint, not of the environment: nothing in a ``.env`` could know or should
+    decide which of the two opened a connection.
     """
     return psycopg.connect(
         settings.database_url,
         autocommit=True,
-        application_name=f"memo-worker@{socket.gethostname()}",
+        application_name=f"memo-{role}@{socket.gethostname()}",
         connect_timeout=CONNECT_TIMEOUT_SECONDS,
     )
