@@ -28,7 +28,52 @@ Then open **<http://localhost:5173>**.
 > `http://192.168.1.5:5173` the **Record** button reports that it needs a secure
 > context, and nothing in the console explains why. Typing memos works anywhere.
 
-_TODO (MEMO-26): first-build time and image size, given the baked whisper weights._
+### What the first build costs
+
+**Three to four minutes, and 6.7 GB of disk for the `ai-worker` image alone.**
+Nothing after the first build pays either cost again.
+
+That is the price of "no account, no key, nothing to sign up for", and it is worth
+naming rather than letting you discover it. `docker compose build` downloads 2.8 GB
+of model weights and bakes them into the image, so the running app never fetches a
+model and works with networking switched off. See
+[Transcription](#transcription) for which models and why.
+
+The weights are fetched at pinned commits, so a build today and a build next year
+produce the same transcripts — the accuracy table below is a measurement of
+specific bytes, and one of these repositories has already changed hands once.
+
+Measured on an M-series Mac with a fast connection, rebuilding every layer except
+the `python:3.12-slim` base, which was already pulled:
+
+| | |
+| --- | --- |
+| Total build, `ai-worker` | 3 min 18 s |
+| — of which, fetching 2.8 GB of weights | 52 s |
+| `docker images` size, before / after | 1.27 GB → 6.74 GB |
+
+Two honest caveats about those numbers. The 52 s is bandwidth, so on a 50 Mbit/s
+link expect closer to eight minutes for that step alone. And the 6.74 GB is what
+`docker images` reports, which on Docker's containerd store adds two things: the
+unpacked image (3.8 GB) and the compressed layers kept beside it (3.0 GB). Both are
+real disk, and neither is the 2.8 GB of weights on its own — `docker system df`
+breaks the total down if you need to reclaim space.
+
+Rebuilding after a code change does **not** refetch the weights — the model layer
+sits above `COPY`, so an edit to the worker rebuilds in about three seconds.
+
+Upgrading from an earlier revision leaves one orphan behind, since the cache volume
+was renamed when it stopped holding whisper's weights:
+
+```bash
+docker volume rm memo-app_whisper-cache
+```
+
+**Build for your own architecture.** On Apple silicon that is the default and needs
+no flag. Do not pass `--platform linux/amd64`: everything here runs on CPU — there
+is no Metal backend for CTranslate2 and no GPU passthrough into a Linux container
+on macOS — so an emulated x86 image is not slower, it is unusable. `NOTES.md` has
+the detail.
 
 ## Recording
 
@@ -331,13 +376,23 @@ Recordings are transcribed **on your machine**, by
 per-minute bill; the only thing it spends is CPU. The weights are MIT-licensed and
 so is everything that runs them.
 
-The one moment it needs the internet is **the first run after a clean build**,
-which downloads 1.6 GB of model into the `whisper-cache` volume. The worker starts
-that download the moment it boots rather than waiting for your first recording, so
-in practice it is finished before you have opened the browser and pressed Record.
-If you beat it, that memo fails with _"the local transcription model is still
-being downloaded"_ — record another a minute later. Everything after that is
-offline, and stays offline across restarts because the cache is a named volume.
+**It never downloads a model while you are using it.** The weights are fetched
+once, during `docker compose build`, and baked into the `ai-worker` image — so the
+running stack has no reason to reach the network at all and works with networking
+switched off. That is the point of paying for it at build time: the alternative is
+a first recording that hangs for minutes on a slow connection, or fails outright
+offline, which would quietly make "no account, no key" untrue.
+
+Three models are baked, totalling **2.8 GB**: `large-v3-turbo` for transcription
+(1622 MB), `tiny` for the per-recording language detection (78 MB), and
+Qwen2.5-1.5B-Instruct Q4_K_M for enrichment (1117 MB). All three are public
+repositories needing no account and no token — the whisper weights are MIT and
+Qwen is Apache 2.0. See [Quickstart](#quickstart) for what that costs you in build
+time and disk.
+
+The `model-cache` volume is still mounted, and now holds nothing on a default
+install. It is where a model you asked for but nobody baked gets cached — see
+[Choosing a model](#choosing-a-model).
 
 The language is detected per recording rather than configured, so one stack takes
 memos in several languages; the Russian test recording is identified as Russian
@@ -359,6 +414,27 @@ real recording of _"I would like to place an order"_, spoken in an Indian accent
 turbo is not the slow choice despite being the largest. It pairs a `large-v3`
 encoder with a four-layer decoder, so it beats `small` on speed and is three times
 faster than the `medium` it out-transcribes.
+
+**Only the default is baked into the image.** Setting `STT_MODEL` to anything else
+puts you back on the old behaviour: the worker resolves the name against
+HuggingFace on first use and caches it in the `model-cache` volume, so that run
+needs the internet and the first memo may fail with _"the local transcription
+model is still being downloaded"_ while it finishes. Record another a minute later.
+
+To bake a different one instead — worth doing if you are short of disk and your
+speakers are easy to understand — change `DEFAULT_STT_MODEL` in
+`ai/memo_ai/config.py` and build with matching arguments:
+
+```bash
+docker compose build --build-arg STT_MODEL=base --build-arg STT_MODEL_REVISION= ai-worker
+```
+
+Both parts matter. The config decides what the worker asks for and the build
+argument decides what the image carries, so changing only the argument gives you an
+image that carries `base` and still downloads turbo the first time somebody
+records. The empty `STT_MODEL_REVISION` clears the pinned commit, which belongs to
+turbo's repository and does not exist in `base`'s — leave it set and the build
+fails on a 404 rather than silently fetching something else.
 
 ### Speed
 
@@ -428,6 +504,10 @@ batching takes the peak to **2.4 GB per replica**. With `replicas: 2` that is
 about 4.8 GB before anything else in the stack, which is most of a default Docker
 Desktop VM. If that is too tight, `STT_MODEL=base` or one worker replica are the
 two levers, in that order.
+
+Disk is the other half, and it is paid once rather than per replica — the baked
+weights live in the image, which both replicas share. See
+[Quickstart](#quickstart) for the number.
 
 ### Repeated words
 
@@ -763,14 +843,15 @@ recordings in `ai/tests/fixtures/`, since no synthesized file reproduces the
 missing-duration defect. It skips and names what is missing until they are there —
 `ai/tests/fixtures/README.md` has the capture instructions.
 
-`tests/test_local_whisper.py` runs the real model against those same recordings.
-It skips unless the weights are already in the HuggingFace cache, and it will not
-download them itself — a test run that quietly pulled 145 MB would be a worse
-surprise than a skip. Mount the same cache the stack uses to make it run:
+`tests/test_local_whisper.py` runs the real model against those same recordings,
+and `tests/test_baked_models.py` checks the weights are where the image put them.
+Both run as part of the command above with nothing extra mounted, because the
+weights are in the image — the `-v memo-app_whisper-cache:/cache` this section used
+to ask for is no longer needed and the volume it named no longer exists.
 
-```bash
-docker compose run --rm --no-deps --user 0:0 -v memo-app_whisper-cache:/cache --entrypoint sh ai-worker -c 'pip install -q -r requirements-dev.txt && python -m pytest'
-```
+They still skip on a bare host with no image, and they will not download anything
+to avoid it — a test run that quietly pulled 1.6 GB would be a worse surprise than
+a skip.
 
 Everything else about the local provider is covered by `tests/test_local_stt.py`,
 which stubs the model out: what it checks is the classification — which failures

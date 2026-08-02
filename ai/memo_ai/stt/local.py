@@ -80,6 +80,26 @@ log = logging.getLogger(__name__)
 # since docker-compose.yml runs two replicas of this image.
 COMPUTE_TYPE = "int8"
 
+# Where ai/Dockerfile bakes the weights (MEMO-15). One directory per model size,
+# holding the repository's files as faster-whisper's own `download_model` laid
+# them out -- so `BAKED_MODEL_DIR / "tiny"` is a path `WhisperModel` accepts in
+# place of the string `"tiny"`.
+#
+# A constant repeated from the Dockerfile rather than read from an environment
+# variable, which is the convention the uid/gid contract already sets in
+# ai/Dockerfile and docker-compose.yml: this is a fact about how the image was
+# built, not a knob a deployment turns. A `MODEL_DIR` variable would let a
+# running container disagree with the image it came from, and the symptom of that
+# is a silent 1.6 GB download rather than anything that reads as a mistake.
+#
+# It is a *second* place to look and not a replacement for the HuggingFace cache
+# under HF_HOME, which is the part that makes an unbaked `STT_MODEL` still work:
+# `docker compose up` after setting `STT_MODEL=medium` finds nothing baked, falls
+# through to the library, and fetches into the writable `model-cache` volume the
+# way every model did before this task. What baking buys is that the *shipped*
+# configuration never reaches that path.
+BAKED_MODEL_DIR = Path("/opt/models/whisper")
+
 # How long one memo waits for the model before giving up on it.
 #
 # Generous, because the thing it is waiting for is a download and the penalty for
@@ -851,17 +871,24 @@ def _load_whisper_model(model_size: str, language: str | None) -> "_Engines":
     in this stack, and an auto that found one would silently change both the
     memory profile and the numbers measured in this file's docstring.
 
-    No ``local_files_only``: the first run on a clean checkout has an empty
-    ``whisper-cache`` volume and has to fetch the weights. MEMO-15 bakes them into
-    the image, at which point this call finds them locally and never reaches the
-    network -- which is what makes the "works with networking disabled" criterion
-    hold on a machine that has run once.
+    Still no ``local_files_only``, and that is now a decision about the *unbaked*
+    case rather than about the shipped one. :func:`_model_source` resolves the two
+    models this image was built with to paths under :data:`BAKED_MODEL_DIR`, so
+    the shipped configuration never reaches the network at all (MEMO-15). Anything
+    else -- someone who set ``STT_MODEL=medium`` -- falls through to the library
+    and fetches into the ``model-cache`` volume, which is exactly the path this
+    comment used to describe as the only one. Pinning ``local_files_only=True``
+    would turn that into a failure instead of a download, for no gain: the
+    criterion is that the shipped stack works offline, not that a reconfigured one
+    refuses to.
 
     Both replicas race for that first fetch, which was watched rather than
     reasoned about: on a fresh volume they issued their HEAD requests within the
     same second and were both transcribing four seconds later. It is safe because
     huggingface_hub locks around the shared cache -- there is a ``.locks``
     directory beside the snapshot to prove it -- and the volume came out one copy.
+    Nothing baked goes through that path, so the race is now only reachable by a
+    reconfigured stack.
 
     A :class:`BatchedInferencePipeline` rather than the bare model, which is what
     makes :data:`BATCH_SIZE` mean anything. It is a wrapper with the same
@@ -878,7 +905,7 @@ def _load_whisper_model(model_size: str, language: str | None) -> "_Engines":
     from faster_whisper.audio import decode_audio
 
     def build(size: str) -> object:
-        return WhisperModel(size, device="cpu", compute_type=COMPUTE_TYPE)
+        return WhisperModel(_model_source(size), device="cpu", compute_type=COMPUTE_TYPE)
 
     detector = None
 
@@ -889,6 +916,47 @@ def _load_whisper_model(model_size: str, language: str | None) -> "_Engines":
         transcriber=BatchedInferencePipeline(model=build(model_size)),
         detector=detector,
     )
+
+
+def _model_source(size: str) -> str:
+    """
+    A baked directory if this image has one, otherwise the size name unchanged.
+
+    ``WhisperModel`` takes either, and the difference between them is the whole of
+    MEMO-15 from the running worker's side: a path is opened, a name is resolved
+    against HuggingFace. Returning the name is not a fallback in the apologetic
+    sense -- it is the supported way to run a model nobody baked.
+
+    ``model.bin`` rather than the directory, and that is the check worth being
+    exact about. A directory alone proves nothing: an interrupted build, or a
+    ``docker build`` whose fetch failed after ``mkdir``, leaves one behind empty.
+    Run rather than reasoned about -- ``WhisperModel`` on an empty directory
+    raises ``RuntimeError: Unable to open file 'model.bin' in model '...'`` out of
+    C++, which :meth:`LocalWhisperStt.transcribe` classifies as ``SttUnavailable``
+    with the generic engine-failure sentence. So the memo would fail talking about
+    the engine, three times, while the fix was to fetch the weights. Falling
+    through to a download says something true instead.
+
+    Logged at INFO on both paths, because "did this container reach the network
+    for weights" is the question this task exists to make answerable, and the
+    answer should be in ``docker compose logs ai-worker`` rather than in an image
+    inspection. It runs at most twice per process -- once for the model, once for
+    the detector -- so there is nothing to be quiet about.
+    """
+    baked = BAKED_MODEL_DIR / size
+
+    if (baked / "model.bin").is_file():
+        log.info("using baked whisper weights for %r at %s", size, baked)
+
+        return str(baked)
+
+    log.info(
+        "no baked whisper weights for %r under %s; resolving it through HuggingFace",
+        size,
+        BAKED_MODEL_DIR,
+    )
+
+    return size
 
 
 def _detected(detector: "_LanguageDetector | None", source: Path) -> str | None:

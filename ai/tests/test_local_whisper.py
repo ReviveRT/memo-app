@@ -6,15 +6,19 @@ those tests are about is classification. This file is about the one claim a stub
 cannot make: that the same audio goes through both providers, that `fake` is
 instant and `local` produces words, and that `local` needs no key and no network.
 
-It skips rather than fails when the model is not on this machine. Three reasons a
-run legitimately has no model -- a clean clone, an image without faster-whisper in
-it, or a `whisper-cache` volume that has never been filled -- and none of them
-should turn a green suite red for whoever cloned the repo. What it must not do is
-skip *silently* on a machine that does have one, which is why the guard probes the
-HuggingFace cache directly rather than trying a load and swallowing the error.
+It skips rather than fails when the model is not on this machine. Two reasons a
+run legitimately has no model -- a clean clone, or an image without faster-whisper
+in it -- and neither should turn a green suite red for whoever cloned the repo.
+What it must not do is skip *silently* on a machine that does have one, which is
+why the guard probes for the weights directly rather than trying a load and
+swallowing the error.
 
-Once MEMO-15 bakes the weights into ai/Dockerfile the guard is satisfied by the
-image itself and this file always runs.
+MEMO-15 removed the third reason and added a place to look. The weights are baked
+into ai/Dockerfile now, so a run inside that image always has them and this file
+always runs there -- but the guard cannot ask ``download_model`` alone any more,
+because a baked model is a directory the HuggingFace cache knows nothing about.
+It asks memo_ai/stt/local.py's resolver first, which is the same question the
+worker asks, and falls back to the cache for the unbaked case.
 """
 
 import re
@@ -27,6 +31,7 @@ from memo_ai import audio, stt
 from memo_ai.config import DEFAULT_STT_MODEL, Settings
 from memo_ai.stt.base import SttError
 from memo_ai.stt.fake import CANNED_TRANSCRIPT
+from memo_ai.stt.local import _model_source
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -41,7 +46,14 @@ SETTINGS = Settings.from_env(
 )
 
 
-def _model_is_cached() -> bool:
+def _model_is_available() -> bool:
+    # The baked copy first, and through the resolver rather than by joining the
+    # path here -- so this guard cannot start disagreeing with the worker about
+    # what counts as baked. It returns the size name unchanged when there is
+    # nothing there, which is what makes the comparison the whole check.
+    if _model_source(MODEL) != MODEL:
+        return True
+
     try:
         from faster_whisper.utils import download_model
     except ImportError:
@@ -49,7 +61,7 @@ def _model_is_cached() -> bool:
 
     try:
         # local_files_only, so the guard itself can never trigger the download it
-        # is checking for -- a test suite that quietly pulled 145 MB would be a
+        # is checking for -- a test suite that quietly pulled 1.6 GB would be a
         # worse surprise than a skip.
         download_model(MODEL, local_files_only=True)
     except Exception:
@@ -59,8 +71,8 @@ def _model_is_cached() -> bool:
 
 
 pytestmark = pytest.mark.skipif(
-    not (audio.ffmpeg_available() and _model_is_cached()),
-    reason=f"needs ffmpeg and a cached faster-whisper {MODEL!r} model",
+    not (audio.ffmpeg_available() and _model_is_available()),
+    reason=f"needs ffmpeg and a baked or cached faster-whisper {MODEL!r} model",
 )
 
 
