@@ -46,10 +46,18 @@ def connect(settings: Settings, role: str = "worker") -> psycopg.Connection:
     endpoint. The hostname is the container id under compose.
 
     ``role`` is what that name is built from, and it exists because this is no
-    longer only the worker's door to the database: ``python -m memo_ai.costs``
-    (MEMO-22) runs its aggregates over the same connection settings and would
-    otherwise appear in ``pg_stat_activity`` as a third replica. The default keeps
-    every existing caller writing the name it always wrote.
+    longer only the worker's door to the database. Two entrypoints arrived on the
+    same release and each would otherwise have appeared in ``pg_stat_activity`` as
+    another replica: ``python -m memo_ai.ask`` (MEMO-24) opens a short connection
+    per question, and ``python -m memo_ai.costs`` (MEMO-22) runs its aggregates over
+    the same connection settings. Unnamed, "are both replicas working?" is answered
+    by counting two things and getting four.
+
+    A parameter with a default rather than a field on ``Settings``, for two reasons
+    that agree: it is a property of the entrypoint rather than of the environment --
+    nothing in a ``.env`` could know or should decide which process opened a
+    connection -- and the default keeps every existing caller writing the name it
+    always wrote.
     """
     return psycopg.connect(
         settings.database_url,

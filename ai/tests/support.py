@@ -283,3 +283,49 @@ class FakeConnection:
             )
 
         return matches[0]
+
+
+class RecordingAskModel:
+    """
+    Stands in for ``memo_ai.ask.Model``, so the service and the app can be driven
+    without 1,117 MB of weights or a second of inference.
+
+    Structural rather than a subclass, like every other double here: the real class
+    exposes ``state``, ``start_loading`` and ``stream``, and that is the whole of
+    what memo_ai/ask/service.py and memo_ai/ask/app.py touch. ``Model`` itself is
+    covered by tests/test_ask_model.py, which injects a loader instead.
+
+    ``error`` is raised *after* the chunks rather than instead of them, which is the
+    case worth being able to construct: a generation that fails halfway has already
+    sent words to the client, and the interesting question is what the stream does
+    next -- not what it does when nothing happened at all. Pass no chunks for that
+    one.
+    """
+
+    def __init__(
+        self,
+        chunks: tuple[str, ...] = ("An answer.",),
+        error: Exception | None = None,
+        state: str = "ready",
+    ) -> None:
+        self.calls: list[list[dict[str, str]]] = []
+        self.loads = 0
+        self.state = state
+        self._chunks = chunks
+        self._error = error
+
+    def start_loading(self) -> None:
+        self.loads += 1
+
+    def stream(self, messages: list[dict[str, str]]):
+        self.calls.append(messages)
+
+        yield from self._chunks
+
+        if self._error is not None:
+            raise self._error
+
+    @property
+    def prompt(self) -> str:
+        """Every message of the last call, joined -- what the model was actually shown."""
+        return "\n".join(message["content"] for message in self.calls[-1])

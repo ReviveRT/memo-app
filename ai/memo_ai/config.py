@@ -22,6 +22,14 @@ worse outcome than either reading on its own:
 Every default here is repeated from docker-compose.yml rather than derived from
 it, the same way ``api/config/memo.php`` mirrors its own -- these values also
 have to be right under a bare ``docker run`` with no compose file in sight.
+
+**One Settings for two services**, as of MEMO-24. ``ai-worker`` and ``ai-api`` are
+the same image with different entrypoints, so they read the same environment and
+parse it the same way; splitting this into a worker half and an ask half would
+mean two files that both have to agree with docker-compose.yml about
+``DATABASE_URL`` and ``ENRICH_MODEL_PATH``. What each process actually *uses* is a
+subset, and that is a property of the entrypoint rather than of the environment --
+``ai-api`` never reads ``MAX_ATTEMPTS`` and the worker never reads ``ASK_TOP_K``.
 """
 
 import os
@@ -109,6 +117,57 @@ DEFAULT_ENRICH_PROVIDER = "local"
 # default here, so a bare `docker run` of an image built without changes still
 # finds its model.
 DEFAULT_ENRICH_MODEL_PATH = "/opt/models/llm/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+
+# --- Ask my memos (MEMO-24), read by ai-api and by nothing in the worker -----
+#
+# Where uvicorn listens is **deliberately not here**, and that is the one asymmetry
+# in this file worth explaining rather than fixing. memo_ai/ask/__main__.py holds
+# the host and the port as literals, on the same argument ai/Dockerfile makes about
+# MODEL_DIR: as a variable it would be a foot-gun with no failure mode. The port is
+# also written into docker-compose.yml's healthcheck and into `AI_API_URL`'s
+# default, so `ASK_PORT=9000` would move the listener and leave both of those
+# pointing at a closed socket -- a container that never reports healthy and a proxy
+# that 503s, neither of which names the variable that did it. To run this service
+# somewhere else, point `AI_API_URL` at it; that one *is* a variable.
+
+# How many memos are put in front of the model.
+#
+# Three, at the bottom of the task's own "3 to 5" range, and the reason is that
+# this is the one path in the stack a human waits on. Prompt processing dominates
+# CPU inference here -- MEMO-21 measured 36 s for 10,000 characters against 2.4 s
+# for 71 -- so the retrieved context *is* the latency, near enough linearly. Three
+# memos at ASK_MEMO_CHARS below is about 3,600 characters of evidence; five would be
+# 6,000 and would buy a second opinion nobody is still waiting for.
+#
+# It is a knob rather than a constant because the right answer depends on the
+# machine. On something faster than the laptop these numbers came from, five is
+# free. README.md says so next to the measurements.
+DEFAULT_ASK_TOP_K = 3
+
+# How much of one memo the model is shown.
+#
+# 1,200 characters, and the number is a budget rather than a preference: TOP_K
+# times this, plus the instructions and the answer, has to stay inside the context
+# the model is loaded with (memo_ai/ask/model.py sizes it from exactly these two).
+#
+# Well under MAX_TRANSCRIPT_CHARS on the enrichment side (10,000), and that
+# asymmetry is the point. Enrichment reads one memo and nobody is waiting; this
+# reads several and somebody is. What keeps 1,200 characters from being an
+# arbitrary cut is that the excerpt is chosen by `ts_headline` around the words the
+# question asked about, not taken off the front -- see memo_ai/ask/retrieval.py.
+DEFAULT_ASK_MEMO_CHARS = 1200
+
+# How long one answer may take before the question gives up on it.
+#
+# Three minutes, against a measured worst case well under it, and loose for the
+# same reason memo_ai/enrich/local.py's DEADLINE_SECONDS is loose: it exists to stop
+# a wedged generation holding the one model this service has, not to enforce a
+# latency target. A reviewer's laptop under load is several times slower than the
+# machine these numbers came from without being broken.
+#
+# What bounds the *felt* wait is not this: the answer streams, so the client sees
+# words as they are produced and can stop reading whenever it likes.
+DEFAULT_ASK_DEADLINE_SECONDS = 180.0
 
 # Ten minutes, mirroring docker-compose.yml and .env.example. Enforced in the
 # worker rather than at the API edge because it cannot be enforced there: the cap
@@ -230,6 +289,19 @@ class Settings:
     enrich_provider: str
     enrich_model_path: Path
 
+    # Ask my memos (MEMO-24). Read by ai-api alone -- the worker parses them and
+    # never looks at them, which is what one Settings for two entrypoints costs and
+    # is cheaper than two parsers disagreeing about DATABASE_URL.
+    #
+    # There is no `ask_model_path`: ai-api opens `enrich_model_path`, the same GGUF
+    # the worker enriches with. Two settings for one file would let a deployment
+    # point them at different models and then wonder why a summary and an answer
+    # about the same memo disagree. There is no `ask_host` or `ask_port` either --
+    # see the section above for why those are literals.
+    ask_top_k: int
+    ask_memo_chars: int
+    ask_deadline_seconds: float
+
     max_audio_seconds: float
     poll_seconds: float
 
@@ -279,6 +351,14 @@ class Settings:
             enrich_provider=_string(source, "ENRICH_PROVIDER", DEFAULT_ENRICH_PROVIDER),
             enrich_model_path=Path(
                 _string(source, "ENRICH_MODEL_PATH", DEFAULT_ENRICH_MODEL_PATH)
+            ),
+            # Positive ints for the same reason MAX_ATTEMPTS is one: `ASK_TOP_K=0`
+            # is not a narrow search, it is a service that retrieves nothing and
+            # answers "no memo mentions that" to every question ever asked.
+            ask_top_k=_positive_int(source, "ASK_TOP_K", DEFAULT_ASK_TOP_K),
+            ask_memo_chars=_positive_int(source, "ASK_MEMO_CHARS", DEFAULT_ASK_MEMO_CHARS),
+            ask_deadline_seconds=_positive_float(
+                source, "ASK_DEADLINE_SECONDS", DEFAULT_ASK_DEADLINE_SECONDS
             ),
             # Float rather than int, and refused at zero for the same reason the
             # poll interval is: `MAX_AUDIO_SECONDS=0` is not a strict cap, it is a
@@ -334,9 +414,11 @@ def _required(env: Mapping[str, str], key: str) -> str:
 
     if not value:
         # "Nothing here" rather than "the worker", which is what this said until
-        # MEMO-22 gave `Settings.from_env` a second caller. `python -m memo_ai.costs`
-        # prints the same sentence under its own prefix, and `memo-costs: ... the
-        # worker cannot start` sends the reader to look at the wrong container.
+        # `Settings.from_env` stopped having one caller. It now has three, from two
+        # tasks that landed together: `python -m memo_ai.costs` (MEMO-22) and
+        # `python -m memo_ai.ask` (MEMO-24) both print this sentence under their own
+        # prefix, and `ai-api: ... the worker cannot start` sends the reader to look
+        # at the wrong container.
         raise ConfigError(f"{key} is not set. Nothing in this package runs without a database.")
 
     return value

@@ -1,5 +1,6 @@
 <script setup>
 import { onMounted, onScopeDispose, ref } from 'vue'
+import AskPanel from '../components/AskPanel.vue'
 import CollectionDialog from '../components/CollectionDialog.vue'
 import CollectionGrid from '../components/CollectionGrid.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
@@ -187,6 +188,16 @@ onMounted(() => {
     <p v-if="hinting" class="notice" role="status">
       Still transcribing — a long recording can take a while.
     </p>
+
+    <!--
+      Below the two write paths and above the list, which is the order the screen is read in:
+      make a memo, ask about the memos, then browse them. Putting it first would place a
+      feature that needs memos to exist above the only two controls that create any.
+
+      `memos` is passed so a citation can open the card the strip is already holding -- see
+      AskPanel, and MemosView's `showMemo` for why it has to be that object and not a copy.
+    -->
+    <AskPanel :memos="memos" @open-memo="showMemo" />
 
     <!--
       No "+ Add fast memo" button here any more.
