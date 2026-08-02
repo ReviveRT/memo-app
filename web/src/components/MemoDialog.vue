@@ -839,7 +839,7 @@ async function removeReminder(reminderId) {
           </li>
         </ul>
 
-        <p v-else class="sheet__hint">Nothing set. Add an alarm or a timer below.</p>
+        <p v-else class="sheet__hint">Nothing set. Pick a time or a timer below.</p>
 
         <!--
           Both of the brief's controls -- an alarm at a wall-clock time, and a timer some
