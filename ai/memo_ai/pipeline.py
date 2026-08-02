@@ -279,12 +279,18 @@ def job_budget_seconds(max_audio_seconds: float, enricher: Enricher = NO_ENRICHM
     recording, and the 420s of enrichment below. The real numbers are two orders of
     magnitude smaller.
 
-    The STT terms come from the ``local`` provider, which is the only configured
-    provider that can spend real time: ``fake`` is instant, and the hosted adapter
-    was deliberately left unwritten (memo_ai/stt/unimplemented.py). Reading one
-    provider's constants from here is a bound, not a call path -- the abstraction
-    is still intact -- but a provider with a longer one belongs in this sum, and
-    that is the note whoever writes it needs.
+    The STT terms come from the ``local`` provider, and it is the *slowest* rather
+    than the only one that can spend real time: ``fake`` is instant, the hosted
+    OpenAI adapter was deliberately left unwritten (memo_ai/stt/unimplemented.py),
+    and ``groq`` bounds itself at ``REQUEST_TIMEOUT_SECONDS`` -- 120s against
+    local's 300s of model load plus a 2,400s decode deadline at the shipped cap.
+    So the local terms are a true upper bound over every configured provider, and
+    a stack on ``STT_PROVIDER=groq`` simply has more headroom than it needs.
+
+    Reading one provider's constants from here is a bound, not a call path -- the
+    abstraction is still intact -- but a provider *slower* than ``local`` would
+    belong in this sum, and that is the note whoever writes one needs. ``groq`` did
+    not need it; something with a longer deadline would.
 
     **The retry backoff is deliberately not in this sum**, which is worth saying
     because the task that specified the lease phrased it as "``MAX_AUDIO_SECONDS``

@@ -151,6 +151,30 @@ LOCAL_TOKEN_RATE = TokenRate(
 # and this table is what lets the decision be priced without reversing it.
 STT_RATES: dict[str, AudioRate] = {
     "local": LOCAL_AUDIO_RATE,
+    # The one entry here that is not hypothetical: `STT_PROVIDER=groq` is
+    # implemented (memo_ai/stt/groq.py), so a projection against this rate is
+    # pricing a path somebody can actually run today.
+    #
+    # $0.04 per audio-hour, which is $0.000667 a minute -- an order of magnitude
+    # under whisper-1 for the same weights. **Billed at a 10-second minimum per
+    # request**, which this rate does not model and which matters at this app's
+    # shape: a 4-second memo is charged as 10, so a corpus of very short memos
+    # costs more than `sum(duration_ms)` implies. The projection is therefore a
+    # floor rather than an estimate for short recordings, and the report says as
+    # much rather than silently rounding.
+    #
+    # Free tier at the checked date: 2,000 requests and 28,800 audio-seconds a day,
+    # 20 requests a minute -- eight hours of audio daily at no charge, which is
+    # more than this app generates. That is a $0.00 bill, not a $0.00 rate, so it
+    # is a README sentence rather than an entry here.
+    "groq-whisper-large-v3-turbo": AudioRate(
+        usd_per_audio_minute=0.04 / 60,
+        source=f"Groq list price, $0.04/audio-hour, 10s minimum, checked {RATES_CHECKED}",
+    ),
+    "groq-whisper-large-v3": AudioRate(
+        usd_per_audio_minute=0.111 / 60,
+        source=f"Groq list price, $0.111/audio-hour, 10s minimum, checked {RATES_CHECKED}",
+    ),
     "whisper-1": AudioRate(
         usd_per_audio_minute=0.006,
         source=f"OpenAI list price, ${0.006:.3f}/minute, checked {RATES_CHECKED}",

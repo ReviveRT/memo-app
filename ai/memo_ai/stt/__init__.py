@@ -9,23 +9,33 @@ rejected at boot with "unknown provider" while the repo's own documentation
 recommends it -- which is why `openai` is registered as
 :class:`~memo_ai.stt.unimplemented.UnimplementedStt` rather than left out.
 
-Two of the three names are real as of MEMO-14, which is the point of the seam
-rather than a milestone: `local` and `fake` are both implemented, both tested and
-both exercised by the same pipeline, so the interface is proven by use instead of
+Three of the four names are real, which is the point of the seam rather than a
+milestone: `local`, `fake` and `groq` are all implemented, all tested and all
+exercised by the same pipeline, so the interface is proven by use instead of
 asserted by having only one shape pass through it. `openai` is the one left
 undone, on purpose -- see unimplemented.py.
+
+**`groq` is the hosted provider that seam was always for**, and it arrives without
+displacing anything: `local` remains the default in docker-compose.yml, in
+.env.example and here, because it is the one that needs no key and no network, and
+a clean `docker compose up` must keep working with neither. What `groq` adds is a
+faster option for somebody who has a key and has read what leaving the machine
+means -- memo_ai/stt/groq.py states it, and README.md states it where a person
+choosing a provider will see it.
 """
 
 from memo_ai.config import ConfigError, Settings
 from memo_ai.stt.base import SttError, SttProvider, SttUnavailable, Transcript
 from memo_ai.stt.chain import FallbackStt
 from memo_ai.stt.fake import FakeStt
+from memo_ai.stt.groq import GroqStt
 from memo_ai.stt.local import LocalWhisperStt
 from memo_ai.stt.unimplemented import UnimplementedStt
 
 __all__ = [
     "PROVIDER_NAMES",
     "FallbackStt",
+    "GroqStt",
     "SttError",
     "SttProvider",
     "SttUnavailable",
@@ -47,7 +57,7 @@ _UNIMPLEMENTED = {
     "openai": "the hosted adapter was deliberately left unwritten",
 }
 
-PROVIDER_NAMES = frozenset({FakeStt.name, LocalWhisperStt.name, *_UNIMPLEMENTED})
+PROVIDER_NAMES = frozenset({FakeStt.name, GroqStt.name, LocalWhisperStt.name, *_UNIMPLEMENTED})
 
 
 def resolve(name: str, settings: Settings) -> SttProvider:
@@ -64,6 +74,14 @@ def resolve(name: str, settings: Settings) -> SttProvider:
 
     if name == LocalWhisperStt.name:
         return LocalWhisperStt(settings.stt_model, settings.stt_language)
+
+    if name == GroqStt.name:
+        # Built with whatever `GROQ_API_KEY` held, including nothing. A missing key
+        # is a failed voice memo with a sentence naming the variable, never a failed
+        # boot -- the rule UnimplementedStt set, and the one that keeps
+        # `restart: unless-stopped` from turning a forgotten key into a loop that
+        # also stops text memos. memo_ai/stt/groq.py has it at the class.
+        return GroqStt(settings.groq_api_key, settings.groq_stt_model)
 
     if name in _UNIMPLEMENTED:
         return UnimplementedStt(name, because=_UNIMPLEMENTED[name])

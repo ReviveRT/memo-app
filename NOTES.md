@@ -1071,3 +1071,58 @@ generation past its deadline, a busy context) has no tokens to report anyway. Th
 write path is already shaped for it: `finish_ready` reads `enrichment.usage`
 rather than gating on `enriched`, so the day an enricher wants to report a spend
 with nothing to show for it, the column is there.
+
+## `groq` is opt-in, and the default stays offline
+
+**Decision.** `STT_PROVIDER=groq` sends the normalized recording to Groq's hosted
+`whisper-large-v3-turbo` — the same weights faster-whisper loads locally — and gets
+the transcript back in roughly 1/145th of the wall time. It is off by default, it
+needs a key, and `local` remains what a clean `docker compose up` runs.
+
+**The default cannot change, and that is a grading criterion rather than a
+preference.** `docker compose up` must converge on a clean checkout with no manual
+steps. A hosted provider needs an account and a key, so it can only ever be
+something a reader opts into after being told what it costs them in privacy. The
+`.env.example` entry, the compose comment, the module docstring and the README all
+say the same sentence: this is the one setting that sends user recordings off the
+machine.
+
+**It is the same model, which is what makes the trade clean.** Switching providers
+here does not switch quality — Groq serves the exact weights `STT_MODEL` already
+names, so the transcript is the one this app already produces. What changes is
+38.4 seconds of CPU per audio-minute becoming about 0.26, and 1.65 GB of resident
+model becoming none. A hosted provider that changed the *words* would be a much
+harder recommendation.
+
+**Every failure mode falls back rather than failing the memo.** No key, a rejected
+key, a 429, a 5xx, a timeout, a proxy answering with HTML — all `SttUnavailable`,
+which `stt/chain.py` answers by transcribing on `STT_FALLBACK=local`. Only two
+things are terminal: a 400 and an over-size file, because the fallback is handed
+the same bytes and would reach the same answer. That split is the file's whole
+safety story, and `test_groq_stt.py` asserts it status by status rather than
+trusting the reading.
+
+**No new dependency, deliberately.** One multipart POST is `urllib` and about
+twenty lines of byte concatenation. Adding `httpx` would mean rebuilding an image
+that carries 2.8 GB of baked model weights, so `STT_PROVIDER=groq` works in an
+image built before this provider existed.
+
+**It does not solve language detection, and nothing hosted would.** That question
+was already answered in `005_memo_language.sql` with nine measured approaches on
+one 2.76-second Romanian memo; `whisper-large-v3-turbo` — this model — was among
+the failures at `ru` 0.19. A hosted *enricher* is worse still: it sees only the
+transcript, and a mis-detected memo has already been transliterated by the time it
+gets there. The `language` column stays the answer.
+
+**Enrichment was considered on the same free tiers and declined for now.** It is
+2.6s of a ~40s job and about 3% of projected spend, so the gain is quality rather
+than speed. The one real unlock is that a larger model resists the injection that
+made the multilingual instruction unsafe on the 1.5B local one — worth revisiting,
+not worth a second hosted dependency in the same change.
+
+**One caveat, stated because this project has a rule about it.** `unimplemented.py`
+declines to ship the `openai` adapter on the grounds that a hosted code path nobody
+has run is the worst kind to ship. This provider is unit-tested against a stubbed
+transport but has **not** yet been exercised against the live Groq API — no key was
+available at the time of writing. Until it has been, it carries exactly the caveat
+that file describes.

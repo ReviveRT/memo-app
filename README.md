@@ -733,13 +733,14 @@ was declined for now because it costs an extra alignment pass on every memo, and
 because the primer above is already proof that perturbing the decode options can
 break something else.
 
-Two other providers exist behind the same interface:
+Three other providers exist behind the same interface:
 
-| `STT_PROVIDER` | What happens |
-| --- | --- |
-| `local` _(default)_ | faster-whisper, as above |
-| `fake` | A fixed canned sentence, instantly. Useful for watching the queue work without waiting on a model |
-| `openai` | Recognised, deliberately **not built**. See below |
+| `STT_PROVIDER` | What happens | Leaves your machine? |
+| --- | --- | --- |
+| `local` _(default)_ | faster-whisper, as above | **No** |
+| `fake` | A fixed canned sentence, instantly. Useful for watching the queue work without waiting on a model | **No** |
+| `groq` | The **same whisper model**, run on Groq's hardware. ~145× faster. Needs a free key | **Yes — see below** |
+| `openai` | Recognised, deliberately **not built**. See below | — |
 
 ```bash
 STT_PROVIDER=fake docker compose up
@@ -751,14 +752,56 @@ simply produced no words, because both providers are handed the same normalized
 audio and the second would reach the same answer more slowly. With the shipped
 defaults the two are equal and there is no chain at all.
 
-### Why there is no hosted provider
+### `groq` — the same model, ~145× faster
+
+> ### ⚠️ Setting `STT_PROVIDER=groq` uploads your recordings to a third party
+>
+> This is the only setting in this project that sends user data off your machine.
+> Everything else — transcription, enrichment, search — runs in the container with
+> no key and no network. Groq's free tier, like most free tiers, reserves broader
+> rights over submitted data than its paid tiers do.
+>
+> **Do not turn this on for recordings you would not hand to a stranger.** `local`
+> is the default so that this is a decision you make, never one you inherit.
+
+With that said, the trade is unusually clean, because **it is the same model**.
+Groq serves `whisper-large-v3-turbo` — the identical weights faster-whisper loads
+locally — so the transcript does not change. Only the clock does:
+
+| | `local` | `groq` |
+| --- | --- | --- |
+| Rate | 38.4s of CPU per audio-minute | ~220× realtime |
+| A 9m12s memo | **361 seconds** | **~2.4 seconds** |
+| Worker RSS | +1.65 GB for the model | unchanged |
+| Cost | $0 | $0 on the free tier — 2,000 recordings and 8 hours of audio a day |
+
+```bash
+GROQ_API_KEY=gsk_... STT_PROVIDER=groq docker compose up
+```
+
+Get a key at [console.groq.com](https://console.groq.com) — no card required.
+
+**Failures fall back rather than lose the memo.** No key, a rate limit, a 500, a
+timeout — all of them report the provider unavailable, and `STT_FALLBACK=local`
+(the shipped default) transcribes on your machine instead. `memos.stt_provider`
+records whichever one actually produced the words, so a run that silently fell
+back is visible in the data rather than only in the logs.
+
+**What it does not fix is language detection**, which is the first thing people
+ask. See [the language override](#telling-it-what-language-you-are-speaking):
+nine detection approaches were measured on one 2.76-second Romanian memo and none
+returned `ro` — including `whisper-large-v3-turbo`, which answered `ru` at 0.19.
+Hosting that model changes where it runs, not what it knows.
+
+### Why there is still no `openai` provider
 
 `openai` is a name the configuration accepts and nothing implements, and that is a
 decision rather than an unfinished edge. Writing an adapter against an API this
 project has never called would mean shipping a code path nobody has run, in the
 one place where "it looks right" and "it works" are hardest to tell apart. What
-proves the seam instead is that two providers really do go through it — `local`
-and `fake` — with different formats, different failure modes and different costs.
+proves the seam instead is that three providers really do go through it — `local`,
+`fake` and `groq` — with different formats, different failure modes and different
+costs.
 
 Setting it is not a dead end: `openai` reports itself unavailable, the worker logs
 that it was skipped, and `STT_FALLBACK` transcribes the memo. The row records the

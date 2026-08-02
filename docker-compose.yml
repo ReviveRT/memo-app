@@ -295,6 +295,21 @@ services:
       # — so naming the language now saves only ~0.2s. Set it to remove the
       # chance of a wrong guess, not for the speed.
       STT_LANGUAGE: ${STT_LANGUAGE:-}
+      # Only read when STT_PROVIDER (or STT_FALLBACK) is `groq`, which is not the
+      # default — so on a clean checkout this passes an empty string into a
+      # container that never looks at it, and `docker compose up` still needs no
+      # key and no account.
+      #
+      # `${VAR:-}` rather than leaving the line out, so that setting it in a `.env`
+      # is all it takes. memo_ai/config.py reads an empty string as an absence,
+      # which is what makes the unset case reach the worker as "no key" rather than
+      # as a key of zero characters that Groq would answer with a 401.
+      #
+      # **Setting this and STT_PROVIDER=groq uploads recordings to a third party.**
+      # .env.example says so at the variable; README.md says so where somebody
+      # picks a provider.
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_STT_MODEL: ${GROQ_STT_MODEL:-whisper-large-v3-turbo}
       # The enrichment pass — title, summary, tags, category (MEMO-21).
       #
       # `local` runs Qwen2.5-1.5B-Instruct in the worker process from the GGUF
