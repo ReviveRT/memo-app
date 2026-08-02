@@ -52,6 +52,7 @@ TRANSCRIPTION_ROW = {
 
 ENRICHMENT_ROW = {
     "memos": 1_000,
+    "counted": 1_000,
     "median_seconds": 13.2,
     "p95_seconds": 36.2,
     "median_tokens_per_second": 69.0,
@@ -164,11 +165,28 @@ def test_the_audio_sum_excludes_memos_that_were_never_transcribed():
     # `duration_ms` is written on failure paths too -- a memo refused as too long
     # carries its length so the UI can show it -- and a hosted provider is not paid
     # for a request that was never made. Without this filter the projection
-    # over-states by exactly the memos this stack declined to send.
+    # over-states by exactly the memos this stack declined to send. On the mixed set
+    # this was verified against, that was 27.6 audio-minutes against a true 12.6.
     assert "sum(duration_ms) FILTER (WHERE transcript IS NOT NULL)" in costs.SPEND
 
 
-def test_the_latency_query_cannot_divide_by_zero():
+def test_an_enriched_memo_is_counted_by_its_provider_not_by_its_tokens():
+    # A binding that reports no usage still ran and still billed, so counting on a
+    # token column undercounts the enrichments -- verified against Postgres, where a
+    # pair of timed memos with NULL counts reported `enriched 0`.
+    assert "count(*) FILTER (WHERE enrich_provider IS NOT NULL)" in costs.SPEND
+
+
+def test_the_throughput_median_skips_runs_that_reported_no_tokens():
+    # The correction that matters most in this file. Coalescing the counts to zero
+    # put "not measured" into the median as the slowest possible measurement:
+    # against Postgres, two reporting rows at 300 and 100 tokens/s beside two
+    # non-reporting ones gave 50 tokens/s where the truth is 200.
+    assert "FILTER (WHERE enrich_input_tokens IS NOT NULL" in costs.ENRICHMENT_LATENCY
+    assert "coalesce(enrich_input_tokens" not in costs.ENRICHMENT_LATENCY
+
+
+def test_the_latency_queries_cannot_divide_by_zero():
     # `duration_ms` is the divisor. Nothing produces a zero-length recording today
     # -- memo_ai/audio.py refuses a file with no audio stream first -- and a
     # division by zero in a report only ever shows up in front of somebody.
@@ -282,14 +300,90 @@ def test_the_median_inference_rate_is_reported_in_both_units():
     assert "p95 71.2s per audio-minute" in text
 
 
-def test_the_footer_says_where_the_memory_numbers_are():
-    # RAM is the other half of "what does this design actually cost", and it is a
-    # property of a process rather than of a row -- so it is logged rather than
-    # persisted, and this is the pointer to it.
+def test_the_cumulative_inference_time_is_reported_in_a_readable_unit():
+    # Both totals used to be selected and never printed. They are the figure that
+    # is about the machine rather than about a memo, and 13,056 seconds is not a
+    # number anybody converts in their head.
     text = rendered()
 
-    assert "resident memory" in text
-    assert "docker compose logs ai-worker" in text
+    assert "total 3.6 hours of inference" in text
+
+
+@pytest.mark.parametrize(
+    ("seconds", "expected"),
+    [
+        (0.0, "0.0s of inference"),
+        (12.8, "12.8s of inference"),
+        (59.9, "59.9s of inference"),
+        (60.0, "1.0 minutes of inference"),
+        (3_599.0, "60.0 minutes of inference"),
+        (3_600.0, "1.0 hours of inference"),
+        (None, "not measured"),
+    ],
+)
+def test_a_total_picks_the_unit_that_keeps_it_readable(seconds, expected):
+    assert costs._duration(seconds) == expected
+
+
+def test_a_set_where_nothing_reported_tokens_prints_no_throughput():
+    # And does not crash, which is the failure this branch exists for: with the
+    # coalesce removed, `median_tokens_per_second` is NULL for such a set, and
+    # `f"{None:,.0f}"` is a TypeError in the middle of printing the report.
+    quiet = ENRICHMENT_ROW | {"counted": 0, "median_tokens_per_second": None}
+    text = rendered(enrichment=quiet)
+
+    assert "median 13.2s\n" in text
+    assert "tokens/s" not in text
+
+
+def test_the_footer_points_at_the_workers_rather_than_sampling_this_process():
+    # RAM belongs to a process, and the only one this command can read is its own
+    # -- a bare `python -m memo_ai.costs`, about 35 MB. Printing that under a
+    # heading about what the design costs invited exactly one misreading: that a
+    # worker holding two models costs 35 MB. So there is no live number here.
+    text = rendered()
+
+    assert "resident memory per worker, in the worker's own log" in text
+    assert "docker compose logs ai-worker | grep rss" in text
+    assert "35 MB" not in text
+
+
+def test_render_reads_nothing_but_its_report():
+    # The docstring on `render` claims it is a function of the Report and nothing
+    # else, and it was not: it called `rss.describe()` itself, so its output
+    # depended on the machine printing it. Two identical reports must render
+    # identically.
+    assert costs.render(report()) == costs.render(report())
+
+
+# ---------------------------------------------------------------------------
+# The column, and the arguments
+# ---------------------------------------------------------------------------
+
+
+def test_a_label_wider_than_the_column_keeps_a_space_before_its_value():
+    # `_LABEL_WIDTH` is sized for a thousand memos and the label grows with the
+    # count, so a plain ljust welds the number onto the word at a million:
+    # `total for these 1,000,000 memos$2.0000`.
+    line = costs._row("total for these 1,000,000 memos", "$2.0000")
+
+    assert line == "  total for these 1,000,000 memos $2.0000"
+
+
+def test_values_line_up_in_one_column_whatever_the_indent():
+    # The only formatting a `docker compose run` log preserves.
+    assert costs._row("memos", "10").index("10") == costs._row("p95", "39.2s", indent=4).index(
+        "39.2s"
+    )
+
+
+@pytest.mark.parametrize("bad", ["0", "-5", "abc", "1.5"])
+def test_a_nonsensical_per_is_refused_rather_than_printed(bad):
+    # Neither degenerate value fails loudly on its own: `--per 0` prints a
+    # projection of $0.0000, which reads as "this is free", and a negative one
+    # prints negative money.
+    with pytest.raises(SystemExit):
+        costs.main(["--per", bad])
 
 
 def test_the_rate_table_prints_without_a_database():

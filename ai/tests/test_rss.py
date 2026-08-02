@@ -67,6 +67,23 @@ def test_the_description_leads_with_the_shared_figure(proc):
     assert rss.describe() == "1,708 MB (1,081 MB shared, 627 MB private)"
 
 
+def test_the_cheap_reading_does_not_touch_smaps_at_all(proc):
+    # The one that matters for the per-memo log line. `smaps_rollup` is 10.8 ms on a
+    # loaded worker against `status`'s 0.042 ms, because it walks the page tables --
+    # and a logging argument is evaluated whether or not the line is emitted. An
+    # unreadable smaps must therefore not even be opened here.
+    proc.joinpath("smaps_rollup").write_text("this would not parse")
+
+    assert rss.brief() == "1,708 MB"
+    assert rss.read(split=False).shared_kb is None
+
+
+def test_the_cheap_reading_still_says_so_when_there_is_no_proc(tmp_path, monkeypatch):
+    monkeypatch.setattr(rss, "_STATUS", tmp_path / "nothing-here")
+
+    assert rss.brief() == "unavailable (no /proc on this platform)"
+
+
 def test_a_kernel_without_smaps_rollup_still_reports_a_total(proc):
     # `smaps_rollup` arrived in Linux 4.14. Without it the total is still true and
     # the split is simply unavailable, which is a smaller loss than no reading.

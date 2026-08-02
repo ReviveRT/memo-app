@@ -75,6 +75,12 @@ def main() -> int:
     # lazily, so this line is the 18 MB an idle worker costs, and every later `rss=`
     # on a ready memo is measured against it. Without the baseline in the same log,
     # "1,708 MB" is a number with nothing to compare it to.
+    #
+    # `describe` and not `brief`, which is the one place the shared/private split is
+    # worth its page-table walk: this process is 18 MB, so the walk is free here and
+    # costs 10.8 ms once the models are in. The split does not change per memo, so
+    # stating it once at boot is all any reader needs -- memo_ai/rss.py has both
+    # measurements and memo_ai/pipeline.py takes the cheap reading thereafter.
     logger.info(
         "ai-worker starting: stt_provider=%s stt_fallback=%s stt_model=%s stt_language=%s "
         "enrich_provider=%s audio_dir=%s max_audio=%.0fs poll=%.1fs attempts=%d "

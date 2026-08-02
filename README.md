@@ -888,9 +888,17 @@ Local inference, which is what this design actually costs
   transcription               6 recordings, 12.4 minutes of audio
     median                    38.4s of inference per audio-minute (0.64x realtime)
     p95                       39.2s per audio-minute
+    total                     8.0 minutes of inference
   enrichment                  8 memos
     median                    2.6s (210 tokens/s)
     p95                       28.1s
+    total                     1.1 minutes of inference
+
+  resident memory             per worker, in the worker's own log
+    both models load lazily, so the figure moves: an idle replica is 18 MB
+    and one holding whisper and the enricher is about 1,708 MB, of which
+    1,081 MB is the mmap-ed weights and is shared with the other replica.
+    `docker compose logs ai-worker | grep rss`
 ```
 
 Ten memos there, deliberately mixed: short and long recordings, two text memos
@@ -961,13 +969,23 @@ last block is the first: **seconds of inference per minute of audio**, median an
 p95, measured over whatever this stack has actually processed. Both timings
 exclude the model load, so a first memo after a boot does not become an outlier.
 
-Memory is the second, and it belongs to the process rather than to any row, so it
-is logged instead of stored — at boot, before either model has loaded, and again
-on every memo published:
+Memory is the second, and it belongs to a *process* rather than to any row — so
+it is logged by the workers rather than stored on a memo, and the report prints no
+live figure for it at all. The only resident set `memo_ai.costs` can read is its
+own, which is a bare Python process of about 35 MB; printing that under a heading
+about what the design costs would only invite the reading that a worker holding
+two models costs 35 MB.
 
 ```bash
 docker compose logs ai-worker | grep rss
 ```
+
+Each replica states the full shared/private split once at boot, before either
+model has loaded, and the running total on every memo it publishes. The split is
+logged once rather than every time because producing it means walking the
+process's page tables: measured in this image, `/proc/self/smaps_rollup` costs
+10.8 ms on a process holding 1.5 GB against `/proc/self/status`'s 0.042 ms, and it
+does not change from memo to memo.
 
 The split matters more than the total: both models are `mmap`-ed read-only, so
 most of a replica's resident set is shared with the other one. [What it costs to

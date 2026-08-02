@@ -307,7 +307,11 @@ def _required(env: Mapping[str, str], key: str) -> str:
     value = env.get(key)
 
     if not value:
-        raise ConfigError(f"{key} is not set. The worker cannot start without a database.")
+        # "Nothing here" rather than "the worker", which is what this said until
+        # MEMO-22 gave `Settings.from_env` a second caller. `python -m memo_ai.costs`
+        # prints the same sentence under its own prefix, and `memo-costs: ... the
+        # worker cannot start` sends the reader to look at the wrong container.
+        raise ConfigError(f"{key} is not set. Nothing in this package runs without a database.")
 
     return value
 

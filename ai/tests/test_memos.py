@@ -414,6 +414,12 @@ def test_usage_is_recorded_even_when_the_enrichment_produced_nothing_usable():
     # separates the two: a generation that spent 900 tokens and came back with no
     # field worth keeping still spent them. `enriched_at` stays unstamped and the
     # accounting columns are written anyway.
+    #
+    # A test of this method's contract rather than of a path the shipped enricher
+    # takes -- `LocalLlmEnricher` raises on an unusable answer, so it arrives here
+    # as `enrichment=None`. What is pinned is that the gate is `enrichment.usage`
+    # and not `enriched`, which is what a hosted enricher would need in order to
+    # record a response it was billed for and could not use.
     connection = FakeConnection(rowcount=1)
     spent = Enrichment(usage=Usage(provider="local", input_tokens=812, output_tokens=97))
 

@@ -766,9 +766,14 @@ class MemoQueue:
         # the reason `stt_provider` is: what was *configured* and what actually ran
         # are different questions, and only the enricher that ran can answer the
         # second. `NoEnrichment` returns None and so contributes five NULLs, which
-        # is the accurate description of a memo nothing enriched -- note that this
-        # is read from `enrichment` and not from `enriched`, so a run that spent
-        # tokens and produced nothing usable still records what it spent.
+        # is the accurate description of a memo nothing enriched.
+        #
+        # Read from `enrichment` rather than gated on `enriched`, so an enricher
+        # that reports what it spent and produces nothing worth showing still has
+        # its spend recorded. That is this method's half of the contract; whether
+        # any enricher takes it up is theirs, and the shipped one does not -- it
+        # raises instead, which arrives here as `enrichment=None` beside a
+        # complaint. NOTES.md states the gap.
         usage = None if enrichment is None else enrichment.usage
 
         return self._fenced(

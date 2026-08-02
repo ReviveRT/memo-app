@@ -135,8 +135,15 @@ class Enrichment:
         ``usage`` is deliberately not consulted. A generation that spent 900 tokens
         and produced no usable field is exactly the case this method has to call
         empty -- the memo has no title, no summary and no tags, whatever it cost to
-        find that out. The usage is still written to the row, because it was still
-        spent.
+        find that out -- and ``memo_ai/memos.py`` writes the accounting columns off
+        ``usage`` rather than off this answer, so such a run is still recorded.
+
+        That combination is reachable through the contract and **not** through the
+        enricher this project ships: :class:`~memo_ai.enrich.local.LocalLlmEnricher`
+        raises rather than returning an empty result, so its unusable answers reach
+        the row as an ``enrichment_error`` with no usage beside it. See NOTES.md,
+        which states that gap and why it is not worth closing while every
+        generation here is free.
         """
         return not (self.title or self.summary or self.tags or self.category)
 

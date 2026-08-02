@@ -21,6 +21,17 @@ the total would say two enriching replicas cost 3.4 GB when the measured figure
 is about 2.3 GB, and that is the difference between "this needs a big machine"
 and "this runs on a laptop". ``smaps_rollup`` is what tells the two apart.
 
+**The split costs 250 times what the total does, so the two are separate calls.**
+Measured inside this image on a process holding 1.5 GB, which is roughly a loaded
+worker: ``/proc/self/status`` answers in 0.042 ms because ``VmRSS`` is a counter
+the kernel already maintains, while ``/proc/self/smaps_rollup`` takes **10.8 ms**
+because it walks the process's page tables to produce it -- and that number grows
+with resident memory, so it is worst exactly on the worker that most wants
+measuring. :func:`brief` therefore reads the counter and :func:`describe` does the
+walk, and the caller picks: the worker states the full split once at boot, when it
+is holding 18 MB and the walk is free, and reports the cheap total on every memo
+after that.
+
 Everything here degrades to ``None`` off Linux rather than raising. The tests run
 on macOS, where there is no ``/proc`` at all, and a memory reading is a nice-to-
 have on a line whose real content is that a memo is ready.
@@ -83,9 +94,14 @@ class Memory:
         )
 
 
-def read() -> Memory | None:
+def read(split: bool = True) -> Memory | None:
     """
     This process's resident set, or ``None`` where the kernel will not say.
+
+    ``split=False`` skips ``smaps_rollup`` entirely and returns the total alone.
+    That is not a micro-optimisation: the walk is 10.8 ms against the counter's
+    0.042 ms on a loaded worker, and it is the difference between a per-memo log
+    line that is free and one that is not. The module docstring has the numbers.
 
     ``None`` rather than a zero or a raise. Zero would be a lie that averages into
     something, and raising would mean every caller wrapping a diagnostic in a
@@ -97,6 +113,9 @@ def read() -> Memory | None:
     if rss_kb is None:
         return None
 
+    if not split:
+        return Memory(rss_kb=rss_kb)
+
     shared = _sum_of(_SMAPS_ROLLUP, ("Shared_Clean:", "Shared_Dirty:"))
     private = _sum_of(_SMAPS_ROLLUP, ("Private_Clean:", "Private_Dirty:"))
 
@@ -104,9 +123,21 @@ def read() -> Memory | None:
 
 
 def describe() -> str:
-    """The reading as a phrase, including the phrase for "there is no reading"."""
-    memory = read()
+    """
+    The full reading as a phrase, split included. Pays for the page-table walk.
 
+    For the places a reading is taken once -- the worker's boot line, a shell.
+    :func:`brief` is what belongs on anything per-memo.
+    """
+    return _phrase(read())
+
+
+def brief() -> str:
+    """The total alone, cheap enough for a line that runs on every memo."""
+    return _phrase(read(split=False))
+
+
+def _phrase(memory: "Memory | None") -> str:
     return "unavailable (no /proc on this platform)" if memory is None else memory.describe()
 
 

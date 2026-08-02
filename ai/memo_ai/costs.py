@@ -38,15 +38,20 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
+import psycopg
 from psycopg.rows import dict_row
 
-from memo_ai import db, rates, rss
+from memo_ai import db, rates
 from memo_ai.config import ConfigError, Settings
 
-# Exit code for a bad `--stt-model`, matching the worker's for a bad variable.
-# Distinct from 1 so a script can tell "you asked for a model I have no rate for"
-# from "the database was not there".
+# Exit code for a bad `--stt-model` or a missing DATABASE_URL, matching the
+# worker's for a bad variable.
 EXIT_MISUSED = 2
+
+# And for a database that is not there, which is a different thing entirely: the
+# command was right and the stack is down. Distinct so that a script wrapping this
+# can retry one and not the other.
+EXIT_UNAVAILABLE = 3
 
 # ---------------------------------------------------------------------------
 # The statements
@@ -82,7 +87,15 @@ SPEND = """
         count(*) FILTER (WHERE transcript IS NOT NULL)      AS transcribed,
         count(*) FILTER (WHERE duration_ms IS NOT NULL
                            AND transcript IS NOT NULL)      AS recordings,
-        count(*) FILTER (WHERE enrich_output_tokens > 0)    AS enrichments,
+
+        -- `enrich_provider IS NOT NULL` is "an enricher ran on this memo", which is
+        -- the question a cost report asks -- not `enriched_at IS NOT NULL`, which is
+        -- "it produced something worth showing", and not a token count, which is the
+        -- first version of this line and was wrong twice over. A binding that reports
+        -- no usage still ran and still billed; and `> 0` on a nullable column is NULL
+        -- for every memo nothing enriched, which `count(*) FILTER` reads as false and
+        -- so happens to give the right answer for the wrong reason.
+        count(*) FILTER (WHERE enrich_provider IS NOT NULL) AS enrichments,
 
         -- Rounded to the millisecond as stored, then divided once, so the shortest
         -- and longest memo in the set are visible beside the total they average to.
@@ -162,17 +175,30 @@ TRANSCRIPTION_LATENCY = """
 # alone. It is included because it costs one more statement and because the
 # enrichment pass is the half of this pipeline whose latency a reviewer actually
 # notices -- the transcript is already on screen by the time it runs.
+#
+# **The throughput is FILTERed to rows that reported tokens, and that is a
+# correction rather than a refinement.** The first version coalesced the two counts
+# to zero, so a memo timed by an enricher whose binding reports no usage entered the
+# median as *0 tokens per second* -- a row that means "not measured" arriving as the
+# slowest possible measurement, and dragging down the one figure that is supposed to
+# transfer to another machine. NULL from the coalesce would have been no better,
+# because a set where nothing reported usage would then hand `render` a None to
+# format. The filter states the intent: this median is over the runs that can
+# answer, and `memos` above says how many there were in total.
 ENRICHMENT_LATENCY = """
     SELECT
         count(*)                                            AS memos,
+        count(*) FILTER (WHERE enrich_input_tokens IS NOT NULL
+                           AND enrich_output_tokens IS NOT NULL)
+                                                            AS counted,
         percentile_cont(0.5) WITHIN GROUP (ORDER BY enrich_ms / 1000.0)
                                                             AS median_seconds,
         percentile_cont(0.95) WITHIN GROUP (ORDER BY enrich_ms / 1000.0)
                                                             AS p95_seconds,
         percentile_cont(0.5) WITHIN GROUP (
-            ORDER BY (coalesce(enrich_input_tokens, 0) + coalesce(enrich_output_tokens, 0))
-                     * 1000.0 / enrich_ms
-        )                                                   AS median_tokens_per_second,
+            ORDER BY (enrich_input_tokens + enrich_output_tokens) * 1000.0 / enrich_ms
+        ) FILTER (WHERE enrich_input_tokens IS NOT NULL
+                    AND enrich_output_tokens IS NOT NULL)   AS median_tokens_per_second,
         sum(enrich_ms) / 1000.0                             AS inference_seconds
     FROM memos
     WHERE enrich_ms > 0
@@ -306,11 +332,21 @@ def render(report: Report) -> str:
 
     lines += ["", "Local inference, which is what this design actually costs", ""]
     lines += _latency(report)
+
+    # Memory is the other half of that sentence and this report deliberately prints
+    # no number for it, which is a correction rather than an omission. The figure it
+    # can reach is *this* process's -- a bare `python -m memo_ai.costs`, about 35 MB
+    # -- and printing that under a heading about what the design costs invites
+    # exactly one misreading: that a worker holding two models costs 35 MB. RSS
+    # belongs to a process, the workers are other containers, and there is no
+    # channel from here to theirs. So this points at the place the real numbers are.
     lines += [
         "",
-        _row("resident memory", rss.describe()),
-        "    per worker process, read now from this one. The ai-worker replicas log",
-        "    their own on every memo -- `docker compose logs ai-worker | grep rss`.",
+        _row("resident memory", "per worker, in the worker's own log"),
+        "    both models load lazily, so the figure moves: an idle replica is 18 MB",
+        "    and one holding whisper and the enricher is about 1,708 MB, of which",
+        "    1,081 MB is the mmap-ed weights and is shared with the other replica.",
+        "    `docker compose logs ai-worker | grep rss`",
     ]
 
     return "\n".join(lines) + "\n"
@@ -318,9 +354,9 @@ def render(report: Report) -> str:
 
 # How wide the label column is, measured from the left margin rather than from the
 # indent -- so a line indented four spaces gets a label four characters narrower
-# and its value still lands in the same column as everything above it. The longest
-# label in the report is `total for these 1,000 memos`, and the width is that plus
-# a gap.
+# and its value still lands in the same column as everything above it. Sized for
+# `total for these 1,000 memos` plus a gap, which is the longest label the report
+# produces at a plausible number of memos.
 _LABEL_WIDTH = 30
 
 
@@ -329,11 +365,20 @@ def _row(label: str, value: str, indent: int = 2) -> str:
     One ``label   value`` line, with the values in a column a reader can scan.
 
     Every figure in this report is a value in that column, which is the only
-    formatting a ``docker compose run`` log preserves. A label longer than the
-    width pushes its own value right rather than being truncated -- a number
-    nobody can read is worse than a line that does not line up.
+    formatting a ``docker compose run`` log preserves.
+
+    **A label wider than the column pushes its own value right rather than being
+    truncated, and it keeps a space.** That space is the whole reason this is not
+    an ``ljust`` at the call site: ``_LABEL_WIDTH`` is sized for a thousand memos,
+    and the label grows with the count, so at a million ``ljust`` returns the
+    label unchanged and the value is appended straight onto it --
+    ``total for these 1,000,000 memos$2.0000``. One long line that does not line
+    up is a cosmetic problem; a number welded to the end of a word is a figure
+    nobody can read, in the one output this task exists to produce.
     """
-    return f"{' ' * indent}{label.ljust(_LABEL_WIDTH - indent)}{value}"
+    column = max(_LABEL_WIDTH - indent, len(label) + 1)
+
+    return f"{' ' * indent}{label.ljust(column)}{value}"
 
 
 def _latency(report: Report) -> list[str]:
@@ -360,6 +405,11 @@ def _latency(report: Report) -> list[str]:
                 f"{transcription['p95_seconds_per_minute']:.1f}s per audio-minute",
                 indent=4,
             ),
+            # The total, which is the one figure here that is about the machine
+            # rather than about a memo: how much CPU this stack has actually spent
+            # transcribing. It is what a rate per audio-minute is worth knowing in
+            # order to project.
+            _row("total", _duration(transcription["inference_seconds"]), indent=4),
         ]
     else:
         # Not an error and worth saying plainly. A stack run entirely on text memos
@@ -372,16 +422,52 @@ def _latency(report: Report) -> list[str]:
             _row("enrichment", f"{enrichment['memos']:,} memos"),
             _row(
                 "median",
-                f"{enrichment['median_seconds']:.1f}s"
-                f" ({enrichment['median_tokens_per_second']:,.0f} tokens/s)",
+                f"{enrichment['median_seconds']:.1f}s{_throughput(enrichment)}",
                 indent=4,
             ),
             _row("p95", f"{enrichment['p95_seconds']:.1f}s", indent=4),
+            _row("total", _duration(enrichment["inference_seconds"]), indent=4),
         ]
     else:
         lines.append(_row("enrichment", "no timed enrichments yet"))
 
     return lines
+
+
+def _throughput(enrichment: dict[str, Any]) -> str:
+    """
+    `` (212 tokens/s)``, or nothing when no run reported its tokens.
+
+    Nothing rather than a zero, and this is the branch the SQL's FILTER makes
+    reachable: with it, ``median_tokens_per_second`` is NULL for a set where no
+    enricher reported usage, and ``f"{None:,.0f}"`` is a ``TypeError`` in the
+    middle of printing the report.
+    """
+    if enrichment.get("median_tokens_per_second") is None:
+        return ""
+
+    return f" ({enrichment['median_tokens_per_second']:,.0f} tokens/s)"
+
+
+def _duration(seconds: float | None) -> str:
+    """
+    ``3.6 hours of inference`` -- a total, in whatever unit keeps it readable.
+
+    Seconds below a minute, minutes below an hour, hours above. A cumulative
+    inference figure spans four orders of magnitude between a stack somebody has
+    just started and one that has run for a week, and "13,056.0s" is not a number
+    anybody converts in their head.
+    """
+    if seconds is None:
+        return "not measured"
+
+    if seconds < 60:
+        return f"{seconds:,.1f}s of inference"
+
+    if seconds < 3600:
+        return f"{seconds / 60:,.1f} minutes of inference"
+
+    return f"{seconds / 3600:,.1f} hours of inference"
 
 
 def _spread(shortest_ms: int | None, longest_ms: int | None) -> str:
@@ -462,7 +548,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--per",
-        type=int,
+        type=_positive,
         default=1000,
         help="restate the projection per this many memos (default: 1000)",
     )
@@ -497,10 +583,50 @@ def main(argv: list[str] | None = None) -> int:
         print(f"memo-costs: {error}", file=sys.stderr)
 
         return EXIT_MISUSED
+    except psycopg.OperationalError as error:
+        # The other one they will hit, and the commoner of the two: running this
+        # against a stack that is not up. `OperationalError` only -- the worker
+        # narrows to the same class for the reason given in its `_run`, and a
+        # mistake in one of these statements is a `ProgrammingError` that should
+        # arrive as a traceback rather than as a sentence about the database.
+        #
+        # One line, not the driver's paragraph. libpq's message for an unreachable
+        # host runs to three lines and repeats the host twice.
+        print(
+            f"memo-costs: cannot reach the database ({_first_line(error)}). "
+            f"Is the stack up? `docker compose up -d db`",
+            file=sys.stderr,
+        )
+
+        return EXIT_UNAVAILABLE
 
     print(render(report), end="")
 
     return 0
+
+
+def _positive(raw: str) -> int:
+    """
+    ``--per`` as a whole number above zero.
+
+    Validated by argparse rather than tolerated downstream, because neither
+    degenerate value fails loudly on its own: ``--per 0`` prints a projection of
+    ``$0.0000``, which reads as "this is free", and ``--per -1000`` prints negative
+    money. Both are worse than a refusal.
+    """
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"must be a whole number, got {raw!r}") from None
+
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"must be greater than zero, got {value}")
+
+    return value
+
+
+def _first_line(error: Exception) -> str:
+    return str(error).strip().splitlines()[0] if str(error).strip() else error.__class__.__name__
 
 
 def _rate_table() -> str:

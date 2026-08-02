@@ -1026,18 +1026,48 @@ that date beside every figure, and `--rates` prints where each number came from.
 Nothing validates them against a provider and nothing can; the honest thing is to
 say so in the output rather than to imply an invoice.
 
-**Memory is logged, not stored.** RAM is a property of a process, not of a memo:
-the same memo costs 18 MB on a worker that has not loaded whisper and 1.7 GB on
-one that has, and two replicas share most of what they hold. There is no column
-that would mean anything. So `ai/memo_ai/rss.py` reads `/proc/self/status` and
-`/proc/self/smaps_rollup`, and the worker states it at boot — before either model
-loads, which is what makes the later numbers comparable — and again on every memo
-it publishes. Reporting the shared/private split rather than the total is what
-keeps the answer honest: two enriching replicas cost about 2.3 GB between them
-rather than 3.4, and only the total would suggest otherwise.
+**Memory is logged, not stored, and the report prints no number for it.** RAM is a
+property of a process, not of a memo: the same memo costs 18 MB on a worker that
+has not loaded whisper and 1.7 GB on one that has, and two replicas share most of
+what they hold. There is no column that would mean anything. So `ai/memo_ai/rss.py`
+reads `/proc/self/status` and `/proc/self/smaps_rollup`, and the worker states it
+at boot — before either model loads, which is what makes the later numbers
+comparable — and again on every memo it publishes. Reporting the shared/private
+split rather than the total is what keeps the answer honest: two enriching replicas
+cost about 2.3 GB between them rather than 3.4, and only the total would suggest
+otherwise.
+
+`memo_ai.costs` deliberately prints a pointer to those logs instead of a figure.
+The only resident set it can read is its own — a bare Python process, about 35 MB
+— and a live-looking number under a heading about what the design costs invites
+exactly one misreading. It sampled itself in the first version; that was the bug.
+
+**And the split is logged once, not per memo, because it is not free.** Measured
+inside this image on a process holding 1.5 GB: `/proc/self/status` answers in
+0.042 ms because `VmRSS` is a counter the kernel already maintains, while
+`/proc/self/smaps_rollup` takes **10.8 ms** because it walks the page tables to
+produce it — and that grows with resident memory, so it is worst on exactly the
+worker worth measuring. A logging argument is evaluated whether or not the line is
+emitted, so the first version spent that on every memo even at `LOG_LEVEL=WARNING`.
+`rss.brief()` reads the counter for the per-memo line and `rss.describe()` does the
+walk once at boot, where the process is 18 MB and it costs nothing.
 
 **What is deliberately not built.** No `/api/costs` endpoint and nothing in the
 UI. This answers a question asked once, on a call, by somebody with a shell — not
 a question a user of a memo app has. An endpoint would be a public surface, a
 projection to maintain and a permission model to think about, for a report that
 `docker compose run` already prints.
+
+**One gap, stated rather than closed: a failed enrichment records no usage.**
+`LocalLlmEnricher` raises `EnrichmentError` on an answer it cannot use, so the
+tokens that generation spent reach nothing — the row gets a sentence in
+`enrichment_error` and five NULLs. On a hosted provider that is a real
+under-count, because a response you could not parse is still a response you were
+billed for. Closing it means `EnrichmentError` carrying a `Usage`, `_enriched`
+returning three values instead of two, and `finish_ready` taking usage
+independently of the enrichment — three signatures widened for a case that costs
+exactly zero here, and that for most of its causes (the model still loading, a
+generation past its deadline, a busy context) has no tokens to report anyway. The
+write path is already shaped for it: `finish_ready` reads `enrichment.usage`
+rather than gating on `enriched`, so the day an enricher wants to report a spend
+with nothing to show for it, the column is there.
