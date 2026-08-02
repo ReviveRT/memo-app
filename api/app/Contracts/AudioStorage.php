@@ -69,4 +69,31 @@ interface AudioStorage
      * @throws StorageException On a malformed key.
      */
     public function delete(string $key): bool;
+
+    /**
+     * Where this object is on a local filesystem, or null when there is no such object.
+     *
+     * **The one method that admits a driver may be local, and it is here rather than at a
+     * call site for exactly the reason rule 1 above gives.** MEMO-23 serves recordings back
+     * with byte ranges, and the thing that does that -- Symfony's BinaryFileResponse, or a
+     * web server handed an X-Accel-Redirect -- needs a path rather than a stream: it seeks
+     * to an offset and copies a length, and a `readStream()` returning a handle would mean
+     * writing that range arithmetic here instead of using the framework's. So the choice was
+     * between an interface that hands out a path and a controller that builds one out of
+     * config('memo.audio_dir'), and this is the half of that pair that keeps traversal
+     * refused in one place and keeps the key the only thing callers hold.
+     *
+     * Null means *no such object*, and nothing else -- it is the missing-blob case the
+     * playback route answers 404 for. A driver with no local filesystem must **throw**
+     * rather than return null: an S3 implementation returning null here would turn every
+     * playback request into "that recording is gone" instead of "this deployment cannot
+     * serve audio this way", and the first is a lie that looks like data loss. What an S3
+     * driver would do instead is answer with a presigned URL and let the controller redirect
+     * to it -- S3 honours Range itself -- which is a second method and a second branch, and
+     * is not worth building against a driver that does not exist yet.
+     *
+     * @throws StorageException On a malformed key, or from a driver that has no local
+     *                          filesystem to answer with.
+     */
+    public function localPath(string $key): ?string;
 }

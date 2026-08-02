@@ -723,3 +723,88 @@ quiet memo that the meter misjudges before any row exists to recover it. And dis
 if it failed" — it throws away recordings for faults that had nothing to do with what was
 said, such as a model that had not finished downloading, and it makes the Retry button
 unreachable.
+
+## Playback ranges are answered by PHP, not by Caddy — with the accelerated path one line away
+
+**Decision.** `GET /api/memos/{id}/audio` returns a Symfony `BinaryFileResponse` — through a
+one-method subclass, see the end of this section — which parses `Range`, answers `206` with
+`Content-Range`, `416` for a range past the end, and advertises `Accept-Ranges: bytes`.
+Nothing in this repo parses a range header. Single ranges only, which is every range a media
+element sends; a multi-range header is answered with its first range rather than a
+`multipart/byteranges` body. The
+`X-Accel-Redirect` path that would hand the bytes to Caddy is not enabled, and the reasons
+are below because "let the web server do it" is the conventional advice and this goes the
+other way.
+
+**The premise that FrankenPHP has an equivalent of nginx's `X-Accel-Redirect` does not
+hold, and it was checked rather than assumed.** The string does not appear in the shipped
+binary (`grep -a X-Accel-Redirect /usr/local/bin/frankenphp` on `frankenphp v1.12.6`). What
+exists is a generic Caddy recipe: `http.handlers.intercept` *is* in this build's module
+list, so a `intercept` block matching the header and handing off to `file_server` would
+work. Symfony would emit the header from this same response object — `BinaryFileResponse`
+has `X-Sendfile`/`X-Accel-Redirect` support built in — so the controller would not change
+at all. Three things made it the wrong default here:
+
+- **The config has nowhere good to live.** This image ships no Caddyfile of its own; it
+  uses the base image's, whose only in-site extension point is the `CADDY_SERVER_EXTRA_DIRECTIVES`
+  environment variable. That means a multi-line Caddyfile snippet inside `docker-compose.yml`,
+  where a typo does not degrade playback — it stops Caddy from starting, and takes the whole
+  API with it. `docker compose up` converging on a clean checkout is the property this
+  project is least willing to trade.
+- **No test in this suite could reach the bytes.** The feature suite runs the controller in
+  a PHP process with no Caddy in front of it, so the accelerated path is only ever assertable
+  as "the right header was set". As it stands, `MemoAudioEndpointTest` asserts the actual
+  bytes a range produced against the same slice of the file, which is the part that can
+  silently go wrong.
+- **Turning it on is a footgun in its own right.** `BinaryFileResponse::trustXSendfileTypeHeader()`
+  trusts `X-Sendfile-Type` from the **request**. With it enabled and no Caddy block to
+  inject and strip that header, any client could send it and get back an empty `200`
+  carrying the absolute path of the file on the volume.
+
+**What makes PHP an acceptable place for these bytes.** A recording is capped at 12 MiB
+(`MAX_AUDIO_BYTES`), so no response is large. `BinaryFileResponse` seeks and copies in
+chunks rather than reading the file into memory. And the api container already runs a
+threaded server chosen for exactly this request: `api/Dockerfile` says FrankenPHP rather
+than `php -S` because the built-in server is single-threaded and one client holding a
+streaming audio response would stall every status poll behind it. The decision to make this
+survivable was taken before there was anything to serve.
+
+**How to switch, if a deployment ever wants to.** Add an `intercept` block to
+`CADDY_SERVER_EXTRA_DIRECTIVES` rooted at `AUDIO_DIR`, and call
+`BinaryFileResponse::trustXSendfileTypeHeader()` in `AppServiceProvider::boot()`. Both
+halves are required and neither is safe alone.
+
+**The frontend has to force a duration out of the file, and that is not a bug in this
+endpoint.** A WebM from `MediaRecorder` carries no Duration element — `config/memo.php`
+records the same measurement from the upload side, and it is why the worker measures length
+with `ffprobe` after normalization. So `audio.duration` is `Infinity` in Chrome and Edge, a
+native player has nothing to size its scrubber from, and seeking does not work no matter how
+correct the server is. Measured on this stack before the workaround: `duration: Infinity`,
+`readyState: 4`, playback fine, `currentTime` unsettable. `MemoDialog` seeks once past the
+end of the file on `loadedmetadata`, which makes the element discover the real length
+(`4.08` for that memo), then resets to zero. Re-muxing every recording so the container
+declares what it already contains was the alternative: work in the worker, a second copy of
+every blob, and a normalization step that exists for the transcriber rather than for the
+player. What the workaround costs was measured rather than assumed: on the recordings on this
+stack, nothing at all — `preload="metadata"` has already pulled the whole file in one `206`,
+so the seek to the end is served from the buffer and no second request is made. A recording
+too large to buffer whole asks for the tail instead, which is one range request rather than a
+second download of the entire file. That upper bound is this endpoint's doing.
+
+**The framework's range handling had one thing wrong, and the suite is what found it.**
+Symfony sets `Content-Length` to the size of the whole file before it reads the `Range`
+header and overwrites it only on the `206` path. An unsatisfiable range takes the other
+branch: the status becomes `416`, `sendContent()` writes nothing because the response is no
+longer successful, and the header still promises the entire file. Against the running
+container on `symfony/http-foundation v7.4.15`, a `Range: bytes=999999-1000000` answered
+`416` with `Content-Length: 24775` and zero bytes of body — and curl reported `transfer
+closed with 24775 bytes remaining to read` rather than a clean refusal, with the connection
+unusable afterwards. Caddy does not correct it; the promise goes out as written.
+`App\Http\Responses\AudioFileResponse` overrides `prepare()` to set `Content-Length: 0` on
+that status alone — the controller cannot, because `prepare()` runs after the action returns
+and is the code that introduces the problem. `HEAD` is deliberately left alone: it also sends
+no body, and there the full length is exactly what the header should say.
+
+Worth recording because of how it hid. The first version of the 416 test asserted the status
+and the `Content-Range` and passed, which is the shape of assertion that reads as coverage
+and is not: nothing in it was about the bytes. The test now pins the framing as well.

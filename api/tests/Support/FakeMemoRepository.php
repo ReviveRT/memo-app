@@ -7,6 +7,7 @@ namespace Tests\Support;
 use App\Repositories\MemoRepository;
 use App\Services\Memos\DeletedMemo;
 use App\Services\Memos\Memo;
+use App\Services\Memos\MemoAudio;
 use App\Services\Memos\MemoQuery;
 
 /**
@@ -96,13 +97,25 @@ final class FakeMemoRepository extends MemoRepository
     /**
      * The audio key each memo carries, keyed by memo id.
      *
-     * Only delete() reads it. `audio_path` is not on Memo -- see DeletedMemo for why it stays
-     * off the wire -- so a test that wants to assert the blob was unlinked has to say here
-     * which blob the row pointed at.
+     * Read by delete() and by audioFor(). `audio_path` is not on Memo -- see DeletedMemo for
+     * why it stays off the wire -- so a test that wants to assert the blob was unlinked, or
+     * to play one back, has to say here which blob the row pointed at.
      *
      * @var array<string, string>
      */
     public array $audioPaths = [];
+
+    /**
+     * The media type stored alongside each of those, keyed by memo id.
+     *
+     * A second map rather than a pair in the one above, so the tests that predate playback do
+     * not have to say anything about a mime they are not asserting on. Absent means the column
+     * is NULL, which is a row this build did not write and which MemoController::playbackType
+     * answers as octet-stream -- so the gap is itself a case worth being able to set up.
+     *
+     * @var array<string, string>
+     */
+    public array $audioMimes = [];
 
     public function __construct() {}
 
@@ -191,6 +204,26 @@ final class FakeMemoRepository extends MemoRepository
         }
 
         return null;
+    }
+
+    /**
+     * The audio pair for a memo that both exists in `$rows` and has a key set.
+     *
+     * Both halves of that condition are the real statement's, not conveniences: the query is
+     * `SELECT ... WHERE id = ?`, so an unknown memo answers null, and a memo with a NULL
+     * `audio_path` -- every typed memo -- answers null as well. Keeping them apart here would
+     * let the endpoint's "there is nothing to play" 404 pass while the SQL only handled one
+     * of them.
+     */
+    public function audioFor(string $id): ?MemoAudio
+    {
+        if ($this->find($id) === null) {
+            return null;
+        }
+
+        $key = $this->audioPaths[$id] ?? null;
+
+        return $key === null ? null : new MemoAudio($key, $this->audioMimes[$id] ?? null);
     }
 
     public function moveToCollection(string $memoId, ?string $collectionId): ?Memo
