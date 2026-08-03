@@ -183,6 +183,24 @@ DEFAULT_ASK_MEMO_CHARS = 1200
 # words as they are produced and can stop reading whenever it likes.
 DEFAULT_ASK_DEADLINE_SECONDS = 180.0
 
+# `local`, matching DEFAULT_STT_PROVIDER and DEFAULT_ENRICH_PROVIDER and for the same
+# stated reason: the committed default has to mean "this works with no account and no
+# key", and under compose the weights are already baked into the ai image.
+DEFAULT_ASK_PROVIDER = "local"
+
+# What `ASK_PROVIDER=groq` asks for by default.
+#
+# An 8B model rather than one of the large ones, and the size is chosen against the
+# job rather than for economy. This prompt is extractive: memo_ai/ask/prompt.py fences
+# three memos and instructs the model to answer only from them and cite them by
+# number. That is a reading-comprehension task over ~3,600 characters with a
+# 320-token ceiling on the reply -- which an 8B model does about as well as a 70B one,
+# several times faster, and at a rate limit a free plan does not exhaust in a demo.
+#
+# It also comfortably beats what it replaces. The local backend is Qwen2.5-1.5B, so
+# `groq` is a larger model than the default it stands in for, not a smaller one.
+DEFAULT_GROQ_ASK_MODEL = "llama-3.1-8b-instant"
+
 # Ten minutes, mirroring docker-compose.yml and .env.example. Enforced in the
 # worker rather than at the API edge because it cannot be enforced there: the cap
 # is a duration, and the duration of a browser recording is not known until
@@ -335,6 +353,27 @@ class Settings:
     ask_memo_chars: int
     ask_deadline_seconds: float
 
+    # Which backend answers. `local` opens `enrich_model_path` as described above;
+    # `groq` sends the same prompt to a hosted model and opens nothing.
+    #
+    # `local` is the committed default for the reason DEFAULT_STT_PROVIDER is: the
+    # shipped configuration must mean "the feature works with no account and no key",
+    # and under compose the weights are already in the image. A deployment that
+    # cannot afford 1.1 GB of them sets this instead -- see deploy/Dockerfile, which
+    # is the only place in the repository that does.
+    #
+    # Not validated against a list here, and that is the same deliberate choice
+    # STT_PROVIDER makes: the factory in memo_ai/ask/__main__.py refuses an unknown
+    # name with a sentence that lists the ones it has, which is a better error than
+    # a parse failure naming a set.
+    ask_provider: str
+
+    # The model `ASK_PROVIDER=groq` asks for. Groq's catalogue moves faster than this
+    # repository does -- models arrive, get renamed and get retired -- so this is a
+    # variable with a default rather than a constant, and a deployment whose default
+    # has been retired can move without a rebuild.
+    groq_ask_model: str
+
     max_audio_seconds: float
     poll_seconds: float
 
@@ -411,6 +450,8 @@ class Settings:
             ask_deadline_seconds=_positive_float(
                 source, "ASK_DEADLINE_SECONDS", DEFAULT_ASK_DEADLINE_SECONDS
             ),
+            ask_provider=_string(source, "ASK_PROVIDER", DEFAULT_ASK_PROVIDER),
+            groq_ask_model=_string(source, "GROQ_ASK_MODEL", DEFAULT_GROQ_ASK_MODEL),
             # Float rather than int, and refused at zero for the same reason the
             # poll interval is: `MAX_AUDIO_SECONDS=0` is not a strict cap, it is a
             # configuration under which every voice memo fails and no text says

@@ -1,7 +1,7 @@
 # Deploying on a free tier
 
 This directory holds the production build: **one container** serving the built Vue app, the
-API and a transcription worker from one origin, plus the two things a hosted deployment
+API, a transcription worker and Ask from one origin, plus the two things a hosted deployment
 needs that compose does not — object storage for recordings, and a retention job.
 
 `docker-compose.yml` at the repository root is unchanged and is still the way to run this
@@ -180,10 +180,12 @@ A supported configuration, and the one a first deploy lands in:
 - **typed memos work completely** — transcript, title, collections, reminders, search;
 - **a voice memo fails in a few seconds**, with `GROQ_API_KEY is not set` on the card, rather
   than hanging;
-- **Ask answers 503** with a sentence saying the service is unavailable.
+- **Ask refuses** with `Ask is not configured: GROQ_API_KEY is not set on this deployment`.
 
-The last one is not fixable from here at any price: Ask needs `ai-api`, which loads a local
-LLM. It is the one feature a free tier cannot host.
+Ask used to be listed here as the one feature a free tier could not host "at any price",
+because `ai-api` loaded a 1.1 GB local model. That was a claim about the *model*, not about
+the feature, and it stopped being true when `ASK_PROVIDER=groq` arrived — the same key that
+transcribes now answers questions too. See the Ask section below.
 
 One wrinkle in that voice-memo error, because it will be read and acted on: it ends with "or
 set `STT_PROVIDER=local` to transcribe on this machine", which is sound advice under compose
@@ -240,10 +242,59 @@ docker run --entrypoint /opt/memo-ai/venv/bin/python \
 Both must see the same `DATABASE_URL` and the same bucket. Running two workers against one
 queue is safe — claims are atomic — but on a demo it doubles the polling for no gain.
 
+## Ask
+
+**It works here**, answered by Groq rather than by a model in this container, and it runs as a
+third process beside the API and the worker. The image sets:
+
+```
+ASK_PROVIDER=groq
+AI_API_URL=http://127.0.0.1:8000
+```
+
+`AI_API_URL` is the line that would be forgotten. Its default is `http://ai-api:8000` — a
+compose service name that resolves to nothing here — so without it every question fails on DNS
+and the widget reports the service as not running.
+
+Ask needs no key of its own. It reads the same `GROQ_API_KEY` transcription uses, so a
+deployment that can transcribe can already answer questions, and one without a key refuses both
+with a sentence naming the variable.
+
+### Why this is a different model from the local one
+
+`GROQ_ASK_MODEL` defaults to `llama-3.1-8b-instant`, against the local backend's
+Qwen2.5-1.5B — so the hosted path is the *larger* model, not a downgrade. It is also
+dramatically faster: **0.23 s** for a complete cited answer here, against tens of seconds for
+the local model on a laptop, because a 1.5B model generating 320 tokens on shared CPU threads
+is the slowest thing in this application.
+
+An 8B model rather than one of the 70B ones because the prompt is extractive:
+`memo_ai/ask/prompt.py` fences three memos and asks for an answer drawn only from them, with
+numbered citations. That is reading comprehension over ~3,600 characters, which an 8B model does
+about as well as a much larger one, several times faster, and at a rate limit a free plan does
+not exhaust in a demo. Groq's catalogue moves, so this is a variable rather than a constant — if
+the default is ever retired, set `GROQ_ASK_MODEL` and redeploy without a rebuild.
+
+### One thing that got better rather than worse
+
+The local backend serialises questions behind a lock, because two generations on four shared
+threads make both slow and neither correct. Groq has no such coupling, so **two people can ask
+at once** — the only behavioural difference between the backends a user could notice, other than
+the answer arriving in about a second.
+
+### Running the local model instead
+
+Set `ASK_PROVIDER=local` and the entrypoint does not start ai-api at all, because this image
+bakes no weights for it — it would report `missing` on `/health` forever and refuse every
+question. To have the local model, run `ai-api` from the `ai` image somewhere with ~2 GB and
+point `AI_API_URL` at it.
+
 ## What is not in this image
 
-**The baked models, and `ai-api` with them.** `ai/Dockerfile` bakes ~2.8 GB of weights and
-neither that image nor the ~2.4 GB per replica it needs at runtime will fit in a free tier.
+**The baked models.** `ai/Dockerfile` bakes ~2.8 GB of weights and neither that image nor the
+~2.4 GB per replica it needs at runtime will fit in a free tier. `ai-api` itself *is* here now
+-- see the Ask section above -- because what did not fit was the 1.1 GB model behind it rather
+than the service.
 See `ai/requirements-hosted.txt` for what was left out of the Python install and why each is
 safe to drop.
 

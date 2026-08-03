@@ -222,9 +222,34 @@ def test_every_state_that_is_not_ready_has_a_sentence(tmp_path):
     """
     `/ask` looks the refusal up in this mapping rather than raising, so a state
     added without one would be a KeyError inside a route rather than a 503.
+
+    Four keys for two backends. The first three are this module's and the fourth is
+    memo_ai/ask/hosted.py's, and they live in one mapping because app.py holds
+    whichever backend it was given and must not have to know which subset of these it
+    can see. The exact-equality assertion is the point of the test: a fifth state added
+    without a sentence should fail here rather than in a route.
     """
-    assert set(ask_model.UNAVAILABLE) == {"missing", "loading", "failed"}
+    assert set(ask_model.UNAVAILABLE) == {
+        "missing",
+        "loading",
+        "failed",
+        "unconfigured",
+    }
     assert all(isinstance(text, str) and text for text in ask_model.UNAVAILABLE.values())
+
+
+def test_no_backend_can_report_a_state_the_mapping_lacks():
+    """
+    The other half of the test above, from the backends rather than the mapping: every
+    state either implementation can return has to be `ready` or a key here. Written
+    because the two files are edited independently and the failure mode is a 500 from
+    a route rather than anything visible in a unit test of either one.
+    """
+    from memo_ai.ask.hosted import UNCONFIGURED
+
+    reachable = {"missing", "loading", "failed", UNCONFIGURED}
+
+    assert reachable - {"ready"} <= set(ask_model.UNAVAILABLE)
 
 
 def test_start_loading_twice_loads_once(tmp_path):

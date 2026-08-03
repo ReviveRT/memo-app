@@ -1,6 +1,6 @@
 """
-Ask my memos (MEMO-24): retrieval over the existing full-text index, then a local
-model that answers from what it found.
+Ask my memos (MEMO-24): retrieval over the existing full-text index, then a model
+that answers from what it found.
 
 The package behind ``ai-api``, the sixth compose service -- the same image as
 ``ai-worker`` with ``python -m memo_ai.ask`` in place of ``python -m
@@ -9,7 +9,10 @@ memo_ai.worker``. Five modules, in the order a question moves through them:
   * :mod:`~memo_ai.ask.retrieval` -- which memos, decided by Postgres.
   * :mod:`~memo_ai.ask.prompt` -- the conversation, the fences around the evidence,
     and the citations that come back out.
+  * :mod:`~memo_ai.ask.backend` -- the three members the two below have in common.
   * :mod:`~memo_ai.ask.model` -- the resident llama.cpp model, streaming.
+  * :mod:`~memo_ai.ask.hosted` -- the same question answered by Groq, for a
+    deployment that cannot spare 1.1 GB of weights.
   * :mod:`~memo_ai.ask.service` -- the two of those in order, as events.
   * :mod:`~memo_ai.ask.app` -- FastAPI, turning events into NDJSON.
 
@@ -23,12 +26,16 @@ modules are ever rearranged -- the same courtesy ``memo_ai.enrich`` extends to t
 pipeline and the test doubles.
 """
 
+from memo_ai.ask.backend import Backend
+from memo_ai.ask.hosted import HostedModel
 from memo_ai.ask.model import Model, ModelUnavailable, context_tokens
 from memo_ai.ask.retrieval import Retrieval, Source, retrieve
 from memo_ai.ask.service import Event, answer
 
 __all__ = [
+    "Backend",
     "Event",
+    "HostedModel",
     "Model",
     "ModelUnavailable",
     "Retrieval",

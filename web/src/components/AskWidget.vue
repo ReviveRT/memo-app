@@ -465,9 +465,21 @@ onScopeDispose(() => running.value?.abort())
         </button>
       </header>
 
+      <!--
+        Deliberately says nothing about *where* the model runs, and that is a correction
+        rather than a simplification. This line used to read "a local model ... nothing leaves
+        this machine", which was true of the only backend that existed and is false on a
+        deployment configured with ASK_PROVIDER=groq -- where it is not the reader's machine
+        and the memos that match are sent to a third party.
+
+        The frontend cannot tell which backend is answering: /api/ask proxies to whichever
+        ai-api is configured and the stream carries no provider. So rather than assert
+        something it cannot know, it describes what the feature does. A deployment that wants
+        to promise privacy has to say so itself -- and would have to mean it.
+      -->
       <p class="askw__hint">
-        A question in your own words. A local model reads the few memos that match and
-        answers from them — nothing leaves this machine.
+        A question in your own words. The few memos that match are read and answered from,
+        with each answer citing the memos it used.
       </p>
 
       <!--

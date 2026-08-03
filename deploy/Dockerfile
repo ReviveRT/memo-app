@@ -273,6 +273,25 @@ ENV STT_PROVIDER=groq \
     STT_FALLBACK=groq \
     ENRICH_PROVIDER=none
 
+# --- Ask ---------------------------------------------------------------------
+#
+# ASK_PROVIDER=groq is what makes Ask work here at all. memo_ai/ask/model.py loads
+# Qwen2.5-1.5B Q4 -- 1,117 MB plus llama.cpp's KV cache -- against a service that gets 512 MB
+# in total, so `local` is not a slower option here, it is an impossible one. The hosted
+# backend sends the same prompt from memo_ai/ask/prompt.py to Groq and loads nothing.
+#
+# Enrichment still has no hosted option (ENRICH_PROVIDER above) and that asymmetry is real
+# rather than an oversight: the seam for it was never built, because a title that falls back
+# to the transcript's first line is a smaller loss than an Ask button that only ever errors.
+#
+# AI_API_URL points at loopback because ai-api runs in this container -- see
+# deploy/entrypoint.sh. Its default is `http://ai-api:8000`, a compose service name that
+# resolves to nothing here, so without this line every question would fail on DNS and the
+# frontend would report the service as not running. Which is, to be fair, what it did before
+# this line existed.
+ENV ASK_PROVIDER=groq \
+    AI_API_URL=http://127.0.0.1:8000
+
 # The other half of the compileall above: the .pyc are built and the runtime must stop trying
 # to write more. ai/Dockerfile sets this for the same reason and states it plainly -- turning
 # the write off "makes that a decision instead of a swallowed EACCES". Without it the failure

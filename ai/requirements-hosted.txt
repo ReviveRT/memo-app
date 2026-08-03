@@ -1,5 +1,6 @@
-# The worker's dependencies when every model it would have loaded lives somewhere
-# else. Installed by deploy/Dockerfile; nothing in docker-compose.yml reads this.
+# What ai-worker and ai-api need when every model they would have loaded lives
+# somewhere else. Installed by deploy/Dockerfile; nothing in docker-compose.yml reads
+# this.
 #
 # It is a strict subset of requirements.txt rather than a second opinion about
 # versions, and the psycopg pin below must stay equal to the one there. Kept in
@@ -14,15 +15,28 @@
 #     top of the module -- so importing the stt package with STT_PROVIDER=groq
 #     never reaches it. Checked, because the whole image depends on it being true.
 #
-#   * llama-cpp-python, for the same reason: memo_ai/enrich/local.py imports
-#     `llama_cpp` inside its loader, and ENRICH_PROVIDER=none never constructs it.
-#
-#   * fastapi and uvicorn, which are the ai-api service's and not the worker's.
-#     deploy/Dockerfile does not ship ai-api -- /api/ask answers 503 without it.
+#   * llama-cpp-python, for the same reason twice over: memo_ai/enrich/local.py imports
+#     `llama_cpp` inside its loader and ENRICH_PROVIDER=none never constructs it, and
+#     memo_ai/ask/model.py does the same for the resident Ask model, which
+#     ASK_PROVIDER=groq never builds either.
 #
 # What is NOT absent and might look like it should be: nothing for Groq or for S3.
-# memo_ai/stt/groq.py speaks HTTP with `urllib` and memo_ai/blobs.py signs SigV4
-# with `hmac` and `hashlib`, both from the standard library and both saying at the
-# top of the file that this image is the reason. So the hosted path adds no
-# dependency at all, and this file is one line.
+# memo_ai/stt/groq.py speaks HTTP with `urllib`, memo_ai/ask/hosted.py does the same
+# for chat completions, and memo_ai/blobs.py signs SigV4 with `hmac` and `hashlib` --
+# all standard library, and each says at the top of the file that this image is the
+# reason. So every hosted provider in this project adds no dependency at all.
 psycopg[binary]==3.3.4
+
+# ai-api's, and present as of the hosted Ask backend.
+#
+# An earlier revision of this file left both out and said why: "fastapi and uvicorn,
+# which are the ai-api service's and not the worker's -- deploy/Dockerfile does not
+# ship ai-api". That was accurate and was the wrong trade. What made Ask unhostable was
+# the *model* -- 1,117 MB of Qwen weights against a 512 MB service -- not the web
+# framework in front of it. With memo_ai/ask/hosted.py answering from Groq, what is
+# left to ship is these two and about 30 MB.
+#
+# Pinned equal to requirements.txt, for the reason the psycopg line states: this file
+# is a subset of that one, not a second opinion about versions.
+fastapi==0.141.1
+uvicorn==0.52.1

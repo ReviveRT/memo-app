@@ -554,6 +554,21 @@ services:
       # holding the one model this service has, not to enforce a latency target.
       # What bounds the felt wait is that the answer streams.
       ASK_DEADLINE_SECONDS: ${ASK_DEADLINE_SECONDS:-180}
+      # Which backend answers, and `local` is the default here for the same reason
+      # STT_PROVIDER=local is: a clean `docker compose up` must work with no account
+      # and no key, and the weights this needs are already in the ai image.
+      #
+      # `groq` is the opt-in, and it is what deploy/Dockerfile sets -- not because it
+      # is better on a laptop but because 1,117 MB of weights do not fit a free
+      # tier's 512 MB. Setting it here sends the memos a question matched to a third
+      # party, which is the trade to make knowingly rather than by default.
+      ASK_PROVIDER: ${ASK_PROVIDER:-local}
+      GROQ_ASK_MODEL: ${GROQ_ASK_MODEL:-llama-3.1-8b-instant}
+      # Read only when ASK_PROVIDER=groq, and the same key STT_PROVIDER=groq uses --
+      # there is deliberately no second one. Passed through here for the reason the
+      # worker's copy of this line states: a key pasted into .env should reach the
+      # container that would use it rather than being dropped one layer earlier.
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
     # **No ports.** PHP is the only public surface -- the browser reaches this
     # through `POST /api/ask` on the api container, which is what keeps CORS, auth
     # and rate limiting a question with one answer instead of two. To poke at it

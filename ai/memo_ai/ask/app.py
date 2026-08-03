@@ -41,7 +41,7 @@ from pydantic import BaseModel, StringConstraints
 from memo_ai import db
 from memo_ai.ask import model as ask_model
 from memo_ai.ask import service
-from memo_ai.ask.model import Model
+from memo_ai.ask.backend import Backend
 from memo_ai.config import Settings
 
 log = logging.getLogger(__name__)
@@ -104,7 +104,7 @@ class Question(BaseModel):
     owner_id: UUID
 
 
-def create_app(settings: Settings, model: Model) -> FastAPI:
+def create_app(settings: Settings, model: Backend) -> FastAPI:
     """
     Build the app around an already-constructed model.
 
@@ -223,7 +223,7 @@ def create_app(settings: Settings, model: Model) -> FastAPI:
 
 
 def _lines(
-    settings: Settings, model: Model, question: str, owner_id: str
+    settings: Settings, model: Backend, question: str, owner_id: str
 ) -> Iterator[bytes]:
     """
     The service's events, one JSON object per line.
