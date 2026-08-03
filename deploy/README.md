@@ -1,8 +1,8 @@
 # Deploying on a free tier
 
-This directory holds the production build: **one container** serving the built Vue app and
-the API from one origin, plus the two things a hosted deployment needs that compose does
-not — object storage for recordings, and a retention job.
+This directory holds the production build: **one container** serving the built Vue app, the
+API and a transcription worker from one origin, plus the two things a hosted deployment
+needs that compose does not — object storage for recordings, and a retention job.
 
 `docker-compose.yml` at the repository root is unchanged and is still the way to run this
 locally. Nothing here replaces it.
@@ -11,8 +11,25 @@ locally. Nothing here replaces it.
 docker build -f deploy/Dockerfile -t memo-app .
 ```
 
-Build from the repository root, not from `deploy/` — the image needs `api/`, `web/` and
-`db/` together.
+Build from the repository root, not from `deploy/` — the image needs `api/`, `web/`, `db/`
+and `ai/memo_ai/` together.
+
+## The short version
+
+Push this repository to GitHub, then point Render at it:
+
+<https://dashboard.render.com/select-repo?type=blueprint>
+
+`render.yaml` at the repository root describes the web service and a Postgres, so the only
+thing to type is a Groq API key — and even that is optional on the first pass. Everything
+below is either the reasoning behind that file or the equivalent for another platform.
+
+Two things that look like failures and are not. **The blueprint creates the database and the
+web service together and does not promise an order**, so the first deploy can health-check
+before Postgres is ready; that attempt fails and the retry succeeds. The container is built to
+survive it rather than crash-loop — with no `DATABASE_URL` it serves the SPA, answers
+`/api/health` with 503 and starts no worker. And **the first request after 15 minutes idle
+takes about a minute**, because free services sleep.
 
 ## Why one container
 
@@ -29,9 +46,12 @@ It also happens to be the shape a free tier gives you: one web service.
 
 | Thing | Free option | Notes |
 | --- | --- | --- |
-| Postgres 16 | Neon, Supabase, Render | `pgcrypto` is used by one migration; see below if your provider refuses `CREATE EXTENSION` |
-| Object storage | Cloudflare R2 | 10 GB, and **no egress charge** — which for audio is the whole bill |
-| A web service | Render, Railway, Fly.io, Koyeb | Needs ~256 MB |
+| Postgres 16 | Neon, Supabase, Render | `pgcrypto` is used by one migration; see below if your provider refuses `CREATE EXTENSION`. Render's free database **expires after 30 days**; Neon's does not |
+| A web service | Render, Railway, Fly.io, Koyeb | 512 MB is comfortable — see the measurement below |
+| Transcription | Groq | Free key, no card. Optional — see below for what a deployment without one does |
+| Object storage | Cloudflare R2 | 10 GB, and **no egress charge** — which for audio is the whole bill. Optional; without it recordings do not survive a redeploy |
+
+Only the first two are required.
 
 ## Environment
 
@@ -117,28 +137,163 @@ behind. That matters because a free deployment has an uptime pinger by construct
 how you stop the instance sleeping — and at one ping a minute an eager design would create
 1,440 rows a day.
 
-## What is not in this image
+## The worker
 
-**`ai-worker` and `ai-api`.** They bake ~2.8 GB of models and will not run in a free tier's
-memory. The application degrades honestly without them rather than breaking:
+**It runs inside this container**, and the reason is worth reading before deciding to move
+it out.
 
-- typed memos work completely;
-- voice memos are accepted, stored, and stay `queued` — the UI says "waiting for a worker";
-- Ask answers 503 with a sentence saying the service is unavailable.
+An earlier version of this file claimed the application degraded gracefully without any
+worker — "typed memos work completely, voice memos stay `queued`". That was measured and it
+is wrong. A typed memo is written `queued` too, and it is the worker that moves it to
+`ready`. With no worker at all, *nothing* on the page ever leaves "Waiting for a worker…",
+and the frontend polls it forever. There is no useful deployment of this application without
+a worker somewhere.
 
-To get transcription back, deploy `ai-worker` separately somewhere with more memory and
-point it at the same `DATABASE_URL` and the same bucket, with a hosted provider instead of
-the local model:
+The obvious place is a second service, and free tiers are exactly where that is hardest:
+Render bills background workers from the first one. So `deploy/Dockerfile` installs the
+worker beside the API and `deploy/entrypoint.sh` starts both. What makes that reasonable
+rather than a hack is the cost once the models live somewhere else — **41 MB RSS**, measured
+on the shipped configuration, against the ~2.4 GB per replica a local Whisper model needs.
+It is network-bound on Groq and idle the rest of the time.
+
+The image sets the three variables this needs:
 
 ```
 STT_PROVIDER=groq
-GROQ_API_KEY=<key>
+STT_FALLBACK=groq
 ENRICH_PROVIDER=none
 ```
 
-That combination needs no baked models at all, so the worker image is small. `ENRICH_PROVIDER=none`
-skips titles and summaries, which is the part that needs a local LLM; memos still get a
-transcript, and a title falls back to the first line.
+`STT_FALLBACK` is the one that would be forgotten. Left at its default of `local`, every Groq
+failure would fall through to a model this image does not contain and the memo's recorded
+error would name the wrong provider.
+
+`ENRICH_PROVIDER=none` costs the titles, summaries, tags and categories a local LLM writes;
+there is no hosted enricher to point at instead, because that seam exists for speech-to-text
+only. Memos still get a title — `memo_ai/titles.py` falls back to the first line of the
+transcript — so the list stays readable rather than becoming a wall of "Untitled".
+
+### Without a Groq key
+
+A supported configuration, and the one a first deploy lands in:
+
+- **typed memos work completely** — transcript, title, collections, reminders, search;
+- **a voice memo fails in a few seconds**, with `GROQ_API_KEY is not set` on the card, rather
+  than hanging;
+- **Ask answers 503** with a sentence saying the service is unavailable.
+
+The last one is not fixable from here at any price: Ask needs `ai-api`, which loads a local
+LLM. It is the one feature a free tier cannot host.
+
+One wrinkle in that voice-memo error, because it will be read and acted on: it ends with "or
+set `STT_PROVIDER=local` to transcribe on this machine", which is sound advice under compose
+and impossible here — this image has no weights, and pointing it at `local` trades a clear
+error for a confusing one. The sentence lives in `memo_ai/stt/groq.py`, where it is correct for
+the image that file was written for. Set the key instead.
+
+### A memo caught by a restart
+
+Free tiers restart a container often — every deploy, and every wake from sleep. A memo that was
+mid-flight when that happens is left `processing`, and the reaper takes it back only after
+`REAP_AFTER_SECONDS`, which is **3600**. Worst case, one memo shows "Transcribing…" for an hour.
+
+That number is deliberately not lowered here. It is derived from the slowest job the *local*
+provider could legitimately run — `memo_ai/pipeline.py`'s `job_budget_seconds`, which the worker
+recomputes at boot — and on Groq the real bound is a fraction of it. Setting it to 600 was tried:
+the worker starts and warns on every boot that "the reaper will requeue jobs that are still
+running", because the budget it checks against is 2880s at `MAX_AUDIO_SECONDS=600`. A permanent
+boot warning that looks like a misconfiguration is worse than the exposure.
+
+The lever, if an hour ever matters: lower `MAX_AUDIO_SECONDS` first — that shrinks the budget by
+four seconds for every second removed — and only then lower the lease to match. Capping a demo
+at two minutes of audio makes a 1200s lease legitimate and warning-free. The window itself is
+about two seconds wide per memo on Groq, which is why this is documented rather than fixed.
+
+### If the worker refuses to start
+
+The container exits and takes the web server with it, so the platform shows a crash loop with
+the reason on the last line of the log rather than a site that looks fine and quietly never
+finishes a memo. Verified with `AUDIO_BUCKET` set and its three companions missing: exit
+code 2, and
+
+```
+ai-worker: AUDIO_BUCKET is set, so AUDIO_BUCKET_ENDPOINT, AUDIO_BUCKET_KEY,
+AUDIO_BUCKET_SECRET must be set too.
+```
+
+A missing `GROQ_API_KEY` is deliberately *not* one of these — the worker starts and fails
+individual voice memos, because a key that expires should not take the whole site down. If you
+need the site up while a worker problem is being sorted out, set `RUN_WORKER=false`.
+
+### Running it as a separate service instead
+
+Set `RUN_WORKER=false` on the web service, then run the same image somewhere else with the
+entrypoint pointed at the venv:
+
+```bash
+docker run --entrypoint /opt/memo-ai/venv/bin/python \
+  -e PYTHONPATH=/opt/memo-ai \
+  -e DATABASE_URL=... -e GROQ_API_KEY=... \
+  memo-app -m memo_ai.worker
+```
+
+Both must see the same `DATABASE_URL` and the same bucket. Running two workers against one
+queue is safe — claims are atomic — but on a demo it doubles the polling for no gain.
+
+## What is not in this image
+
+**The baked models, and `ai-api` with them.** `ai/Dockerfile` bakes ~2.8 GB of weights and
+neither that image nor the ~2.4 GB per replica it needs at runtime will fit in a free tier.
+See `ai/requirements-hosted.txt` for what was left out of the Python install and why each is
+safe to drop.
+
+### What it costs to run
+
+Measured with the container capped at `--memory 512m`, which is what Render's free tier gives:
+
+| | |
+| --- | --- |
+| Idle, both processes up | **58 MB** |
+| Peak under 300 mixed requests, 30 concurrent | **103 MB** |
+
+All 101 memos in that run reached `ready` and `/api/health` still answered 200 at the peak. So
+512 MB is not tight — it is about five times what this needs. An earlier revision of this file
+put the API alone near 90 MB, which was a guess and too high for the pair of them together.
+
+The constraint on a free tier is CPU rather than memory: Render's free plan is 0.1 vCPU, and
+transcription is Groq's problem rather than this container's, but `ffmpeg` normalizing a
+recording is not. A long memo takes noticeably longer to normalize here than it does locally.
+
+### What the worker costs this image
+
+Measured, because the first version of this section guessed and guessed low:
+
+| | |
+| --- | --- |
+| `psycopg` and the venv around it | 38 MB |
+| `memo_ai/` source | 0.6 MB |
+| `ffmpeg`, `python3`, `python3-venv` and their dependencies | **422 MB** across 198 packages |
+
+The last row is the whole story, and almost none of it is audio code. Debian's `ffmpeg`
+depends on `libavfilter`, which depends on `libplacebo`, which pulls Mesa and with it
+`libllvm19` — 118 MB of GPU rasteriser, 33 MB of `mesa-libgallium`, and beside them 27 MB of
+`libflite1` (speech *synthesis*) and 26 MB of `libz3-4` (an SMT solver).
+`--no-install-recommends` is already on and does not touch any of it; these are hard
+dependencies.
+
+The image that comes out is **1.2 GB unpacked and about 390 MB compressed**, which is what a
+platform actually pulls. Measured with `du` inside the running container and with
+`docker export | gzip` respectively — not from the `docker images` SIZE column, which counts
+the unpacked tree *and* the compressed layers beside it and so reads about double.
+
+`ai/Dockerfile` weighed the same choice and kept the distro package, on the explicit grounds
+that 120 MB of unused GPU stack was "about four percent of the image rather than a sixth of
+it". That arithmetic does not survive the move here: with no weights to dwarf it, the tree is
+about a third of this image rather than four percent. The package is kept anyway — a signed
+distro package beats opaque binaries from a third-party registry, and 390 MB clears every
+free tier's pull limits — but the reasoning it was kept *for* no longer applies, and the lever
+is real if a platform's build ever runs out of disk: static `ffmpeg`/`ffprobe` binaries carry
+no dependency tree at all, and the worker shells out to exactly those two.
 
 ## Limits of the owner model
 
