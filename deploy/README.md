@@ -295,6 +295,51 @@ free tier's pull limits — but the reasoning it was kept *for* no longer applie
 is real if a platform's build ever runs out of disk: static `ffmpeg`/`ffprobe` binaries carry
 no dependency tree at all, and the worker shells out to exactly those two.
 
+## Troubleshooting
+
+### `Exited with status 126` and `frankenphp: Operation not permitted`
+
+Fixed in the image, and written down because it cost a first deploy and the error names none of
+the cause.
+
+```
+/usr/local/bin/memo-entrypoint: line 56: /usr/local/bin/frankenphp: Operation not permitted
+==> Exited with status 126
+```
+
+The `dunglas/frankenphp` base image ends with `setcap cap_net_bind_service=+ep` on its binary so
+it can bind :80 unprivileged. When the kernel execs a file whose **effective** capability bit is
+set, it requires that capability to be inside the process's bounding set — and hosted runtimes
+narrow that set, since they hand the service a high port and have no reason to grant it. The
+exec fails with EPERM.
+
+It is a perfect false negative locally: Docker's default capability set *includes*
+NET_BIND_SERVICE, so every local test passes and the first hosted deploy dies. Reproduce it
+without deploying anything:
+
+```bash
+docker run --rm --cap-drop NET_BIND_SERVICE memo-app
+```
+
+`deploy/Dockerfile` now runs `setcap -r` on the binary and asserts the attribute is gone, so the
+exec depends on nothing the runtime might drop. This image never binds a privileged port — :8080
+by default, :10000 on Render — so the capability was dead weight. The failure is not specific to
+the two-process entrypoint: it reproduces on the plain `exec "$@"` path too.
+
+### `/api/health` returns 200 but every memo endpoint returns 500
+
+The schema is behind the code — `/api/health` reports database *connectivity*, not whether the
+migrations ran. Check what is applied:
+
+```bash
+docker compose exec db psql -U memo -d memo -c "select filename from schema_migrations order by filename;"
+```
+
+Compare against `ls db/migrations/`. Under compose, `docker compose run --rm migrate` applies the
+rest; it is idempotent. Note that `007_owners.sql` prints a **claim link once and never again**
+when it backfills existing memos — capture it from that output, or those memos become
+unreachable.
+
 ## Limits of the owner model
 
 Stated plainly, because the schema cannot enforce what the design gives away:

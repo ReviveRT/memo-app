@@ -74,6 +74,46 @@ RUN composer install \
 
 FROM dunglas/frankenphp:1-php8.3
 
+# --- The file capability that stops this image booting on a hosted platform ----
+#
+# The base image ends with `setcap cap_net_bind_service=+ep /usr/local/bin/frankenphp`, so it
+# can bind :80 as a non-root user. This image never binds a privileged port -- :8080 by
+# default and :10000 on Render, both above 1024 -- so the capability buys nothing here, and
+# the `+e` bit on it actively breaks the container.
+#
+# The mechanism, because the symptom names none of it: when the kernel execs a file whose
+# *effective* capability bit is set, it requires those capabilities to be inside the process's
+# capability bounding set. Container runtimes are free to narrow that set, and hosted ones do
+# -- they have no reason to grant NET_BIND_SERVICE to a service they hand a high port. The
+# exec then fails with EPERM, which surfaces as:
+#
+#     /usr/local/bin/memo-entrypoint: line 56: /usr/local/bin/frankenphp: Operation not permitted
+#     ==> Exited with status 126
+#
+# and says nothing whatsoever about capabilities.
+#
+# This is why the image passed every local test and failed its first real deploy. Docker's
+# default capability set *includes* NET_BIND_SERVICE, so the bounding set locally is wide
+# enough and the exec succeeds; Render's is not. Reproduced on this machine, which is the only
+# reason the cause is stated rather than guessed:
+#
+#     docker run --rm --cap-drop NET_BIND_SERVICE <image>   # EPERM, identical to Render
+#     docker run --rm <image>                               # FrankenPHP starts
+#
+# `setcap -r` removes the attribute entirely, which makes the binary an ordinary executable
+# whose exec depends on nothing the runtime might have dropped. Not `--cap-add` on the
+# platform side: that would be a setting every future deployment has to remember, on a
+# capability this image has no use for.
+#
+# Deliberately not applied to api/Dockerfile. That image runs under local Docker, where the
+# capability is present and harmless, and narrowing the diff keeps this fix to the file whose
+# deployment target actually drops it.
+# The `test -z` is an assertion, not decoration: if a future base image sets the capability by
+# some other means, or setcap silently no-ops, the build fails here rather than producing an
+# image that dies on its first deploy with an error naming a shell line number.
+RUN setcap -r /usr/local/bin/frankenphp \
+    && test -z "$(getcap /usr/local/bin/frankenphp)"
+
 # Three additions over api/Dockerfile, and they are three separate arguments.
 #
 # postgresql-client is for migrations. Compose runs those as a separate one-shot `migrate`
