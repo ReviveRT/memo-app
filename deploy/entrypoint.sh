@@ -56,19 +56,19 @@ if [ -z "${DATABASE_URL:-}" ]; then
     exec "$@"
 fi
 
-# --- Two processes, one container --------------------------------------------
+# --- Several processes, one container ----------------------------------------
 #
 # From here the shell stays as PID 1 and supervises, which is a job worth doing properly
 # because getting it wrong is invisible until it matters. Three things have to hold:
 #
-#   1. **SIGTERM reaches both children.** PID 1 gets the signal on `docker stop` and on every
+#   1. **SIGTERM reaches every child.** PID 1 gets the signal on `docker stop` and on every
 #      platform's deploy-and-replace; children get nothing unless it is forwarded. Without
 #      the trap, the worker is SIGKILLed at the end of the grace period -- mid-job, with its
 #      memo left in `processing` for the reaper to take back some time later. The worker
 #      handles SIGTERM specifically so the job in flight finishes and writes its result
 #      (memo_ai/worker/__main__.py), and that handler is only reachable if the signal arrives.
 #
-#   2. **Either child dying takes the container down.** `wait -n` returns on the first exit,
+#   2. **Any child dying takes the container down.** `wait -n` returns on the first exit,
 #      not the last. A container whose web server has crashed but whose worker still holds
 #      the process alive is the worst outcome available: the platform's health check fails,
 #      the platform restarts nothing because the container is still up, and the logs show a
@@ -76,35 +76,76 @@ fi
 #
 #   3. **The exit status is the dead child's**, so a crash loop is legible in the platform's
 #      dashboard rather than showing as a clean exit 0.
-declare -i worker_pid=0 server_pid=0
+#
+# An array rather than the two named variables this used to hold, because ai-api joined it
+# and a third `foo_pid` would have meant editing the trap and the wait as well. `wait -n`
+# with no arguments waits on *all* children, which is what makes adding one a single line.
+declare -a pids=()
 
 # Not `exec` -- the shell has to stay alive to supervise. `PYTHONUNBUFFERED` for the same
 # reason ai/Dockerfile sets it: stdout to a pipe is block-buffered, so without it the last
 # log lines before a hard exit are lost exactly when they are worth reading.
 PYTHONUNBUFFERED=1 PYTHONPATH=/opt/memo-ai \
     /opt/memo-ai/venv/bin/python -m memo_ai.worker &
-worker_pid=$!
-echo "memo: worker started (pid ${worker_pid}, stt=${STT_PROVIDER:-groq}, enrich=${ENRICH_PROVIDER:-none})"
+pids+=($!)
+echo "memo: worker started (pid $!, stt=${STT_PROVIDER:-groq}, enrich=${ENRICH_PROVIDER:-none})"
+
+# ai-api, which answers Ask. Skipped rather than started when ASK_PROVIDER is `local`,
+# because that backend loads 1,117 MB of Qwen weights that this image deliberately does not
+# contain -- it would come up, report `missing` on /health forever, and refuse every question
+# with a sentence about an image that needs rebuilding. A deployment that wants the local
+# model runs ai-api elsewhere; deploy/README.md has that.
+#
+# It still binds 0.0.0.0:8000, as it does under compose, and there is deliberately no
+# variable here to narrow that. memo_ai/ask/__main__.py pins HOST and PORT as literals and
+# says why: the port is also written into `AI_API_URL`'s default and into compose's
+# healthcheck, so a setting that moved the listener would leave both pointing at a closed
+# socket and name itself in neither failure. An `ASK_HOST=127.0.0.1` here would read as
+# though it did something and do nothing at all.
+#
+# Binding the container's every interface is not a hole in this image either: no port is
+# published for 8000 -- Caddy's is the only one -- so the socket is reachable from inside
+# this container and nowhere else, which is the same property compose relies on.
+if [ "${ASK_PROVIDER:-groq}" = "local" ]; then
+    echo "memo: ASK_PROVIDER=local, not starting ai-api (this image bakes no model)" >&2
+else
+    PYTHONUNBUFFERED=1 PYTHONPATH=/opt/memo-ai \
+        /opt/memo-ai/venv/bin/python -m memo_ai.ask &
+    pids+=($!)
+    echo "memo: ai-api started (pid $!, ask=${ASK_PROVIDER:-groq})"
+fi
 
 "$@" &
-server_pid=$!
+pids+=($!)
 
 # Forward, then let the `wait` below reap. `|| true` because a child that has already exited
 # makes kill(1) fail, and `set -e` would turn tidying up into a nonzero exit of its own.
+#
+# `"${pids[@]}"` quoted and expanded per element, so this stays correct at two children or
+# four. Guarded on the array being non-empty: `kill -TERM` with no pid at all is a usage
+# error, and -- far worse -- an unquoted empty expansion once made this `kill -TERM 0`, which
+# signals every process in the group including PID 1 itself.
 shutdown() {
     echo "memo: shutting down"
-    kill -TERM "${worker_pid}" "${server_pid}" 2>/dev/null || true
+
+    if [ ${#pids[@]} -gt 0 ]; then
+        kill -TERM "${pids[@]}" 2>/dev/null || true
+    fi
 }
 trap shutdown TERM INT
 
 # `set -e` would abort here the moment the first child exits nonzero, skipping the shutdown
-# of the other one and leaving it to be SIGKILLed. The point of this block is to run *after*
+# of the others and leaving them to be SIGKILLed. The point of this block is to run *after*
 # a failure, so the flag comes off for it.
 set +e
-wait -n "${worker_pid}" "${server_pid}"
+
+# No pid arguments: `wait -n` with none waits on every child and returns on the first to
+# exit, which is exactly the semantics (2) above asks for and is what lets a child be added
+# without touching this line.
+wait -n
 first_status=$?
 
-# Whichever went first, the other one goes too -- see (2) above.
+# Whichever went first, the others go too -- see (2) above.
 shutdown
 wait
 exit "${first_status}"

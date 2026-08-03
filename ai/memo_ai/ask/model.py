@@ -134,14 +134,31 @@ _LOAD_FAILED = (
     "The local model could not be loaded. See the ai-api logs for the reason."
 )
 
+# The hosted backend's one unavailable state -- no key, so nothing to ask. It lives
+# here rather than in memo_ai/ask/hosted.py for the reason the mapping below exists
+# at all: `/ask` refuses before the first byte by looking the state up here, and
+# whichever backend is configured raises the same sentence for a state that changed
+# in between. Splitting the four across two modules would give app.py a KeyError on
+# exactly the deployment this backend is for.
+_UNCONFIGURED = (
+    "Ask is not configured: GROQ_API_KEY is not set on this deployment. Set it, or "
+    "run the local model instead."
+)
+
 # Why a question cannot be answered, per state. One mapping, because two callers
 # need it and they must not disagree: `/ask` refuses with a 503 *before* the
-# response begins, and `Model.stream` raises the same sentence for a state that
+# response begins, and the model's `stream` raises the same sentence for a state that
 # changed in between. A second copy is a second thing to forget.
+#
+# Four keys for two backends, and no state is shared: `Model` reports missing,
+# loading or failed and never unconfigured; `HostedModel` reports only unconfigured.
+# One mapping anyway, because app.py holds whichever backend it was given and must
+# not have to know which subset of these it can see.
 UNAVAILABLE = {
     "missing": _MISSING,
     "loading": _LOADING,
     "failed": _LOAD_FAILED,
+    "unconfigured": _UNCONFIGURED,
 }
 
 _BUSY = (

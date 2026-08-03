@@ -29,7 +29,8 @@ from datetime import UTC, datetime
 import psycopg
 
 from memo_ai.ask import prompt, retrieval
-from memo_ai.ask.model import Model, ModelUnavailable
+from memo_ai.ask.backend import Backend
+from memo_ai.ask.model import ModelUnavailable
 from memo_ai.ask.retrieval import Source
 
 log = logging.getLogger(__name__)
@@ -67,7 +68,7 @@ class Event:
 
 def answer(
     connection: psycopg.Connection,
-    model: Model,
+    model: Backend,
     question: str,
     *,
     owner_id: str,
