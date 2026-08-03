@@ -6,9 +6,45 @@ named collections, and set a reminder on anything that needs to come back to you
 
 Two screens: a landing page at `/`, and the app itself at `/memos`.
 
-> **Status: skeleton.** This file is scaffolded by MEMO-01 and finished by
-> MEMO-26. Sections marked _TODO_ are not yet true — don't follow them as
-> instructions yet.
+Everything runs on your own machine. No account, no API key, no `.env` — the
+models ship inside the images, so the stack works with networking switched off.
+
+## Contents
+
+**Getting it running**
+
+- [Quickstart](#quickstart) — `docker compose up`, what the first build costs, and
+  [what to do when something looks wrong](#if-something-looks-wrong)
+
+**Using it**
+
+- [Recording](#recording) — the mic, the language picker, the two size caps, and what happens when a memo fails
+- [Editing, renaming and deleting](#editing-renaming-and-deleting) — fixing what a model got wrong
+- [Searching](#searching) — phrases, exclusions, and date ranges
+- [Collections](#collections) — named folders, and the fast memos in none of them
+- [Reminders](#reminders) — alarms and timers, and why they only fire in an open tab
+- [Asking your memos](#asking-your-memos) — a local model that answers with citations
+- [Whose memos are whose](#whose-memos-are-whose) — one cookie instead of an account
+
+**Configuring and tuning**
+
+- [Configuration](#configuration) — every environment variable, and [where a key goes](#api-keys-and-what-changes-if-you-add-one)
+- [Transcription](#transcription) — faster-whisper, model choice, accuracy, speed, and the `groq` option
+- [Enrichment](#enrichment) — title, summary, tags and category from a 1.5B model
+- [What it costs to run](#what-it-costs-to-run) — memory, and what to turn off first
+- [What this costs, and what it would cost hosted](#what-this-costs-and-what-it-would-cost-hosted) — $0, read rather than asserted, plus the projection
+
+**Under the hood**
+
+- [Architecture](#architecture) — the six services, what waits for what, and the three volumes
+- [Repository layout](#repository-layout) — what is in each directory
+- [HTTP API](#http-api) — every route, and the conventions behind them
+- [Assumptions](#assumptions) — what this is not built for
+- [Development](#development) — the tests, everyday commands, migrations, and working outside Docker
+
+Design reasoning and rejected alternatives live in [`NOTES.md`](NOTES.md);
+deploying this somewhere other than your laptop lives in
+[`deploy/README.md`](deploy/README.md).
 
 ## Quickstart
 
@@ -84,12 +120,45 @@ is no Metal backend for CTranslate2 and no GPU passthrough into a Linux containe
 on macOS — so an emulated x86 image is not slower, it is unusable. `NOTES.md` has
 the detail.
 
+### If something looks wrong
+
+Four things look like failures and are not:
+
+- **`migrate` shows as `exited (0)`.** That is the whole job. It is a one-shot that
+  applies the SQL in `db/migrations/` and stops; the services that need the schema
+  wait for it to have exited *successfully* before they start.
+- **The first build sits on one step for minutes.** Compiling llama.cpp is about
+  four minutes of that and prints little. `docker compose build --progress=plain`
+  if you want to watch it.
+- **The first memo after `up` is slower than the ones after it.** Both models load
+  on first use rather than at boot, so the first recording pays for the load and
+  nothing after it does.
+- **A memo sits in `queued` for a second.** `WORKER_POLL_SECONDS` is how long a
+  replica waits after finding the queue empty. That bounds pickup, not throughput.
+
+And five that are:
+
+| What you see | What it is |
+| --- | --- |
+| **Record** says it needs a secure context | You are on a LAN IP. Open `http://localhost:5173` — the note under [Quickstart](#quickstart) has why. Typing memos works anywhere |
+| `Bind for 0.0.0.0:5432 failed: port is already allocated` | Something else on your machine owns that port. Set `POSTGRES_PORT`, `API_PORT` or `WEB_PORT` in `.env` |
+| A worker is killed, or memos fail with a load error | The stack wants near 7 GB at its worst moment, which is more than a default Docker Desktop VM allows. Raise it under Settings → Resources, or see [What it costs to run](#what-it-costs-to-run) for the four things to turn off |
+| Uploads fail with no message the app can explain | PHP dropped the bytes before the app saw them. `curl -s localhost:8080/api/health` reports `max_audio_bytes` against `upload_max_filesize` and flags a mismatch |
+| `docker compose up` cannot reach the daemon | Docker Desktop is not running |
+
+A **failed** memo says why on its own card and carries a **Retry** button; most of
+those sentences describe something you can fix. [What happens to a
+memo](#what-happens-to-a-memo-and-what-happens-when-it-goes-wrong) has the failure
+model, and `docker compose logs -f ai-worker` has the detail behind any of it.
+
 ## Recording
 
 Press **Record**, speak, press **Stop**. The memo appears in the list as soon as
 the API has stored it, and the transcript fills in when the worker gets to it.
-**Discard** throws a recording away before it is uploaded — once it is sent there
-is no delete yet.
+**Discard** throws a recording away before it is uploaded — no row is created, no
+worker is spent on it, and no audio reaches the volume. Once a memo exists, the
+way to get rid of it is **Delete memo** on its own card; see
+[Editing, renaming and deleting](#editing-renaming-and-deleting).
 
 ### Telling it what language you are speaking
 
@@ -293,6 +362,44 @@ wrong in.
 
 You can watch all of it in `docker compose logs -f ai-worker`.
 
+## Editing, renaming and deleting
+
+Open a memo and three of its fields are yours rather than the worker's: the
+**title**, the **transcription**, and whether the memo exists at all.
+
+| Control | What it does |
+| --- | --- |
+| **Rename** _(beside the title)_ | Replaces the generated title, up to 200 characters. Save it empty and the memo goes back to being labelled by the first line of its transcript |
+| **Edit transcription** | Opens the transcript in a text box. Only appears on a memo that has one |
+| **Delete memo** | Removes the row, the recording and any reminders on it |
+
+**Both of the editable fields are guesses, which is exactly why they are
+editable.** A title is a phrase a 1.5B model chose, and a wrong one is a memo you
+cannot find again. A transcript is what a speech model thought it heard, and a
+wrong one is a memo that no longer says what was said — the accuracy tables under
+[Transcription](#transcription) are also a list of the ways that happens. The
+recording is what is kept as evidence; the transcript is a derivative of it.
+
+**Nothing in the app rewrites either.** The typographic pass described under
+[Punctuation and paragraphs](#punctuation-and-paragraphs) will not respell a word,
+and a test asserts that over every fixture in the suite. Only a person may change
+these two, and the API accepts them from nobody else — `status`, `tags` and the
+rest belong to the queue.
+
+A transcript can be **corrected but not cleared**, and that asymmetry is
+deliberate. Clearing a title is a real operation: the memo falls back to its
+transcript, which is still there. Clearing a transcript would leave a memo with no
+text at all — unfindable by search, an empty card, indistinguishable from one whose
+recording produced nothing. Somebody who wants that wants Delete, so the field is
+refused empty on both sides.
+
+**Delete says what else goes before it happens.** A memo is not only its
+transcript: deleting one unlinks the recording from the volume and cascades its
+reminders inside Postgres, and none of that is visible from the card. So the
+confirmation names them — "This also removes the recording and 2 reminders. It
+cannot be undone." — rather than asking a bare "Are you sure?". Left to guess,
+a careful person assumes the worst and does not press it.
+
 ## Searching
 
 The **Filter memos** box narrows the list as you type. Plain words are matched by
@@ -494,6 +601,14 @@ Two things follow, and they are the honest cost of having no accounts:
 - **Clearing cookies loses them** unless the link was saved somewhere. There is nothing to
   recover through, because there is no email to recover to.
 
+**The database stores only a hash of it.** `owners.token_hash` is the SHA-256 of the
+token in lowercase hex, with a unique index on it, and the lookup on every request
+compares hashes rather than secrets — so a dump of the table lets nobody impersonate
+a browser, and no plaintext token reaches a query log. Plain SHA-256 rather than
+bcrypt or argon2 is the right call here rather than a shortcut: the token is 128 bits
+from a CSPRNG, so there is no password to guess and a slow hash would only add
+milliseconds to every request. `db/migrations/007_owners.sql` argues both halves.
+
 ### Why a cookie rather than localStorage
 
 localStorage is the obvious place to keep an id, and it does not work here. The recording
@@ -547,10 +662,12 @@ reference and contains no real credentials.
 | `POSTGRES_PORT` | `5432` | Host port for Postgres. Change it if something else on your machine owns 5432 |
 | `API_PORT` | `8080` | Host port for the API |
 | `WEB_PORT` | `5173` | Host port for the frontend |
-| `STT_PROVIDER` | `local` | Transcription provider: `local` \| `fake` \| `openai`. `openai` is recognised but not built — see below |
+| `STT_PROVIDER` | `local` | Transcription provider: `local` \| `fake` \| `groq` \| `openai`. `groq` sends recordings to a third party; `openai` is recognised but not built — see [Transcription](#transcription) |
 | `STT_FALLBACK` | `local` | Provider used when the primary cannot run at all. Not used when a recording simply produced no words |
 | `STT_MODEL` | `large-v3-turbo` | Whisper size for the `local` provider. The accuracy lever — see the table below before changing it |
 | `STT_LANGUAGE` | _(empty)_ | ISO code for **every** recording (`en`, `ru`, …). Empty detects it per recording. ~30% faster and safer on short or accented audio. Overridden per memo by the picker beside **Record** |
+| `GROQ_API_KEY` | _(empty)_ | Needed only by `STT_PROVIDER=groq`. Missing is not a boot failure: the first voice memo fails naming this variable, then `STT_FALLBACK` transcribes it locally |
+| `GROQ_STT_MODEL` | `whisper-large-v3-turbo` | Which model Groq runs. Separate from `STT_MODEL` because the two spell the same weights differently. `whisper-large-v3` is the other accepted value |
 | `ENRICH_PROVIDER` | `local` | Who writes the title, summary, tags and category: `local` \| `none`. `local` runs Qwen2.5-1.5B-Instruct in the worker from weights baked into the image. `none` skips the pass and falls back to a heuristic title — see [Enrichment](#enrichment) |
 | `ENRICH_MODEL_PATH` | _(from the image)_ | Where the enrichment GGUF is. Set by `ai/Dockerfile`; **deliberately not listed in `docker-compose.yml`**, because any line there replaces the image's value with an empty string. Change the model with a build arg instead |
 | `ASK_TOP_K` | `3` | How many memos go in front of the model for a question. With `ASK_MEMO_CHARS`, this **is** the latency — see [Asking your memos](#asking-your-memos). Five is free on a fast machine |
@@ -569,8 +686,58 @@ reference and contains no real credentials.
 | `REAP_AFTER_SECONDS` | `3600` | How long a memo may sit in `processing` before a worker assumes the one that claimed it is gone. **Must exceed the longest a healthy job can take** (3,300s at the defaults, of which 420s is enrichment). Raising `MAX_AUDIO_SECONDS` raises that ceiling, and so does turning enrichment on; the worker recomputes it at boot and warns if the lease no longer clears it |
 | `REAPER_INTERVAL_SECONDS` | `60` | How often each replica looks for expired leases |
 | `AUDIO_DIR` | `/data/audio` | Audio path inside the containers, on the shared `audio` volume. Changing it needs a rebuild with a matching `--build-arg AUDIO_DIR` — see the note in `.env.example` |
+| `OWNER_COOKIE` | `memo_owner` | Name of the cookie holding this browser's identity. Renaming it silently logs every existing browser out: they present the old name, nothing reads it, and their memos need a claim link to reach |
+| `OWNER_COOKIE_DAYS` | `400` | How long a browser is remembered without visiting. A ceiling rather than a round number — Chrome clamps cookie lifetimes to 400 days and ignores anything longer. The window slides, so it means "since you last opened the app" |
+| `LOG_LEVEL` | `INFO` | Worker and `ai-api` verbosity: `DEBUG` \| `INFO` \| `WARNING` \| `ERROR` \| `CRITICAL`. Deliberately absent from `.env.example` and `docker-compose.yml` — it is a thing you set for one debugging session with `docker compose run`, not a thing a deployment configures. An unknown name is refused at boot rather than silently treated as `WARNING` |
 
-### Transcription
+Six more exist for hosted deployments, and **leaving `AUDIO_BUCKET` empty means
+none of them apply**. Recordings then live on the `audio` volume at `AUDIO_DIR`,
+which is what local compose wants.
+
+| Variable | Default | Controls |
+| --- | --- | --- |
+| `AUDIO_BUCKET` | _(empty)_ | Bucket name, and the switch itself. Set it and both runtimes change: the API writes and signs playback URLs through `App\Storage\S3AudioStorage`, the worker fetches through `ai/memo_ai/blobs.py`. There is no `AUDIO_DRIVER`, because a driver name and a bucket name are two ways to spell one fact and a first way to contradict it |
+| `AUDIO_BUCKET_ENDPOINT` | _(empty)_ | S3-compatible endpoint URL |
+| `AUDIO_BUCKET_KEY` | _(empty)_ | Access key id |
+| `AUDIO_BUCKET_SECRET` | _(empty)_ | Secret access key |
+| `AUDIO_BUCKET_REGION` | `auto` | Cloudflare R2 requires the literal `auto` and ignores it; real S3 needs its own |
+| `AUDIO_BUCKET_PATH_STYLE` | `false` | Path-style addressing (`endpoint/bucket/key`) rather than the bucket as a subdomain. R2 and MinIO want `true`; AWS S3 does not |
+
+**Half-configuring that group is refused rather than tolerated.** Naming a bucket
+with no endpoint or credentials fails the worker at startup and the API on the
+first upload, instead of failing memos one at a time with a misleading message.
+`deploy/README.md` has the R2 setup and why a free tier needs it: that filesystem
+is rebuilt on every deploy, so without a bucket a memo's transcript survives in
+Postgres while its recording quietly disappears.
+
+### API keys, and what changes if you add one
+
+**Nothing here needs a key, and only one key does anything.** Transcription,
+enrichment, Ask and search all run in the containers from weights baked into the
+`ai` image. That is the default path, and it is the path the accuracy and latency
+tables in this file were measured on.
+
+| Variable | What it unlocks | What changes if you set it |
+| --- | --- | --- |
+| `GROQ_API_KEY` | `STT_PROVIDER=groq` — the same whisper model, ~145× faster | **Your recordings are uploaded to a third party.** Nothing else. See [`groq`](#groq--the-same-model-145-faster) for the warning in full |
+| `AUDIO_BUCKET_*` | Recordings in an S3-compatible bucket instead of a Docker volume | Where the bytes live. No model, no inference and no transcript leaves your machine |
+| `OPENAI_API_KEY` | Nothing. **Read by no code in this repository** | Nothing at all. It is passed through for whoever writes a hosted adapter |
+| `ANTHROPIC_API_KEY` | Nothing, same as above | Nothing at all |
+
+Put them in `.env` beside the checkout, or in front of the command for one run:
+
+```bash
+GROQ_API_KEY=gsk_... STT_PROVIDER=groq docker compose up
+```
+
+`.env` is gitignored and must stay that way; `.env.example` is the committed
+reference and holds no real credentials. The last two rows are in the table because
+a reader who finds them in `.env.example` deserves to be told they are inert rather
+than left to wonder which model is billing them — `python -m memo_ai.costs` reads
+`$0.0000` out of the database rather than asserting it. See [What this costs, and
+what it would cost hosted](#what-this-costs-and-what-it-would-cost-hosted).
+
+## Transcription
 
 Recordings are transcribed **on your machine**, by
 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) running inside the
@@ -739,61 +906,6 @@ every input to 30 seconds before running it — so three seconds of audio costs 
 thirty would. That is the architecture, not a setting. The only lever left below
 ~5 s is a smaller model, and the table above says what that costs.
 
-### What it costs to run
-
-Memory, mostly, and the decisions compound: turbo is 1.1 GB resident, batching
-takes the peak to **2.4 GB per replica**, and enrichment adds about **1.7 GB** to a
-worker once its model has loaded. With `replicas: 2` the worst moment is near
-**7 GB**, which is more than a default Docker Desktop VM will give you.
-
-It is less than doubling the two numbers suggests, and the reason is worth knowing
-before you start cutting. Measured on a worker doing nothing but enrichment:
-
-| | RSS | anonymous | file-backed |
-| --- | --- | --- | --- |
-| before the model loads | 18 MB | 13 MB | 5 MB |
-| model loaded | 1,492 MB | 412 MB | 1,081 MB |
-| after a full-length memo | 1,708 MB | 627 MB | 1,081 MB |
-
-The file-backed gigabyte is the `mmap`-ed weight file — the same 1,117 MB the
-build reports, counted in MiB — and both replicas share one copy of it in page
-cache: the second replica to load reports those pages as
-`Shared_Clean` with `Private_Clean` at zero. Only the anonymous part, the KV cache
-and compute buffers, is paid twice. So two enriching replicas cost about 2.3 GB
-between them rather than 3.4.
-
-The other softener is that the model loads on the first memo that needs enriching
-rather than at boot, so a stack handling only text memos never pays for it at all.
-
-**`ai-api` is the third process holding that same file**, and it is the cheapest of
-the three because it does the same trick from the other side. It loads at boot
-rather than lazily — see [Asking your memos](#asking-your-memos) for why — and
-measured on two containers from the same image, both with the model up:
-
-| | RSS | anonymous | shared, file-backed |
-| --- | --- | --- | --- |
-| `ai-api`, model resident | 1,402 MB | 310 MB | 1,092 MB, `Shared_Clean`, `Private_Clean` 0 |
-
-So the sixth service adds roughly **310 MB** to a stack whose workers have already
-mapped those weights, not 1.4 GB. Its anonymous share is smaller than a worker's
-because its context window is sized from `ASK_TOP_K × ASK_MEMO_CHARS` (5,120
-tokens) rather than from a whole 10,000-character memo (12,288).
-
-Four levers if it is still too much, in the order worth pulling them:
-
-1. `ENRICH_PROVIDER=none` — gives back the largest single chunk, and costs the
-   summary, tags and category. Titles keep working.
-2. `docker compose up --scale ai-api=0` — gives back ~310 MB and costs Ask.
-   Nothing else changes; the rest of the stack does not depend on it.
-3. `replicas: 1` in `docker-compose.yml` — halves the per-replica part, and costs
-   the parallelism that keeps a short memo from queueing behind a long one.
-4. `STT_MODEL=base` — 142 MB instead of 1.6 GB, and costs accuracy; the table
-   above is what you are trading away.
-
-Disk is the other half, and it is paid once rather than per replica — the baked
-weights live in the image, which both replicas share. See
-[Quickstart](#quickstart) for the number.
-
 ### Repeated words
 
 Say the same word ten times and whisper will happily write it two hundred times.
@@ -927,7 +1039,12 @@ was declined for now because it costs an extra alignment pass on every memo, and
 because the primer above is already proof that perturbing the decode options can
 break something else.
 
-Three other providers exist behind the same interface:
+### The four providers
+
+Everything above describes `local`, which is the default. Three others exist behind
+the same interface, and the interface is the point: what proves a seam is several
+implementations really going through it with different formats, different failure
+modes and different costs.
 
 | `STT_PROVIDER` | What happens | Leaves your machine? |
 | --- | --- | --- |
@@ -1020,7 +1137,7 @@ audio, so the levers are the model and `MAX_AUDIO_SECONDS` — not the sample ra
 into what they would have cost on `whisper-1`; see [What this costs, and what it
 would cost hosted](#what-this-costs-and-what-it-would-cost-hosted).
 
-### Enrichment
+## Enrichment
 
 Once a memo has its transcript, a second pass gives it a **title, a one-line
 summary, up to four tags and a category** — `task`, `idea` or `note`. Like
@@ -1088,7 +1205,64 @@ A failed enrichment never fails a memo. It lands as a sentence in
 `failed` continues to mean one thing only: no transcript.
 
 Every title is editable, from the memo's own card, precisely because a guess this
-cheap is sometimes going to be wrong.
+cheap is sometimes going to be wrong — see [Editing, renaming and
+deleting](#editing-renaming-and-deleting).
+
+## What it costs to run
+
+Memory, mostly, and the decisions compound: turbo is 1.1 GB resident, batching
+takes the peak to **2.4 GB per replica**, and enrichment adds about **1.7 GB** to a
+worker once its model has loaded. With `replicas: 2` the worst moment is near
+**7 GB**, which is more than a default Docker Desktop VM will give you — raise it
+under Settings → Resources, or pull one of the four levers below.
+
+It is less than doubling the two numbers suggests, and the reason is worth knowing
+before you start cutting. Measured on a worker doing nothing but enrichment:
+
+| | RSS | anonymous | file-backed |
+| --- | --- | --- | --- |
+| before the model loads | 18 MB | 13 MB | 5 MB |
+| model loaded | 1,492 MB | 412 MB | 1,081 MB |
+| after a full-length memo | 1,708 MB | 627 MB | 1,081 MB |
+
+The file-backed gigabyte is the `mmap`-ed weight file — the same 1,117 MB the
+build reports, counted in MiB — and both replicas share one copy of it in page
+cache: the second replica to load reports those pages as
+`Shared_Clean` with `Private_Clean` at zero. Only the anonymous part, the KV cache
+and compute buffers, is paid twice. So two enriching replicas cost about 2.3 GB
+between them rather than 3.4.
+
+The other softener is that the model loads on the first memo that needs enriching
+rather than at boot, so a stack handling only text memos never pays for it at all.
+
+**`ai-api` is the third process holding that same file**, and it is the cheapest of
+the three because it does the same trick from the other side. It loads at boot
+rather than lazily — see [Asking your memos](#asking-your-memos) for why — and
+measured on two containers from the same image, both with the model up:
+
+| | RSS | anonymous | shared, file-backed |
+| --- | --- | --- | --- |
+| `ai-api`, model resident | 1,402 MB | 310 MB | 1,092 MB, `Shared_Clean`, `Private_Clean` 0 |
+
+So the sixth service adds roughly **310 MB** to a stack whose workers have already
+mapped those weights, not 1.4 GB. Its anonymous share is smaller than a worker's
+because its context window is sized from `ASK_TOP_K × ASK_MEMO_CHARS` (5,120
+tokens) rather than from a whole 10,000-character memo (12,288).
+
+Four levers if it is still too much, in the order worth pulling them:
+
+1. `ENRICH_PROVIDER=none` — gives back the largest single chunk, and costs the
+   summary, tags and category. Titles keep working.
+2. `docker compose up --scale ai-api=0` — gives back ~310 MB and costs Ask.
+   Nothing else changes; the rest of the stack does not depend on it.
+3. `replicas: 1` in `docker-compose.yml` — halves the per-replica part, and costs
+   the parallelism that keeps a short memo from queueing behind a long one.
+4. `STT_MODEL=base` — 142 MB instead of 1.6 GB, and costs accuracy; the table
+   under [Choosing a model](#choosing-a-model) is what you are trading away.
+
+Disk is the other half, and it is paid once rather than per replica — the baked
+weights live in the image, which both replicas share. See
+[Quickstart](#quickstart) for the number.
 
 ## What this costs, and what it would cost hosted
 
@@ -1240,6 +1414,101 @@ The split matters more than the total: both models are `mmap`-ed read-only, so
 most of a replica's resident set is shared with the other one. [What it costs to
 run](#what-it-costs-to-run) has the table.
 
+## Architecture
+
+Six services, three volumes, one Postgres. The short version is here; the
+reasoning behind each choice, and what was rejected, is in
+[`NOTES.md`](NOTES.md).
+
+| Service | Image | What it is | Host port |
+| --- | --- | --- | --- |
+| `db` | `postgres:16-alpine` | The database, and the job queue | `5432` |
+| `migrate` | `postgres:16-alpine` | Runs `db/migrate.sh` once and exits 0 | — |
+| `api` | `dunglas/frankenphp:1-php8.3` | Laravel, every `/api/*` route | `8080` |
+| `web` | `node:24-alpine` | Vite dev server, proxying `/api` to `api` | `5173` |
+| `ai-worker` | `python:3.12-slim` | Transcription and enrichment, **2 replicas** | — |
+| `ai-api` | same image as `ai-worker` | The model behind `POST /api/ask` | — |
+
+Who talks to whom, and there is nothing else:
+
+| From | To | Over |
+| --- | --- | --- |
+| browser | `web` | `http://localhost:5173` — the only origin the browser ever sees |
+| `web` | `api` | The dev server proxies `/api/*` through unchanged. That is the whole CORS answer: one origin, no preflight, and `api/config/cors.php` switches Laravel's stock wildcard off naming this proxy as the reason it can |
+| `api` | `db` | The memo row, and every read the frontend makes |
+| `api` | `audio` volume | The uploaded recording, written under a key the client never holds |
+| `api` | `ai-api` | `POST /ask`, proxied as bytes; NDJSON streams back the same way |
+| `ai-api` | `db` | Retrieval, through the same full-text index `?q=` uses |
+| `ai-worker` ×2 | `db` | Claims a row, writes the transcript, then publishes it |
+| `ai-worker` ×2 | `audio` volume | Reads the recording to transcribe it, and unlinks it when the memo is deleted |
+
+Only `web`, `api` and `db` publish a host port. `ai-api` and `ai-worker` are
+reachable on the compose network and nowhere else — `AI_API_URL` defaults to
+`http://ai-api:8000`, which is a service name that resolves there and nowhere else.
+
+**The queue is the memo row.** `POST /api/memos` writes it `queued`; a worker
+replica claims it with a conditional `UPDATE`, and the claim is what moves it to
+`processing`. There is no jobs table, no Redis, no Laravel queue worker and
+nothing to reconcile after a crash — [What happens to a
+memo](#what-happens-to-a-memo-and-what-happens-when-it-goes-wrong) has the
+two-commit protocol, the lease and the reaper that make that safe with two
+replicas writing.
+
+**Startup is gated on health, not on process start**, and that was written after
+reproducing the failure rather than in anticipation of it. Plain `depends_on` waits
+only for a container to exist, which lets `migrate` race Postgres' `initdb` —
+`migrate` exits non-zero and `api` never starts. So `db` carries a `pg_isready`
+healthcheck, and everything that needs the schema waits for `migrate` to have
+*completed successfully* rather than merely started:
+
+```
+db (healthy) ──▶ migrate (exited 0) ──┬──▶ api (healthy) ──▶ web
+                                      ├──▶ ai-worker ×2
+                                      └──▶ ai-api
+```
+
+**`api` deliberately does not wait for `ai-api`.** Waiting would put a model load
+in front of the first recording, so Ask is the one feature that can be missing
+while everything else works — which is also what makes `--scale ai-api=0` a
+supported configuration rather than a broken one.
+
+**Every value in `docker-compose.yml` carries a literal default inline**, which is
+the other reason `up` needs no `.env`. Compose interpolates from `./.env` only — it
+never reads `.env.example` — so on a fresh clone an unguarded `${POSTGRES_PASSWORD}`
+is empty and Postgres exits 1 with *"Database is uninitialized and superuser password
+is not specified"*. Every reference is `${VAR:-default}` and never `${VAR-default}`,
+because only the colon form also substitutes when a variable is *set but empty* —
+which is exactly what a blank or commented-out line in somebody's `.env` produces.
+
+**Three volumes, and they fail differently.**
+
+| Volume | Holds | If you lose it |
+| --- | --- | --- |
+| `pgdata` | Postgres' data directory | Every memo, collection, reminder and owner |
+| `audio` | The uploaded recordings | The recordings; transcripts survive in Postgres |
+| `model-cache` | A model nobody baked, if you asked for one | Nothing — it refills from HuggingFace |
+
+`docker compose down -v` takes all three, which is the one way to reach the pair of
+404s described under [Playing a recording
+back](#playing-a-recording-back): a row naming a blob the volume no longer has.
+
+The `audio` volume is shared rather than served over HTTP, and that is why both the
+`api` and `ai-worker` containers run as uid `10001` — `unlink(2)` checks the
+directory rather than the file, so a worker on a different non-root uid could read
+every blob and delete none of them.
+
+**One image behind `ai-worker` and `ai-api`.** One build context, one dependency
+set, one uid, one copy of the model weights on disk — and, because both processes
+`mmap` the same GGUF, one copy in memory too. That is worth roughly a gigabyte; see
+[What it costs to run](#what-it-costs-to-run).
+
+**No ORM, and no Laravel schema.** The schema is owned by `db/migrations/` and
+applied by `db/migrate.sh`; persistence goes through PDO with prepared statements
+behind a repository per aggregate. Eloquent, Laravel's own migrations, and its
+queue, cache and session tables are all unused, and `APP_KEY` is intentionally
+unset because nothing here encrypts. The trade — hand-written SQL, and a repository
+the tests substitute a fake for — is argued in `NOTES.md`.
+
 ## Repository layout
 
 ```
@@ -1261,11 +1530,20 @@ memo_ai.worker` and `ai-api` runs `python -m memo_ai.ask`. One build context, on
 dependency set, one uid, one copy of the model weights on disk — and, because both
 processes `mmap` the same file, one copy in memory too.
 
-Laravel's own migrations, Eloquent, queue, cache and session tables are all
-unused: the schema is owned by `db/migrations/` and applied by `db/migrate.sh`,
-persistence goes through PDO with prepared statements and no ORM, and the job
-queue is the `memos` row itself, consumed by the Python worker. `APP_KEY` is
-intentionally unset — nothing here encrypts.
+Inside `api/`, `app/Http/` holds the controllers, form requests and the two
+middleware; `app/Services/` holds the domain types and the operations on them;
+`app/Repositories/` holds every SQL statement in the project. Nothing above the
+repositories knows it is talking to Postgres, which is what lets the test suite run
+on sqlite in memory — see [Development](#development).
+
+Inside `ai/`, the same split holds and `memo_ai/memos.py` is its `Repositories`:
+every statement against the `memos` table from the worker's side lives there, and
+nothing above it writes SQL. `memo_ai/worker/` is the process — wiring, signals and
+the claim loop; `memo_ai/pipeline.py` is what one job does between the claim and the
+result write, and holds no transaction open while it runs a model. `memo_ai/stt/`
+and `memo_ai/enrich/` are the two provider interfaces, `memo_ai/ask/` is the service
+behind `POST /api/ask`, and `memo_ai/costs.py` is the report. `ai/tests/` runs
+without a database and, apart from the fixtures, without a model.
 
 ## HTTP API
 
@@ -1284,7 +1562,7 @@ predicate, so nothing distinguishes an id that is taken from one that is free.
 | `GET` | `/memos` | The list, newest first. See the parameters below |
 | `GET` | `/memos/{memo}` | One memo by id. What a citation opens when the screen is not holding it |
 | `POST` | `/memos` | Create one: JSON `{text}`, or `multipart/form-data` with `audio` |
-| `PATCH` | `/memos/{memo}` | `{collection_id}` — file it, or `null` to unfile. `{title}` — rename it, or `null` to clear. Either field, or both |
+| `PATCH` | `/memos/{memo}` | `{collection_id}` — file it, or `null` to unfile. `{title}` — rename it (max 200), or `null` to clear. `{transcript}` — correct it (1–10,000 chars, **not** nullable). Any one field or any combination; a body that changes nothing is a 422 |
 | `POST` | `/memos/{memo}/retry` | Send a failed memo back to the queue. No body. 409 if it is not `failed` |
 | `GET` | `/memos/{memo}/audio` | The original recording, with byte ranges. 404 for a typed memo |
 | `DELETE` | `/memos/{memo}` | 200 with the memo it removed. Takes the recording and any reminders with it |
@@ -1407,34 +1685,53 @@ A few response conventions worth knowing before writing a client:
   is a test asserting so. Only a person may. `status`, `tags` and the rest stay out for
   a different reason — they belong to the queue and the worker, and a client setting
   `status` would be a client claiming a job.
-- **`category` is on every memo, and null on all of them today.** It is the enrichment
-  pass's answer to what kind of thing a memo is — `task`, `idea` or `note` — and
-  MEMO-21 owns the enricher that writes it, so nothing fills the column on the shipped
-  configuration. It is in the projection regardless, which is what makes landing that
-  enricher a worker change rather than a worker change and an API change. Nothing
-  constrains the value either: the column has no CHECK behind it and the vocabulary
-  belongs to the enricher, so render what arrives rather than switching on those three.
-  `summary` and `tags` are empty for the same reason, and fill in the same way.
+- **`category`, `summary` and `tags` are filled by the enrichment pass, and are null
+  on a memo it has not reached yet.** `category` is its answer to what kind of thing a
+  memo is — `task`, `idea` or `note` — and on `ENRICH_PROVIDER=none` all three stay
+  empty for the life of the memo while the title still fills in from a heuristic. They
+  arrive a few seconds after the transcript, on the poll after the second commit, so a
+  client that renders them has to tolerate their absence rather than wait for them.
+  Nothing constrains `category`'s value either: the closed set of three is enforced in
+  the enricher's grammar, and `memos.category` has no CHECK behind it, so render what
+  arrives rather than switching on those three names.
 - **A 5xx body is never shown to the user, whatever it says.** With `APP_DEBUG=false`
   it is `{"message":"Server Error"}`, which tells nobody anything; with it on, it is
   the exception and its trace. The frontend replaces both with a sentence naming the
   log, the same rule the worker applies to ffmpeg's stderr. A 4xx message *is* shown
   verbatim — those are written to be read.
 
-## Architecture
-
-_TODO (MEMO-26): short version here; the reasoning and trade-offs live in
-NOTES.md (MEMO-27)._
-
 ## Assumptions
+
+What this was built to be, stated so that the things it is not are not read as
+oversights.
 
 - **No authentication.** Memos are scoped per browser by a cookie, not by an account —
   see [Whose memos are whose](#whose-memos-are-whose). There is no login, no password
   and no JWT, and the ownership check is a bearer token rather than a security boundary.
-- Not hardened for a public deployment holding anything sensitive.
-- Audio lives on a Docker volume by default, and in an S3-compatible bucket when one is
-  configured (`AUDIO_BUCKET`). The second is what a hosted deployment wants: a free
-  tier's filesystem is rebuilt on every deploy.
+  Anyone holding a browser's claim link holds its memos.
+- **One machine, one person at a time.** Two `ai-worker` replicas make the queue safe
+  against a crash rather than scalable — the whole stack's worst moment is near 7 GB of
+  RAM on one host. Nothing here is sharded, cached or horizontally scaled, and every
+  latency figure in this file was measured with nobody else asking.
+- **Nothing leaves your machine unless you ask it to.** Transcription, enrichment,
+  search and Ask all run in the containers from weights baked into the image, with no
+  key and no network. `STT_PROVIDER=groq` is the one setting that changes that, and it
+  is off by default so that it is a decision rather than an inheritance.
+- **Not hardened for a public deployment holding anything sensitive.** No rate limiting,
+  no audit log, no encryption at rest, and `APP_KEY` deliberately unset because nothing
+  encrypts. `deploy/` exists to put this on a free tier for a demo, not to make it
+  multi-tenant.
+- **Audio lives on a Docker volume**, separate from the database, and in an
+  S3-compatible bucket when one is configured (`AUDIO_BUCKET`). The second is what a
+  hosted deployment wants: a free tier's filesystem is rebuilt on every deploy. Because
+  the two are separate volumes, `docker compose down -v` can leave a transcript whose
+  recording is gone — see [Playing a recording back](#playing-a-recording-back).
+- **Reminders need an open tab.** No service worker and no Web Push, so nothing reaches
+  you with the app closed. The card says so on screen rather than only here.
+- **Titles and summaries are in English whatever language you speak.** The transcript,
+  which is the memo, keeps your own words; the instruction that would fix the label is
+  also the one that hands an injection a lever, and [Enrichment](#enrichment) has the
+  measurement behind declining it.
 
 ## Development
 
@@ -1501,8 +1798,8 @@ missing-duration defect. It skips and names what is missing until they are there
 `ai/tests/fixtures/README.md` has the capture instructions.
 
 `tests/test_local_whisper.py` runs the real model against those same recordings,
-`tests/test_enrich_llm.py` runs the real enrichment model against MEMO-21's
-acceptance criteria — a rambling memo, a malformed answer, an injection — and
+`tests/test_enrich_llm.py` runs the real enrichment model against the three cases
+that decided its design — a rambling memo, a malformed answer, an injection — and
 `tests/test_baked_models.py` checks the weights are where the image put them. All
 three run as part of the command above with nothing extra mounted, because the
 weights are in the image — the `-v memo-app_whisper-cache:/cache` this section used
@@ -1518,5 +1815,108 @@ decisions — which failures send the chain to the fallback and which are termin
 what the enricher sends the model and what it keeps from the answer — and none of
 that needs inference.
 
-_TODO (MEMO-26): running the api tests, running a service outside Docker, applying
-a new migration._
+### Everyday commands
+
+**`web` and `api` are bind-mounted; `ai` is not.** So an edit under `web/` hot-reloads
+through Vite, an edit under `api/` is live on the next request because FrankenPHP reads
+the PHP files each time and nothing runs `config:cache`, and an edit under `ai/` needs
+the image rebuilt:
+
+```bash
+docker compose up -d --build ai-worker ai-api
+```
+
+That is cheap despite the 6.8 GB image — both expensive layers sit above `COPY . .`,
+so a worker edit rebuilds in about five seconds. See [What the first build
+costs](#what-the-first-build-costs) for the two things that are not cheap and when
+they re-run.
+
+| To | Run |
+| --- | --- |
+| Follow one service's logs | `docker compose logs -f ai-worker` |
+| See what is up, and what exited | `docker compose ps` |
+| Watch a memo move through the queue | `docker compose logs -f ai-worker \| grep memo` |
+| Rebuild after a dependency change | `docker compose build api` |
+| Stop, keeping the data | `docker compose down` |
+| Stop, **destroying** memos and recordings | `docker compose down -v` |
+| Open a shell in the api container | `docker compose exec api sh` |
+| Query the database | `docker compose exec db psql -U memo -d memo` |
+| Check the API's own health report | `curl -s localhost:8080/api/health` |
+| Run without Ask | `docker compose up --scale ai-api=0` |
+
+### Applying a new migration
+
+Add a file to `db/migrations/` with the next number and a name, then start the
+stack. `db/migrate.sh` applies every `*.sql` in that directory in filename order,
+skipping the ones already recorded in `schema_migrations`:
+
+```bash
+docker compose up migrate
+```
+
+Four things it guarantees, and all four matter more than they look:
+
+- **Each file runs once.** The ledger is a `schema_migrations` row keyed by
+  filename, inserted in the *same transaction* as the migration itself — so a file
+  that fails halfway leaves neither its changes nor its ledger row, and the next
+  run retries it rather than skipping it.
+- **`ON_ERROR_STOP=1` and `--single-transaction`.** A migration is all-or-nothing;
+  psql's default of carrying on after an error is exactly the wrong behaviour for a
+  schema change.
+- **Two replicas cannot race it.** Each file is applied under a
+  `pg_advisory_xact_lock`, so a second `migrate` waits rather than double-applying.
+- **Re-running is a no-op that says so.** `docker compose down` and up again
+  re-runs the service; it reports `schema up to date, nothing to apply` and leaves
+  `applied_at` on the existing rows untouched.
+
+Two conventions to match. Numbering is a plain zero-padded integer prefix
+(`008_your_change.sql`), because the ledger and the apply order are both the
+filename. And **migrations are forward-only** — `db/migrate.sh` has no `down` path
+and none of the seven files carries one, so a change that needs undoing needs a
+further migration. On a stack you do not mind losing, the other way back is
+`docker compose down -v`.
+
+### Running a service outside Docker
+
+Worth doing for a debugger or a profiler, and not worth doing otherwise — the
+container versions are the ones the tables in this file were measured on. Each
+service needs the runtime its image pins, and `db` running under compose to talk to:
+
+```bash
+docker compose up db migrate
+```
+
+**`web`** — Node 24:
+
+```bash
+cd web && npm install && API_PROXY_TARGET=http://localhost:8080 npm run dev
+```
+
+The variable is load-bearing. Vite's proxy target defaults to `http://api:8080`,
+which is a compose-network name that resolves nowhere else, so without it every
+`/api/*` request fails on DNS rather than on anything you changed.
+
+**`api`** — PHP 8.3 with `pdo_pgsql`, and composer:
+
+```bash
+cd api && composer install && DATABASE_URL=postgresql://memo:memo@localhost:5432/memo php -S localhost:8080 -t public
+```
+
+`php -S` is enough for the JSON routes. Two things it will not reproduce: the upload
+caps in `conf.d/uploads.ini`, so `/api/health` reports your own `php.ini` instead,
+and FrankenPHP's worker mode. Recording will still work as long as the file is small.
+
+**`ai-worker`** — Python 3.12, plus `ffmpeg` and `ffprobe` on `PATH`:
+
+```bash
+cd ai && pip install -r requirements.txt && DATABASE_URL=postgresql://memo:memo@localhost:5432/memo AUDIO_DIR=/tmp/audio python -m memo_ai.worker
+```
+
+Expect this one to be the least pleasant of the three. `llama-cpp-python` ships no
+wheel and compiles llama.cpp on install, the weights are not on your machine — they
+live in the image — so `ENRICH_MODEL_PATH` has to name a GGUF you downloaded and
+`STT_MODEL` is fetched from HuggingFace on first use, and `AUDIO_DIR` has to be a
+path holding the recordings the containerised `api` wrote to a Docker volume.
+`ENRICH_PROVIDER=none` and `STT_PROVIDER=fake` skip both models and make it a
+five-second start, which is usually what somebody debugging the queue actually
+wants.
