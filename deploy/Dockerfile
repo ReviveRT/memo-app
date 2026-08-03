@@ -1,6 +1,8 @@
-# The production image: one container serving the built SPA and the API from one origin.
+# The production image: one container serving the built SPA, the API and a transcription
+# worker from one origin.
 #
-# **Build this from the repository root**, not from api/ or web/ -- it needs both:
+# **Build this from the repository root**, not from api/ or web/ -- it needs api/, web/, db/
+# and ai/memo_ai/ together:
 #
 #     docker build -f deploy/Dockerfile -t memo-app .
 #
@@ -15,10 +17,18 @@
 # Why one container at all: the owner cookie needs one origin (deploy/Caddyfile has the
 # argument), and free tiers give you one web service. The two constraints point the same way.
 #
-# Not included, deliberately: ai-worker and ai-api. The models they bake are ~2.8 GB and
-# neither will run in a free tier's memory. The application degrades honestly without them --
-# a voice memo stays `queued` and a text memo works completely -- and deploy/README.md has
-# what to set to get transcription back through a hosted provider instead (STT_PROVIDER=groq).
+# Not included: the 2.8 GB of model weights ai/Dockerfile bakes, and `ai-api` with them --
+# neither fits a free tier's memory. What *is* included is the worker's source, running against
+# a hosted provider; the worker section further down has that argument and its cost.
+#
+# The claim this header used to make -- that the application "degrades honestly" without any
+# worker, a voice memo staying `queued` while "a text memo works completely" -- was measured
+# and is false. A typed memo is written `queued` too and only the worker moves it on, so an
+# API-only image left every card on the page waiting forever. That is why the worker is here.
+#
+# The one feature genuinely absent is Ask, which needs `ai-api` and a local LLM. /api/ask
+# answers 503 and web/src/api/ask.js turns that into a sentence for the user rather than
+# showing them the API's developer-facing text.
 
 # --------------------------------------------------------------------------
 # The SPA
@@ -155,6 +165,20 @@ RUN python3 -m venv /opt/memo-ai/venv \
 # STT_PROVIDER=groq gives when its key is missing.
 COPY ai/memo_ai/ /opt/memo-ai/memo_ai/
 
+# Compiled here, as root, because the worker cannot do it for itself and fails silently
+# trying. /opt/memo-ai is root-owned and the worker runs as `memo`, so every import attempts
+# a .pyc write into a directory it cannot write and Python swallows the EACCES -- which means
+# the whole package recompiles from source on each start rather than once at build.
+#
+# Measured rather than assumed, because a silent failure is exactly the kind that gets
+# asserted away: importing memo_ai.config as root leaves 2 .pyc files behind, and as `memo`
+# it leaves 0.
+#
+# `|| true` because compileall exits nonzero on a syntax error in *any* file it walks, and
+# refusing to build the API over that would be the wrong trade -- the worker would fail
+# loudly at import anyway, where the traceback is.
+RUN /opt/memo-ai/venv/bin/python -m compileall -q /opt/memo-ai/memo_ai || true
+
 COPY deploy/Caddyfile /etc/caddy/Caddyfile
 COPY deploy/entrypoint.sh /usr/local/bin/memo-entrypoint
 
@@ -208,6 +232,12 @@ ENV SERVER_NAME=":8080"
 ENV STT_PROVIDER=groq \
     STT_FALLBACK=groq \
     ENRICH_PROVIDER=none
+
+# The other half of the compileall above: the .pyc are built and the runtime must stop trying
+# to write more. ai/Dockerfile sets this for the same reason and states it plainly -- turning
+# the write off "makes that a decision instead of a swallowed EACCES". Without it the failure
+# is invisible, which is what made it survive the first pass on this image.
+ENV PYTHONDONTWRITEBYTECODE=1
 
 # On by default, and that is the deliberate reading of "degrade honestly".
 #

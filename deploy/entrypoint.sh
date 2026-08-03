@@ -38,6 +38,24 @@ if [ "${RUN_WORKER:-true}" != "true" ]; then
     exec "$@"
 fi
 
+# The same path, for the case the migration step above deliberately tolerates.
+#
+# This guard is load-bearing and was added after the two-process path broke the promise made
+# thirty lines up. `memo_ai` refuses to start without a database -- "Nothing in this package
+# runs without a database" -- and exits 2. Because either child dying takes the container
+# down, an image started before its database is attached went from "API up, /api/health
+# answers 503" to a crash loop, which is precisely the outcome the comment above says is not
+# worth having. Reproduced before fixing: exit 2, with the web server SIGTERMed a fraction of
+# a second after it began listening.
+#
+# A platform building or health-checking a service before its database exists is a real
+# sequence -- Render's blueprint creates both and does not promise an order -- so the honest
+# response is to serve the API and let /api/health report the truth, not to refuse to boot.
+if [ -z "${DATABASE_URL:-}" ]; then
+    echo "memo: DATABASE_URL is not set, starting the web server without a worker" >&2
+    exec "$@"
+fi
+
 # --- Two processes, one container --------------------------------------------
 #
 # From here the shell stays as PID 1 and supervises, which is a job worth doing properly

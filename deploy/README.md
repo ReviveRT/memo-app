@@ -24,6 +24,13 @@ Push this repository to GitHub, then point Render at it:
 thing to type is a Groq API key — and even that is optional on the first pass. Everything
 below is either the reasoning behind that file or the equivalent for another platform.
 
+Two things that look like failures and are not. **The blueprint creates the database and the
+web service together and does not promise an order**, so the first deploy can health-check
+before Postgres is ready; that attempt fails and the retry succeeds. The container is built to
+survive it rather than crash-loop — with no `DATABASE_URL` it serves the SPA, answers
+`/api/health` with 503 and starts no worker. And **the first request after 15 minutes idle
+takes about a minute**, because free services sleep.
+
 ## Why one container
 
 The memos on a page belong to a browser, not to an account: the API sets a long-lived
@@ -40,7 +47,7 @@ It also happens to be the shape a free tier gives you: one web service.
 | Thing | Free option | Notes |
 | --- | --- | --- |
 | Postgres 16 | Neon, Supabase, Render | `pgcrypto` is used by one migration; see below if your provider refuses `CREATE EXTENSION`. Render's free database **expires after 30 days**; Neon's does not |
-| A web service | Render, Railway, Fly.io, Koyeb | ~512 MB. The API idles near 90 MB and the worker at 41 MB; the headroom is for FrankenPHP under a burst of polling |
+| A web service | Render, Railway, Fly.io, Koyeb | 512 MB is comfortable — see the measurement below |
 | Transcription | Groq | Free key, no card. Optional — see below for what a deployment without one does |
 | Object storage | Cloudflare R2 | 10 GB, and **no egress charge** — which for audio is the whole bill. Optional; without it recordings do not survive a redeploy |
 
@@ -178,6 +185,30 @@ A supported configuration, and the one a first deploy lands in:
 The last one is not fixable from here at any price: Ask needs `ai-api`, which loads a local
 LLM. It is the one feature a free tier cannot host.
 
+One wrinkle in that voice-memo error, because it will be read and acted on: it ends with "or
+set `STT_PROVIDER=local` to transcribe on this machine", which is sound advice under compose
+and impossible here — this image has no weights, and pointing it at `local` trades a clear
+error for a confusing one. The sentence lives in `memo_ai/stt/groq.py`, where it is correct for
+the image that file was written for. Set the key instead.
+
+### A memo caught by a restart
+
+Free tiers restart a container often — every deploy, and every wake from sleep. A memo that was
+mid-flight when that happens is left `processing`, and the reaper takes it back only after
+`REAP_AFTER_SECONDS`, which is **3600**. Worst case, one memo shows "Transcribing…" for an hour.
+
+That number is deliberately not lowered here. It is derived from the slowest job the *local*
+provider could legitimately run — `memo_ai/pipeline.py`'s `job_budget_seconds`, which the worker
+recomputes at boot — and on Groq the real bound is a fraction of it. Setting it to 600 was tried:
+the worker starts and warns on every boot that "the reaper will requeue jobs that are still
+running", because the budget it checks against is 2880s at `MAX_AUDIO_SECONDS=600`. A permanent
+boot warning that looks like a misconfiguration is worse than the exposure.
+
+The lever, if an hour ever matters: lower `MAX_AUDIO_SECONDS` first — that shrinks the budget by
+four seconds for every second removed — and only then lower the lease to match. Capping a demo
+at two minutes of audio makes a 1200s lease legitimate and warning-free. The window itself is
+about two seconds wide per memo on Groq, which is why this is documented rather than fixed.
+
 ### If the worker refuses to start
 
 The container exits and takes the web server with it, so the platform shows a crash loop with
@@ -215,6 +246,23 @@ queue is safe — claims are atomic — but on a demo it doubles the polling for
 neither that image nor the ~2.4 GB per replica it needs at runtime will fit in a free tier.
 See `ai/requirements-hosted.txt` for what was left out of the Python install and why each is
 safe to drop.
+
+### What it costs to run
+
+Measured with the container capped at `--memory 512m`, which is what Render's free tier gives:
+
+| | |
+| --- | --- |
+| Idle, both processes up | **58 MB** |
+| Peak under 300 mixed requests, 30 concurrent | **103 MB** |
+
+All 101 memos in that run reached `ready` and `/api/health` still answered 200 at the peak. So
+512 MB is not tight — it is about five times what this needs. An earlier revision of this file
+put the API alone near 90 MB, which was a guess and too high for the pair of them together.
+
+The constraint on a free tier is CPU rather than memory: Render's free plan is 0.1 vCPU, and
+transcription is Groq's problem rather than this container's, but `ffmpeg` normalizing a
+recording is not. A long memo takes noticeably longer to normalize here than it does locally.
 
 ### What the worker costs this image
 
