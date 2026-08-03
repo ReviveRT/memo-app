@@ -137,6 +137,10 @@ _SEARCH = f"""
            hits.title,
            hits.created_at,
            length(btrim(regexp_replace(hits.transcript, '\\s+', ' ', 'g'))) AS transcript_chars,
+           -- Selected alongside the headline so that a memo small enough to quote in
+           -- full is quoted from the source instead of reassembled. `_evidence` has
+           -- the defect that makes this necessary.
+           btrim(regexp_replace(hits.transcript, '\\s+', ' ', 'g')) AS transcript,
            ts_headline('{CONFIG}', hits.transcript, q.query, %(headline)s) AS excerpt
       FROM hits, q
      ORDER BY hits.rank DESC, hits.created_at DESC
@@ -254,7 +258,7 @@ def _terms(connection: psycopg.Connection, question: str) -> tuple[str, ...]:
 
 
 def _source(ref: int, row: dict, memo_chars: int) -> Source:
-    excerpt = _excerpt(row["excerpt"], memo_chars)
+    excerpt = _evidence(row, memo_chars)
 
     return Source(
         ref=ref,
@@ -270,6 +274,49 @@ def _source(ref: int, row: dict, memo_chars: int) -> Source:
         # the memo whether or not this function then shortened it further.
         truncated=len(excerpt) < row["transcript_chars"],
     )
+
+
+def _evidence(row: dict, limit: int) -> str:
+    """
+    What the model is shown for one memo: the transcript itself when it fits, and
+    ``ts_headline``'s selection only when it does not.
+
+    **``ts_headline`` does not return a substring of its input.** It reassembles the
+    passage from the tokens Postgres' parser produced, and mixed alphanumeric
+    hyphenation does not survive that round trip. Reproduced in plain SQL, which is
+    the only reason this is stated rather than suspected::
+
+        ts_headline('english', 'Wifi password at the office is now hunter-green-42',
+                    websearch_to_tsquery('english', 'office wifi password'))
+        -> 'Wifi password at the office is now hunter-green'
+
+    ``ts_debug`` says why: ``hunter-green-42`` parses to ``hunter-green`` as one
+    ``asciihword`` and ``42`` as a separate ``uint``, and the hyphen joining them is a
+    separator the reassembly does not emit. The ``-42`` is simply gone.
+
+    That is a wrong answer rather than a short one, and it is the worst shape of wrong
+    this application has: the model answers faithfully from the evidence it was given,
+    cites the right memo, and states a password that was never recorded. Both an 8B
+    and a 70B model were checked against the same memo and both said
+    ``hunter-green`` -- because neither was ever shown the rest.
+
+    So the headline is now the fallback rather than the default. A memo that fits the
+    prompt budget needs no passage selected out of it, which makes the common case
+    both exact and cheaper -- most memos are a sentence or two, far under
+    ``ASK_MEMO_CHARS``. Only a transcript genuinely longer than the budget goes
+    through ``ts_headline``, where losing a hyphenated tail somewhere in the middle of
+    a long recording is a real but much smaller risk than losing it from a
+    one-line note.
+
+    Whitespace is already collapsed by the query, so the comparison here is against
+    the same string the caller reports as ``transcript_chars``.
+    """
+    transcript = row.get("transcript")
+
+    if isinstance(transcript, str) and len(transcript) <= limit:
+        return transcript
+
+    return _excerpt(row["excerpt"], limit)
 
 
 # What a cut excerpt ends in. Two characters, and they come out of the budget below

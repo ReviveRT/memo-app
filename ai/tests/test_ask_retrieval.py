@@ -293,3 +293,83 @@ def test_a_blank_title_is_folded_to_none():
     ).sources
 
     assert source.title is None
+
+
+# --- ts_headline is not a substring of its input -----------------------------
+
+
+def test_a_memo_that_fits_the_budget_is_quoted_from_the_transcript():
+    """
+    The regression test for a wrong answer rather than a short one.
+
+    `ts_headline` reassembles its output from parsed tokens instead of copying the
+    source, and mixed alphanumeric hyphenation does not survive: `hunter-green-42`
+    parses to `hunter-green` plus a separate `42`, and the headline comes back as
+    `hunter-green`. Reproduced in plain SQL before this was fixed, and confirmed to
+    make both an 8B and a 70B model state a password that was never recorded -- each
+    answering faithfully from evidence that had already lost the digits.
+
+    So a transcript that fits the prompt budget is used verbatim and the headline is
+    only a fallback. The assertion is on the *transcript* winning, which is the
+    behaviour that keeps the answer true.
+    """
+    fake = connection(
+        rows=[
+            row(
+                transcript="Wifi password at the office is now hunter-green-42",
+                excerpt="Wifi password at the office is now hunter-green",
+                transcript_chars=49,
+            )
+        ]
+    )
+
+    found = retrieval.retrieve(fake, "wifi password", owner_id=OWNER, top_k=3, memo_chars=1200)
+    source = found.sources[0]
+
+    assert source.excerpt == "Wifi password at the office is now hunter-green-42"
+    assert "hunter-green-42" in source.excerpt
+
+
+def test_a_memo_that_fits_is_not_reported_as_truncated():
+    """
+    The flag was wrong for the same reason the text was: `truncated` compared the
+    headline's length against the whole transcript, so a 49-character memo under a
+    1,200-character budget was reported as truncated because ts_headline had dropped
+    three characters from it.
+    """
+    fake = connection(
+        rows=[
+            row(
+                transcript="Wifi password at the office is now hunter-green-42",
+                excerpt="Wifi password at the office is now hunter-green",
+                transcript_chars=49,
+            )
+        ]
+    )
+
+    found = retrieval.retrieve(fake, "wifi password", owner_id=OWNER, top_k=3, memo_chars=1200)
+
+    assert found.sources[0].truncated is False
+
+
+def test_a_transcript_over_the_budget_still_falls_back_to_the_headline():
+    """
+    The other half: the headline exists to pick the passage around the match out of a
+    long recording, and a transcript genuinely over the budget must still use it
+    rather than being cut off at the front.
+    """
+    fake = connection(
+        rows=[
+            row(
+                transcript="x" * 400,
+                excerpt="the passage that matched",
+                transcript_chars=400,
+            )
+        ]
+    )
+
+    found = retrieval.retrieve(fake, "matched", owner_id=OWNER, top_k=3, memo_chars=40)
+    source = found.sources[0]
+
+    assert source.excerpt == "the passage that matched"
+    assert source.truncated is True
