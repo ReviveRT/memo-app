@@ -61,8 +61,6 @@ async function onSubmit() {
         long to store.
       </p>
 
-      <span v-else class="composer__hint">⌘/Ctrl + Enter</span>
-
       <button type="submit" :disabled="!canSubmit">
         {{ saving ? 'Saving…' : 'Save memo' }}
       </button>

@@ -283,7 +283,6 @@ button {
 h1,
 .recorder__hint,
 .recorder__elapsed,
-.composer__hint,
 .notice:not(.notice--error),
 .app__header button,
 .recorder__discard,
@@ -441,9 +440,13 @@ h1,
   margin-top: 0.6rem;
 }
 
-.composer__hint {
-  color: var(--muted);
-  font-size: 0.8rem;
+/*
+ * Held to the right by its own margin rather than by `space-between` alone, because most of
+ * the time it is the only child in here -- the too-long notice beside it is the exception,
+ * not the rule, and with one item `space-between` would park the button on the left.
+ */
+.composer__actions button {
+  margin-left: auto;
 }
 
 /* --- notices --------------------------------------------------------------- */
